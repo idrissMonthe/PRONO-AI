@@ -1,5 +1,5 @@
 <x-app-layout>
-    <div class="space-y-6">
+    <div class="consumer-page space-y-6">
         <!-- En-tête -->
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[#303A32]">
             <div>
@@ -17,6 +17,12 @@
 
         <!-- 1. Centre de Diagnostic & Intégrité (CDC Section 10.1 & 15.10) -->
         <div class="lab-panel p-5 space-y-4">
+                @if($oddsApiAlert)
+                    <div class="rounded-lg border border-[#D68D86]/50 bg-[#D68D86]/10 px-4 py-3 text-xs text-[#F0F0E8]">
+                        <strong class="text-[#D68D86]">The Odds API ne répond plus.</strong>
+                        La dernière synchronisation a échoué. Les anciennes cotes sont conservées et aucune nouvelle cote n’est inventée.
+                    </div>
+                @endif
                 <h2 class="text-sm font-semibold text-[#F0F0E8]">
                 État des services
             </h2>
@@ -78,7 +84,7 @@
                             <span class="text-[11px] text-[#A2ACA3] ml-2">({{ $code }})</span>
                         </div>
                         <div class="flex items-center gap-3">
-                            <span class="px-2 py-0.5 rounded text-[10px] mono font-bold {{ $prov['configured'] ? 'bg-[#88B69A]/20 text-[#88B69A]' : 'bg-[#222B25] text-[#A2ACA3]' }}">
+                            <span class="px-2 py-0.5 rounded text-[10px] mono font-bold {{ $code === 'the_odds_api' && $oddsApiAlert ? 'bg-[#D68D86]/20 text-[#D68D86]' : ($prov['configured'] ? 'bg-[#88B69A]/20 text-[#88B69A]' : 'bg-[#222B25] text-[#A2ACA3]') }}">
                                 {{ $prov['status'] }}
                             </span>
                         </div>

@@ -77,6 +77,10 @@
                     <span>Matchs</span>
                 </a>
 
+                <a href="{{ route('results') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('results') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
+                    <span class="w-4 text-center">✓</span><span>Résultats</span>
+                </a>
+
                 <a href="{{ route('comparator.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('comparator.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
                     <span>Comparateur</span>
@@ -126,6 +130,10 @@
                 <a href="{{ route('matches.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('matches.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
                     <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                     <span>Matchs</span>
+                </a>
+
+                <a href="{{ route('results') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('results') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
+                    <span class="w-4 text-center">✓</span><span>Résultats</span>
                 </a>
 
                 <a href="{{ route('comparator.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('comparator.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">

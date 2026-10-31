@@ -1,5 +1,5 @@
 <x-app-layout>
-    <div class="space-y-5">
+    <div class="consumer-page space-y-5">
         <!-- En-tête -->
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[#303A32]">
             <div>
@@ -66,6 +66,10 @@
             <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'all'])) }}"
                class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'all' ? 'bg-[#C3A16A] text-[#101513] font-bold border-[#C3A16A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#C3A16A] hover:text-[#F0F0E8]' }}">
                 <span>Tous</span>
+            </a>
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['reliable' => 1])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ request()->boolean('reliable') ? 'bg-[#88B69A] text-[#101513] font-bold border-[#88B69A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#88B69A] hover:text-[#88B69A]' }}">
+                <span>Fiables uniquement</span>
             </a>
         </div>
 

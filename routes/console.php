@@ -2,6 +2,9 @@
 
 use App\Console\Commands\GenerateParlaysCommand;
 use App\Console\Commands\SyncMatchesCommand;
+use App\Console\Commands\TrainPredictionModelCommand;
+use App\Console\Commands\GeneratePredictionsCommand;
+use App\Console\Commands\SyncOddsCommand;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -23,6 +26,27 @@ Schedule::command(SyncMatchesCommand::class)
     ->withoutOverlapping()
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-sync.log'));
+
+Schedule::command(TrainPredictionModelCommand::class)
+    ->dailyAt('06:30')
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-training.log'));
+
+Schedule::command(SyncOddsCommand::class)
+    ->everyThirtyMinutes()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-odds.log'));
+
+Schedule::command(GeneratePredictionsCommand::class)
+    ->dailyAt('06:45')
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-predictions.log'));
 
 Schedule::command(SyncMatchesCommand::class)
     ->dailyAt('12:00')

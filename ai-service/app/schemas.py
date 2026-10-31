@@ -48,6 +48,11 @@ class PredictRequest(BaseModel):
     quality_score: float = Field(default=100.0, ge=0.0, le=100.0)
     lambda_home_override: Optional[float] = Field(default=None, ge=0.1, le=8.0)
     lambda_away_override: Optional[float] = Field(default=None, ge=0.1, le=8.0)
+    market_probabilities: Optional[List[float]] = Field(default=None, min_length=3, max_length=3)
+    absence_penalty_home: float = Field(default=0.0, ge=0.0, le=0.5)
+    absence_penalty_away: float = Field(default=0.0, ge=0.0, le=0.5)
+    rest_days_home: float = Field(default=7.0, ge=0.0, le=60.0)
+    rest_days_away: float = Field(default=7.0, ge=0.0, le=60.0)
 
     @field_validator("home_team", "away_team")
     @classmethod
@@ -62,6 +67,13 @@ class PredictRequest(BaseModel):
         if (self.lambda_home_override is None) != (self.lambda_away_override is None):
             raise ValueError("Both lambda overrides must be provided together.")
         return self
+
+    @field_validator("market_probabilities")
+    @classmethod
+    def market_probabilities_must_be_valid(cls, value):
+        if value is not None and (any(p < 0 or p > 1 for p in value) or abs(sum(value) - 1.0) > 1e-3):
+            raise ValueError("Market probabilities must be three values summing to 1.")
+        return value
 
 
 class PredictResponse(BaseModel):
@@ -119,4 +131,24 @@ class EvaluateResponse(BaseModel):
     mean_brier: float
     ece: float
     details: Dict[str, Any]
+
+
+class TrainingMatch(BaseModel):
+    home_team: str = Field(min_length=1, max_length=100)
+    away_team: str = Field(min_length=1, max_length=100)
+    home_goals: int = Field(ge=0, le=30)
+    away_goals: int = Field(ge=0, le=30)
+    days_ago: float = Field(ge=0, le=3650)
+    is_neutral: bool = False
+
+
+class TrainRequest(BaseModel):
+    matches: List[TrainingMatch] = Field(min_length=5, max_length=50000)
+
+
+class TrainResponse(BaseModel):
+    trained: bool
+    match_count: int
+    team_count: int
+    training_hash: str
 

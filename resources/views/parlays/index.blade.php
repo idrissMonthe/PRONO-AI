@@ -1,6 +1,7 @@
 <x-app-layout>
     <!-- En-tête de la page Combinés -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#303A32]">
+    <div class="consumer-page space-y-6">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#303A32]">
         <div>
             <div class="flex items-center gap-2">
                 <h1 class="text-xl font-bold tracking-tight text-[#F0F0E8]">Combinés Quotidiens</h1>

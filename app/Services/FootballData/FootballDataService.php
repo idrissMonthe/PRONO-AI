@@ -206,6 +206,83 @@ class FootballDataService
     }
 
     /**
+     * Recalcule la qualité à partir des données réellement persistées.
+     * Le score ne doit pas rester figé à la valeur d'import initiale.
+     */
+    public function refreshQualityScore(FootballMatch $match): array
+    {
+        $score = 0;
+        $missing = [];
+
+        if ($match->home_team_id && $match->away_team_id) {
+            $score += 20;
+        } else {
+            $missing[] = 'teams_unidentified';
+        }
+
+        if ($match->match_date_utc) {
+            $score += 15;
+        } else {
+            $missing[] = 'date_missing';
+        }
+
+        if ($match->league_id) {
+            $score += 10;
+        } else {
+            $missing[] = 'league_missing';
+        }
+
+        if (in_array($match->data_source, ['football-data.org', 'the-odds-api'], true)) {
+            $score += 15;
+        } else {
+            $missing[] = 'source_unverified';
+        }
+
+        if (in_array($match->status, ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED'], true)) {
+            $score += 5;
+        } else {
+            $missing[] = 'status_uncertain';
+        }
+
+        $marketId = Market::where('code', '1N2')->value('id');
+        $odds = $marketId
+            ? $match->oddsSnapshots()
+                ->where('market_id', $marketId)
+                ->where('decimal_odds', '>', 1)
+                ->whereIn('selection', ['HOME', 'DRAW', 'AWAY'])
+                ->get()
+            : collect();
+        $latestOdds = $odds->sortByDesc('snapshot_time_utc')->first();
+        $completeMarket = $odds->pluck('selection')->unique()->count() === 3;
+
+        if ($completeMarket) {
+            $score += 25;
+        } else {
+            $missing[] = 'market_odds_incomplete';
+        }
+
+        if ($latestOdds?->snapshot_time_utc) {
+            $ageHours = Carbon::parse($latestOdds->snapshot_time_utc)->diffInHours(now()->utc());
+            $score += $ageHours <= 12 ? 10 : ($ageHours <= 48 ? 5 : 0);
+            if ($ageHours > 48) {
+                $missing[] = 'market_odds_stale';
+            }
+        } else {
+            $missing[] = 'market_odds_missing';
+        }
+
+        $score = max(0, min(100, $score));
+        $tier = $score >= 80 ? 'usable' : ($score >= 60 ? 'degraded' : 'insufficient');
+
+        $match->forceFill([
+            'quality_score' => $score,
+            'quality_tier' => $tier,
+        ])->saveQuietly();
+
+        return ['score' => $score, 'tier' => $tier, 'missing' => $missing];
+    }
+
+    /**
      * Ingests a match record safely with validation and quarantine.
      * Utilise external_id pour la déduplication quand disponible (prioritaire sur la clé composite).
      */
@@ -269,21 +346,25 @@ class FootballDataService
             ];
 
             // Déduplication par external_id (prioritaire) ou par clé composite
-            if ($externalId) {
-                $match = FootballMatch::updateOrCreate(
-                    ['external_id' => $externalId],
-                    $updateData
-                );
+            $match = $externalId
+                ? FootballMatch::where('external_id', $externalId)->first()
+                : null;
+
+            if (! $match) {
+                $match = FootballMatch::where([
+                    'league_id' => $league->id,
+                    'home_team_id' => $homeTeam->id,
+                    'away_team_id' => $awayTeam->id,
+                    'match_date_utc' => $matchDate,
+                ])->orderByRaw('CASE WHEN external_id IS NULL THEN 1 ELSE 0 END')->first();
+            }
+
+            if ($match) {
+                $match->fill($updateData);
+                $match->external_id = $externalId ?: $match->external_id;
+                $match->save();
             } else {
-                $match = FootballMatch::updateOrCreate(
-                    [
-                        'league_id'      => $league->id,
-                        'home_team_id'   => $homeTeam->id,
-                        'away_team_id'   => $awayTeam->id,
-                        'match_date_utc' => $matchDate,
-                    ],
-                    $updateData
-                );
+                $match = FootballMatch::create($updateData + ['external_id' => $externalId]);
             }
 
             // Ingest odds if present

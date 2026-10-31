@@ -1,5 +1,5 @@
 <x-app-layout>
-    <div class="space-y-6">
+    <div class="consumer-page space-y-6">
         <!-- En-tête -->
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[#303A32]">
             <div>
@@ -28,7 +28,7 @@
             <div class="lab-panel p-4">
                 <div class="text-[#A2ACA3] text-xs mono mb-1">Cote Moyenne Prise</div>
                 <div class="text-2xl font-extrabold mono text-[#C3A16A]">{{ $avgOdds !== null ? $avgOdds : '—' }}</div>
-                <div class="text-[10px] text-[#A2ACA3] mt-1">Pinnacle / Bookmaker de référence</div>
+                <div class="text-[10px] text-[#A2ACA3] mt-1">Source réelle The Odds API</div>
             </div>
 
             <div class="lab-panel p-4">

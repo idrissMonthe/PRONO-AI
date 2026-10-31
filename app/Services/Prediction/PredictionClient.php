@@ -119,6 +119,25 @@ class PredictionClient
         throw new RuntimeException('Le service d’évaluation est indisponible.');
     }
 
+    public function train(array $matches): array
+    {
+        if (empty($this->secret)) {
+            throw new RuntimeException('AI_SERVICE_SECRET is not configured.');
+        }
+
+        try {
+            $response = Http::timeout(30)
+                ->withHeaders(['X-Service-Secret' => $this->secret])
+                ->post("{$this->baseUrl}/v1/train", ['matches' => $matches]);
+
+            if ($response->successful()) return $response->json();
+        } catch (Exception $e) {
+            Log::error('AI Service training failed: '.$e->getMessage());
+        }
+
+        throw new RuntimeException('Le service d’entraînement est indisponible.');
+    }
+
     protected function deterministicFallbackPredict(array $payload): array
     {
         $lambdaHome = min(8.0, max(0.1, (float) ($payload['lambda_home_override'] ?? 1.45)));

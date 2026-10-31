@@ -51,7 +51,19 @@ return [
 
     'the_odds_api' => [
         'api_key' => env('THE_ODDS_API_KEY'),
-        'base_url' => 'https://api.the-odds-api.com/v4',
+        'base_url' => env('THE_ODDS_API_BASE_URL', 'https://api.the-odds-api.com/v4'),
+        'regions' => env('THE_ODDS_API_REGIONS', 'eu'),
+        'bookmakers' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('THE_ODDS_API_BOOKMAKERS', 'pinnacle,bet365,unibet'))
+        ))),
+        'sports' => [
+            'PL' => 'soccer_epl',
+            'PD' => 'soccer_spain_la_liga',
+            'BL1' => 'soccer_germany_bundesliga',
+            'SA' => 'soccer_italy_serie_a',
+            'FL1' => 'soccer_france_ligue_one',
+        ],
     ],
 
     'ai_service' => [

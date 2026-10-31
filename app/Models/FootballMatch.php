@@ -93,4 +93,9 @@ class FootballMatch extends Model
     {
         return $this->hasMany(PaperBet::class, 'match_id');
     }
+
+    public function playerAvailabilities(): HasMany
+    {
+        return $this->hasMany(PlayerAvailability::class, 'match_id');
+    }
 }

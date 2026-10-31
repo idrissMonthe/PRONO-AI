@@ -97,6 +97,14 @@ class MatchController extends Controller
             });
         }
 
+        if ($request->boolean('reliable')) {
+            $query->whereHas('officialPrediction', function ($predictionQuery) {
+                $predictionQuery->where('is_official', true)
+                    ->where('is_abstained', false)
+                    ->where('confidence_tier', 'high');
+            });
+        }
+
         // Tri
         $sort = $request->get('sort', 'date_asc');
         if ($sort === 'date_asc') {
@@ -105,7 +113,12 @@ class MatchController extends Controller
             $query->orderBy('match_date_utc', 'desc');
         }
 
-        $matches = $query->paginate(20)->withQueryString();
+        // “À venir” regroupe plusieurs journées. Avec 20 lignes, une journée
+        // peut être coupée par la pagination (ex. 4 matchs demain en page 1
+        // et le 5e en page 2), ce qui donne l'impression qu'il manque un match.
+        // On affiche donc toute la fenêtre à venir sur une page raisonnable.
+        $perPage = $dateFilter === 'upcoming' ? 50 : 20;
+        $matches = $query->paginate($perPage)->withQueryString();
         $leagues = League::where('is_active', true)->orderBy('name')->get();
 
         // Comptages en temps réel pour les pastilles d'onglets
@@ -287,7 +300,8 @@ class MatchController extends Controller
         // TAB 3: COTES RÉELLES & DÉVIGEAGE (Shin / Multiplicatif)
         // ─────────────────────────────────────────────────────────────────────
         $oddsSnapshots = $match->oddsSnapshots;
-        $activeOdds = $oddsSnapshots->where('is_closing', false);
+        $activeOdds = $oddsSnapshots->where('is_closing', false)
+            ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 10000000000 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0));
         if ($activeOdds->isEmpty()) {
             $activeOdds = $oddsSnapshots;
         }
@@ -316,21 +330,21 @@ class MatchController extends Controller
                     'bookmaker_odds' => (float) $homeOdds->decimal_odds,
                     'fair_odds'      => round(1.0 / max(0.01, $pHomeMod), 2),
                     'ev_pct'         => round(($pHomeMod * (float) $homeOdds->decimal_odds - 1.0) * 100, 2),
-                    'bookmaker'      => $homeOdds->bookmaker?->name ?? 'Pinnacle',
+                    'bookmaker'      => $homeOdds->source === 'the-odds-api' ? ($homeOdds->bookmaker?->name ?? 'The Odds API') : 'Historique local',
                     'updated_at'     => $homeOdds->snapshot_time_utc ? Carbon::parse($homeOdds->snapshot_time_utc)->timezone($tz)->format('d/m/Y H:i') : null,
                 ],
                 'draw' => [
                     'bookmaker_odds' => (float) $drawOdds->decimal_odds,
                     'fair_odds'      => round(1.0 / max(0.01, $pDrawMod), 2),
                     'ev_pct'         => round(($pDrawMod * (float) $drawOdds->decimal_odds - 1.0) * 100, 2),
-                    'bookmaker'      => $drawOdds->bookmaker?->name ?? 'Pinnacle',
+                    'bookmaker'      => $drawOdds->source === 'the-odds-api' ? ($drawOdds->bookmaker?->name ?? 'The Odds API') : 'Historique local',
                     'updated_at'     => $drawOdds->snapshot_time_utc ? Carbon::parse($drawOdds->snapshot_time_utc)->timezone($tz)->format('d/m/Y H:i') : null,
                 ],
                 'away' => [
                     'bookmaker_odds' => (float) $awayOdds->decimal_odds,
                     'fair_odds'      => round(1.0 / max(0.01, $pAwayMod), 2),
                     'ev_pct'         => round(($pAwayMod * (float) $awayOdds->decimal_odds - 1.0) * 100, 2),
-                    'bookmaker'      => $awayOdds->bookmaker?->name ?? 'Pinnacle',
+                    'bookmaker'      => $awayOdds->source === 'the-odds-api' ? ($awayOdds->bookmaker?->name ?? 'The Odds API') : 'Historique local',
                     'updated_at'     => $awayOdds->snapshot_time_utc ? Carbon::parse($awayOdds->snapshot_time_utc)->timezone($tz)->format('d/m/Y H:i') : null,
                 ],
             ];
@@ -449,6 +463,10 @@ class MatchController extends Controller
 
     public function askAssistant(Request $request, int $id, GeminiExplanationService $geminiService)
     {
+        $data = $request->validate([
+            'question' => ['nullable', 'string', 'max:1000'],
+            'mode' => ['nullable', 'in:beginner,expert'],
+        ]);
         $match = FootballMatch::with(['homeTeam', 'awayTeam', 'officialPrediction'])->findOrFail($id);
         $pred = $match->officialPrediction;
 
@@ -468,8 +486,8 @@ class MatchController extends Controller
             'quality'    => ['score' => (float) ($pred->quality_score ?? 85.0)],
         ];
 
-        $mode = $request->get('mode', 'beginner');
-        $question = $request->get('question', null);
+        $mode = $data['mode'] ?? 'beginner';
+        $question = $data['question'] ?? null;
 
         $res = $geminiService->explainMatch($context, $mode, $question);
 

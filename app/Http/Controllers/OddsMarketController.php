@@ -36,7 +36,8 @@ class OddsMarketController extends Controller
             $pred = $match->officialPrediction;
             if (!$pred || $pred->is_abstained) continue;
 
-            $odds = $match->oddsSnapshots->where('is_closing', false);
+            $odds = $match->oddsSnapshots->where('is_closing', false)
+                ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 10000000000 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0));
             $homeOdds = $odds->where('selection', 'HOME')->first();
             $drawOdds = $odds->where('selection', 'DRAW')->first();
             $awayOdds = $odds->where('selection', 'AWAY')->first();

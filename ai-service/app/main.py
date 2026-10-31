@@ -3,13 +3,15 @@ FastAPI Prediction Service for ORACLE FOOT (CDC Version 2.0)
 Listens strictly on local internal network (127.0.0.1:8001).
 """
 import hashlib
+import json
 import os
 import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
+import numpy as np
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,6 +24,7 @@ from app.core.metrics import (
     calculate_rps,
 )
 from app.core.poisson_regressor import DixonColesModel
+from app.core.elo import EloEngine
 from app.schemas import (
     DevigRequest,
     DevigResponse,
@@ -29,9 +32,13 @@ from app.schemas import (
     EvaluateResponse,
     PredictRequest,
     PredictResponse,
+    TrainRequest,
+    TrainResponse,
 )
+from app.core.poisson_regressor import MatchData
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+MODEL_STATE_PATH = Path(os.getenv("MODEL_STATE_PATH", "/app/data/dixon_coles_model.json"))
 
 app = FastAPI(
     title="ORACLE FOOT Predictive API",
@@ -51,6 +58,48 @@ app.add_middleware(
 
 # Active internal model instance
 champion_model = DixonColesModel(xi=0.0019, l2_reg=0.01, rho=-0.04)
+elo_engine = EloEngine(k_factor=20.0, default_home_adv=65.0)
+elo_ratings: Dict[str, float] = {}
+recent_form: Dict[str, List[float]] = {}
+
+
+def load_model_state() -> None:
+    if not MODEL_STATE_PATH.exists():
+        return
+    try:
+        state = json.loads(MODEL_STATE_PATH.read_text(encoding="utf-8"))
+        champion_model.teams = state["teams"]
+        champion_model.team_indices = {name: index for index, name in enumerate(champion_model.teams)}
+        champion_model.mu = float(state["mu"])
+        champion_model.home_adv = float(state["home_adv"])
+        champion_model.attack_strengths = np.array(state["attack_strengths"], dtype=float)
+        champion_model.defense_strengths = np.array(state["defense_strengths"], dtype=float)
+        champion_model.training_hash = state.get("training_hash", "")
+        champion_model.is_fitted = bool(state.get("is_fitted", False))
+        elo_ratings.clear()
+        elo_ratings.update({k: float(v) for k, v in state.get("elo_ratings", {}).items()})
+        recent_form.clear()
+        recent_form.update({k: [float(x) for x in v] for k, v in state.get("recent_form", {}).items()})
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        champion_model.is_fitted = False
+
+
+def save_model_state() -> None:
+    MODEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_STATE_PATH.write_text(json.dumps({
+        "teams": champion_model.teams,
+        "mu": champion_model.mu,
+        "home_adv": champion_model.home_adv,
+        "attack_strengths": champion_model.attack_strengths.tolist(),
+        "defense_strengths": champion_model.defense_strengths.tolist(),
+        "training_hash": champion_model.training_hash,
+        "is_fitted": champion_model.is_fitted,
+        "elo_ratings": elo_ratings,
+        "recent_form": recent_form,
+    }), encoding="utf-8")
+
+
+load_model_state()
 
 def require_internal_secret(x_service_secret: Optional[str] = Header(default=None)) -> None:
     expected_secret = os.getenv("AI_SERVICE_SECRET")
@@ -70,8 +119,8 @@ def ready():
     return {
         "status": "ready" if champion_model.is_fitted else "degraded",
         "model_loaded": champion_model.is_fitted,
-        "model_version": "M3_DIXON_COLES_v2.0" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
-        "family": "pure",
+        "model_version": "M3_DIXON_COLES_v2.1_CALIBRATED" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+        "family": "hybrid",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -96,6 +145,49 @@ def model_info():
     }
 
 
+@app.post("/v1/train", response_model=TrainResponse, dependencies=[Depends(require_internal_secret)])
+def train(req: TrainRequest):
+    training_rows = [
+        MatchData(
+            home_team=item.home_team,
+            away_team=item.away_team,
+            home_goals=item.home_goals,
+            away_goals=item.away_goals,
+            days_ago=item.days_ago,
+            is_neutral=item.is_neutral,
+        )
+        for item in req.matches
+    ]
+    champion_model.fit(training_rows)
+    elo_ratings.clear()
+    recent_form.clear()
+    # Rebuild signals chronologically so no future result leaks into an earlier rating.
+    for item in sorted(training_rows, key=lambda row: row.days_ago, reverse=True):
+        home_rating = elo_ratings.get(item.home_team, elo_engine.default_elo)
+        away_rating = elo_ratings.get(item.away_team, elo_engine.default_elo)
+        new_home, new_away = elo_engine.update_ratings(
+            home_rating, away_rating, item.home_goals, item.away_goals, item.is_neutral
+        )
+        elo_ratings[item.home_team] = new_home
+        elo_ratings[item.away_team] = new_away
+        home_points = 3.0 if item.home_goals > item.away_goals else (1.0 if item.home_goals == item.away_goals else 0.0)
+        away_points = 3.0 if item.away_goals > item.home_goals else (1.0 if item.home_goals == item.away_goals else 0.0)
+        recent_form.setdefault(item.home_team, []).append(home_points)
+        recent_form.setdefault(item.away_team, []).append(away_points)
+    for team in recent_form:
+        recent_form[team] = recent_form[team][-5:]
+    champion_model.training_hash = hashlib.sha256(
+        json.dumps([item.model_dump() for item in req.matches], sort_keys=True).encode('utf-8')
+    ).hexdigest()
+    save_model_state()
+    return {
+        "trained": champion_model.is_fitted,
+        "match_count": len(training_rows),
+        "team_count": len(champion_model.teams),
+        "training_hash": champion_model.training_hash,
+    }
+
+
 @app.post("/v1/predict", response_model=PredictResponse, dependencies=[Depends(require_internal_secret)])
 def predict(req: PredictRequest):
     t0 = time.perf_counter()
@@ -110,6 +202,18 @@ def predict(req: PredictRequest):
             req.home_team, req.away_team, req.is_neutral_ground
         )
 
+    # Availability and schedule adjustments are applied only when sourced data exists.
+    if req.absence_penalty_home or req.absence_penalty_away:
+        lh *= max(0.70, 1.0 - req.absence_penalty_home)
+        la *= max(0.70, 1.0 - req.absence_penalty_away)
+        warnings.append("availability_adjustment_applied")
+    if req.rest_days_home < 3 or req.rest_days_away < 3:
+        if req.rest_days_home < 3:
+            lh *= 0.95
+        if req.rest_days_away < 3:
+            la *= 0.95
+        warnings.append("short_rest_adjustment_applied")
+
     # Compute score matrix
     matrix, residual_mass, n = compute_score_matrix(lh, la, champion_model.rho)
     markets = extract_match_markets_from_matrix(matrix)
@@ -117,6 +221,33 @@ def predict(req: PredictRequest):
     p_home = markets["1N2"]["home"]
     p_draw = markets["1N2"]["draw"]
     p_away = markets["1N2"]["away"]
+
+    # Blend only with a complete, already de-vigged market snapshot.
+    # The model remains dominant; the market is a controlled sanity check.
+    model_probs = [p_home, p_draw, p_away]
+    elo_probs = elo_engine.predict_1n2(
+        elo_ratings.get(req.home_team, elo_engine.default_elo),
+        elo_ratings.get(req.away_team, elo_engine.default_elo),
+        req.is_neutral_ground,
+    )
+    home_form = np.mean(recent_form.get(req.home_team, [1.0])) / 3.0
+    away_form = np.mean(recent_form.get(req.away_team, [1.0])) / 3.0
+    form_delta = float(np.clip(home_form - away_form, -1.0, 1.0))
+    form_home = float(np.clip(0.33 + 0.18 * form_delta, 0.10, 0.70))
+    form_away = float(np.clip(0.33 - 0.18 * form_delta, 0.10, 0.70))
+    form_probs = [form_home, max(0.10, 1.0 - form_home - form_away), form_away]
+    p_home = round(0.65 * model_probs[0] + 0.25 * elo_probs["home"] + 0.10 * form_probs[0], 4)
+    p_draw = round(0.65 * model_probs[1] + 0.25 * elo_probs["draw"] + 0.10 * form_probs[1], 4)
+    p_away = round(0.65 * model_probs[2] + 0.25 * elo_probs["away"] + 0.10 * form_probs[2], 4)
+    warnings.append("elo_form_ensemble_applied")
+    if req.market_probabilities is not None:
+        p_home = round(0.75 * p_home + 0.25 * req.market_probabilities[0], 4)
+        p_draw = round(0.75 * p_draw + 0.25 * req.market_probabilities[1], 4)
+        p_away = round(0.75 * p_away + 0.25 * req.market_probabilities[2], 4)
+        total = p_home + p_draw + p_away
+        p_home, p_draw, p_away = [round(p / total, 4) for p in (p_home, p_draw, p_away)]
+        markets["1N2"].update({"home": p_home, "draw": p_draw, "away": p_away})
+        warnings.append("market_sanity_blend_applied")
 
     # Credibility intervals
     unc_scale = max(0.02, (100.0 - req.quality_score) / 300.0 + 0.035)
@@ -129,18 +260,33 @@ def predict(req: PredictRequest):
     ci80_away = [round(max(0.01, p_away - 1.28 * unc_scale), 4), round(min(0.99, p_away + 1.28 * unc_scale), 4)]
     ci95_away = [round(max(0.01, p_away - 1.96 * unc_scale), 4), round(min(0.99, p_away + 1.96 * unc_scale), 4)]
 
-    # Quality & confidence tier
+    ordered_probs = sorted([p_home, p_draw, p_away], reverse=True)
+    max_probability = ordered_probs[0]
+    probability_margin = ordered_probs[0] - ordered_probs[1]
+    has_unknown_team = any(w.startswith("unknown_or_promoted_team:") for w in warnings)
+
+    # Conservative selection policy: official picks must clear all gates.
     if not champion_model.is_fitted:
         quality_tier = "insufficient"
         confidence_tier = "low"
         is_abstained = True
         warnings.append("model_not_trained_prediction_abstained")
-    elif req.quality_score < 40.0:
+    elif req.quality_score < 90.0:
         quality_tier = "insufficient"
         confidence_tier = "low"
         is_abstained = True
-        warnings.append("abstain_due_to_insufficient_quality")
-    elif req.quality_score < 70.0:
+        warnings.append("abstain_due_to_unverified_data_quality")
+    elif has_unknown_team:
+        quality_tier = "degraded"
+        confidence_tier = "low"
+        is_abstained = True
+        warnings.append("abstain_due_to_unknown_team")
+    elif max_probability < 0.60 or probability_margin < 0.18:
+        quality_tier = "degraded"
+        confidence_tier = "low"
+        is_abstained = True
+        warnings.append("abstain_due_to_low_separation")
+    elif max_probability < 0.65 or probability_margin < 0.25:
         quality_tier = "degraded"
         confidence_tier = "medium"
         is_abstained = False
@@ -158,9 +304,9 @@ def predict(req: PredictRequest):
     return {
         "match_id": req.match_id or "match-sim",
         "model": {
-            "version": "M3_DIXON_COLES_v2.0" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+            "version": "M3_DIXON_COLES_v2.1_CALIBRATED" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
             "family": "pure",
-            "calibration_version": "calib_v1_beta",
+            "calibration_version": "calib_v2_market_blend_gated",
         },
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "data_snapshot_hash": snapshot_hash,

@@ -92,7 +92,8 @@ class ParlayService
             $pred = $match->officialPrediction;
             if (! $pred) continue;
 
-            $oddsList = $match->oddsSnapshots->where('is_closing', false);
+            $oddsList = $match->oddsSnapshots->where('is_closing', false)
+                ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 10000000000 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0));
             if ($oddsList->isEmpty()) {
                 $oddsList = $match->oddsSnapshots;
             }
@@ -146,7 +147,9 @@ class ParlayService
                     'model_prob_pct'  => round($best['prob'] * 100, 1),
                     'model_version'   => $pred->modelVersion->version_name ?? 'M3_DIXON_COLES',
                     'odds'            => round($decimalOdds, 2),
-                    'odds_source'     => $best['odds_obj']->bookmaker->name ?? 'Pinnacle',
+                    'odds_source'     => $best['odds_obj']->source === 'the-odds-api'
+                        ? ($best['odds_obj']->bookmaker->name ?? 'The Odds API')
+                        : 'Historique local',
                     'odds_updated_at' => $best['odds_obj']->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
                     'fair_odds'       => round(1.0 / max(0.01, $best['prob']), 2),
                     'ev_pct'          => round($ev * 100, 2),

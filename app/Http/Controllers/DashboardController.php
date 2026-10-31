@@ -15,6 +15,32 @@ use Illuminate\Http\Request;
 
 class DashboardController extends Controller
 {
+    public function results(Request $request)
+    {
+        $data = $request->validate([
+            'league' => ['nullable', 'string', 'max:100'],
+            'date' => ['nullable', 'date_format:Y-m-d'],
+        ]);
+
+        $query = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction'])
+            ->where('status', 'FINISHED')
+            ->whereNotNull('home_score')
+            ->whereNotNull('away_score')
+            ->orderByDesc('match_date_utc');
+
+        if (!empty($data['league'])) {
+            $query->whereHas('league', fn ($q) => $q->where('name', $data['league']));
+        }
+
+        if (!empty($data['date'])) {
+            $query->whereDate('match_date_utc', $data['date']);
+        }
+
+        $results = $query->paginate(24)->withQueryString();
+
+        return view('results.index', compact('results'));
+    }
+
     public function index(
         OddsService $oddsService,
         HashChainService $hashChainService,
@@ -118,7 +144,7 @@ class DashboardController extends Controller
         $lastSync = FootballMatch::whereNotNull('last_synced_at')->max('last_synced_at');
         $lastSyncFormatted = $lastSync ? Carbon::parse($lastSync)->timezone($tz)->format('d/m/Y à H:i') : null;
 
-        return view('dashboard', compact(
+        return view('dashboard-public', compact(
             'totalMatches',
             'predictedMatches',
             'championModel',

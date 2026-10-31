@@ -1,5 +1,5 @@
 <x-app-layout>
-    <div class="space-y-6">
+    <div class="consumer-page space-y-6">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[#303A32]">
             <div>
                 <h1 class="text-xl font-bold tracking-tight text-[#F0F0E8]">Comparer deux équipes</h1>

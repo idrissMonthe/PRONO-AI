@@ -25,6 +25,10 @@ class SettingsController extends Controller
         $aiServiceOnline = $predictionClient->checkHealth();
         $aiModelLoaded = (bool) ($predictionClient->modelReadiness()['model_loaded'] ?? false);
         $geminiConfigured = $geminiService->isConfigured();
+        $oddsApiFailure = AuditEvent::where('event_type', 'ODDS_API_FAILURE')
+            ->latest('occurred_at_utc')
+            ->first();
+        $oddsApiAlert = $oddsApiFailure && $oddsApiFailure->occurred_at_utc->gt(now()->utc()->subHours(2));
 
         // Provider configs (presence only, no secret displayed per CDC 15.2)
         $providers = [
@@ -36,7 +40,9 @@ class SettingsController extends Controller
             'the_odds_api' => [
                 'name' => 'The Odds API',
                 'configured' => !empty(config('services.the_odds_api.api_key')),
-                'status' => !empty(config('services.the_odds_api.api_key')) ? 'Clé présente · connexion à tester' : 'Non configuré',
+                'status' => $oddsApiAlert
+                    ? 'Alerte : dernière synchronisation en échec'
+                    : (!empty(config('services.the_odds_api.api_key')) ? 'Actif · snapshots conservés' : 'Non configuré'),
             ],
             'google_gemini' => [
                 'name' => 'Google Gemini (Assistant IA)',
@@ -61,6 +67,7 @@ class SettingsController extends Controller
             'aiServiceOnline',
             'aiModelLoaded',
             'geminiConfigured',
+            'oddsApiAlert',
             'providers',
             'auditLogs'
         ));

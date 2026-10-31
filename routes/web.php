@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\Route;
 
 // 1. Dashboard (Aujourd'hui)
 Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
+Route::get('/results', [DashboardController::class, 'results'])->name('results');
 
 // 2. Matches & Exploration
 Route::prefix('matches')->name('matches.')->group(function () {

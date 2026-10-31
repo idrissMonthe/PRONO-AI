@@ -1,6 +1,6 @@
 <x-app-layout>
     <!-- En-tête Fiche Match (CDC Section 6.1 & 6.9) -->
-    <div class="space-y-4 pb-4 border-b border-[#303A32]">
+    <div class="consumer-page space-y-4 pb-4 border-b border-[#303A32]">
         <div class="flex flex-wrap items-center justify-between gap-3 text-xs text-[#A2ACA3]">
             <div class="flex items-center gap-2">
                 <a href="{{ route('matches.index') }}" class="hover:text-[#F0F0E8] transition-colors">← Retour au calendrier</a>

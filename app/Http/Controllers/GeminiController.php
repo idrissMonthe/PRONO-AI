@@ -95,16 +95,31 @@ class GeminiController extends Controller
      */
     public function explain(Request $request): JsonResponse
     {
-        $mode = $request->input('mode', 'beginner');
-        if (!in_array($mode, ['beginner', 'expert'])) {
-            $mode = 'beginner';
+        $data = $request->validate([
+            'match_id' => ['nullable', 'integer', 'min:1'],
+            'mode' => ['nullable', 'in:beginner,expert'],
+            'question' => ['nullable', 'string', 'max:1000'],
+            'context' => ['nullable', 'array'],
+            'home_team' => ['nullable', 'string', 'max:100'],
+            'away_team' => ['nullable', 'string', 'max:100'],
+            'xg_home' => ['nullable', 'numeric', 'between:0,8'],
+            'xg_away' => ['nullable', 'numeric', 'between:0,8'],
+            'prob_home' => ['nullable', 'numeric', 'between:0,1'],
+            'prob_draw' => ['nullable', 'numeric', 'between:0,1'],
+            'prob_away' => ['nullable', 'numeric', 'between:0,1'],
+            'quality_score' => ['nullable', 'numeric', 'between:0,100'],
+        ]);
+
+        if ($request->has('context') && strlen((string) json_encode($data['context'])) > 20000) {
+            return response()->json(['success' => false, 'error' => 'Le contexte d’analyse est trop volumineux.'], 422);
         }
 
-        $question = $request->input('question');
+        $mode = $data['mode'] ?? 'beginner';
+        $question = $data['question'] ?? null;
 
         // Cas 1 : match_id fourni
-        if ($request->filled('match_id')) {
-            $match = FootballMatch::with(['homeTeam', 'awayTeam', 'officialPrediction'])->find($request->match_id);
+        if (!empty($data['match_id'])) {
+            $match = FootballMatch::with(['homeTeam', 'awayTeam', 'officialPrediction'])->find($data['match_id']);
 
             if (!$match) {
                 return response()->json([
@@ -116,25 +131,25 @@ class GeminiController extends Controller
             $context = $this->buildContextFromMatch($match);
         }
         // Cas 2 : contexte complet passé en JSON
-        elseif ($request->has('context') && is_array($request->input('context'))) {
-            $context = $request->input('context');
+        elseif (isset($data['context']) && is_array($data['context'])) {
+            $context = $data['context'];
         }
         // Cas 3 : paramètres individuels
         else {
             $context = [
-                'home_team' => $request->input('home_team', 'Équipe A'),
-                'away_team' => $request->input('away_team', 'Équipe B'),
+                'home_team' => $data['home_team'] ?? 'Équipe A',
+                'away_team' => $data['away_team'] ?? 'Équipe B',
                 'expected_goals' => [
-                    'home' => (float)$request->input('xg_home', 1.45),
-                    'away' => (float)$request->input('xg_away', 1.10),
+                    'home' => (float)($data['xg_home'] ?? 1.45),
+                    'away' => (float)($data['xg_away'] ?? 1.10),
                 ],
                 'probabilities' => [
-                    'home' => ['p' => (float)$request->input('prob_home', 0.46)],
-                    'draw' => ['p' => (float)$request->input('prob_draw', 0.27)],
-                    'away' => ['p' => (float)$request->input('prob_away', 0.27)],
+                    'home' => ['p' => (float)($data['prob_home'] ?? 0.46)],
+                    'draw' => ['p' => (float)($data['prob_draw'] ?? 0.27)],
+                    'away' => ['p' => (float)($data['prob_away'] ?? 0.27)],
                 ],
                 'top_scores' => $request->input('top_scores', [['score' => '1-1', 'p' => 0.12]]),
-                'quality' => ['score' => (float)$request->input('quality_score', 90.0)],
+                'quality' => ['score' => (float)($data['quality_score'] ?? 90.0)],
             ];
         }
 
@@ -159,9 +174,14 @@ class GeminiController extends Controller
     {
         $request->validate([
             'question' => 'required|string|max:1000',
-            'match_id' => 'nullable',
-            'mode' => 'nullable|string',
+            'match_id' => 'nullable|integer|min:1',
+            'mode' => 'nullable|in:beginner,expert',
+            'context' => 'nullable|array',
         ]);
+
+        if ($request->has('context') && strlen((string) json_encode($request->input('context'))) > 20000) {
+            return response()->json(['success' => false, 'error' => 'Le contexte d’analyse est trop volumineux.'], 422);
+        }
 
         $question = $request->input('question');
         $mode = $request->input('mode', 'beginner');
