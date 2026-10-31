@@ -161,6 +161,22 @@
             </div>
             </div>
         </details>
+
+        <!-- Outils & Modules Techniques (Accès Arrière-Plan) -->
+        <div class="p-4 rounded bg-[#181F1B] border border-[#303A32] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div>
+                <span class="font-bold text-[#F0F0E8]">Modules Techniques & Moteur Interne</span>
+                <p class="text-[11px] text-[#A2ACA3]">Accès réservé pour l'administration des alias, l'ingestion brute et le registre des modèles.</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <a href="{{ route('data.index') }}" class="px-3 py-1.5 rounded bg-[#222B25] border border-[#303A32] hover:border-[#C3A16A] text-[#F0F0E8] mono text-[11px] transition-colors">
+                    Données & Alias
+                </a>
+                <a href="{{ route('laboratory.index') }}" class="px-3 py-1.5 rounded bg-[#222B25] border border-[#303A32] hover:border-[#C3A16A] text-[#F0F0E8] mono text-[11px] transition-colors">
+                    Laboratoire M0-M7
+                </a>
+            </div>
+        </div>
     </div>
 
     <script>

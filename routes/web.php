@@ -7,15 +7,17 @@ use App\Http\Controllers\GeminiController;
 use App\Http\Controllers\LaboratoryController;
 use App\Http\Controllers\MatchController;
 use App\Http\Controllers\OddsMarketController;
+use App\Http\Controllers\ParlayController;
 use App\Http\Controllers\SettingsController;
 use Illuminate\Support\Facades\Route;
 
-// 1. Dashboard (Vue d'ensemble)
+// 1. Dashboard (Aujourd'hui)
 Route::get('/', [DashboardController::class, 'index'])->name('dashboard');
 
 // 2. Matches & Exploration
 Route::prefix('matches')->name('matches.')->group(function () {
     Route::get('/', [MatchController::class, 'index'])->name('index');
+    Route::get('/{id}/modal-data', [MatchController::class, 'modalData'])->name('modal-data');
     Route::get('/{id}', [MatchController::class, 'show'])->name('show');
     Route::post('/{id}/ask', [MatchController::class, 'askAssistant'])->name('ask');
     Route::post('/{id}/whatif', [MatchController::class, 'simulateWhatIf'])->name('whatif');
@@ -32,7 +34,14 @@ Route::prefix('odds')->name('odds.')->group(function () {
     Route::post('/paper-bet', [OddsMarketController::class, 'recordPaperBet'])->name('paper-bet');
 });
 
-// 5. Evaluation Laboratory & Model Registry
+// 5. Combinés & Parlays Probabilistes (Section 9 & 28)
+Route::prefix('parlays')->name('parlays.')->group(function () {
+    Route::get('/', [ParlayController::class, 'index'])->name('index');
+    Route::post('/generate', [ParlayController::class, 'generate'])->name('generate');
+    Route::get('/{id}', [ParlayController::class, 'show'])->name('show');
+});
+
+// 6. Evaluation Laboratory & Model Registry
 Route::prefix('laboratory')->name('laboratory.')->group(function () {
     Route::get('/', [LaboratoryController::class, 'index'])->name('index');
     Route::post('/run-backtest', [LaboratoryController::class, 'runBacktest'])->name('run-backtest');

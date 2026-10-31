@@ -6,6 +6,7 @@ use App\Services\AIExplanation\GeminiExplanationService;
 use App\Services\FootballData\FootballDataService;
 use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
+use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
 use Illuminate\Support\ServiceProvider;
 
@@ -32,6 +33,11 @@ class AppServiceProvider extends ServiceProvider
         // Google Gemini AI explanation service
         $this->app->singleton(GeminiExplanationService::class, function ($app) {
             return new GeminiExplanationService();
+        });
+
+        // Combinés & parlays probabilistes
+        $this->app->singleton(ParlayService::class, function ($app) {
+            return new ParlayService($app->make(GeminiExplanationService::class));
         });
 
         // SHA-256 hash-chain integrity service

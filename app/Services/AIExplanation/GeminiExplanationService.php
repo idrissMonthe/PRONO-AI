@@ -18,9 +18,20 @@ class GeminiExplanationService
         $this->model = config('services.gemini.model', env('GEMINI_MODEL', 'gemini-2.5-flash'));
     }
 
+    public function getApiKey(): ?string
+    {
+        return config('services.gemini.api_key') ?: ($this->apiKey ?: env('GEMINI_API_KEY'));
+    }
+
+    public function getModel(): string
+    {
+        return config('services.gemini.model') ?: ($this->model ?: env('GEMINI_MODEL', 'gemini-2.5-flash'));
+    }
+
     public function isConfigured(): bool
     {
-        return !empty($this->apiKey) && $this->apiKey !== 'your-gemini-api-key';
+        $key = $this->getApiKey();
+        return !empty($key) && $key !== 'your-gemini-api-key';
     }
 
     public function explainMatch(
@@ -44,8 +55,11 @@ class GeminiExplanationService
         $systemInstruction = $this->buildSystemInstruction($mode);
         $prompt = $this->buildPrompt($predictionContext, $mode, $userQuestion);
 
+        $apiKey = $this->getApiKey();
+        $model = $this->getModel();
+
         // Modèles candidats en cascade en cas de saturation temporaire (503)
-        $modelsToTry = array_unique([$this->model, 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+        $modelsToTry = array_unique([$model, 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -54,7 +68,7 @@ class GeminiExplanationService
                 $response = Http::timeout(15)
                     ->withHeaders([
                         'Content-Type' => 'application/json',
-                        'x-goog-api-key' => $this->apiKey,
+                        'x-goog-api-key' => $apiKey,
                     ])
                     ->post($url, [
                         'contents' => [
@@ -261,6 +275,98 @@ class GeminiExplanationService
             . "(contre **{$pDraw}%** pour le match nul et **" . min($pHome, $pAway) . "%** pour l'adversaire).\n\n"
             . "En termes d'espérance de buts, la modélisation Poisson prévoit environ **{$xGHome}** but(s) pour {$home} et **{$xGAway}** pour {$away}. Le score le plus probable selon la matrice est **{$scoreModal}**.\n\n"
             . "> **Rappel de prudence** : Une probabilité de {$favProb}% implique que le résultat inverse ou nul survient dans plus d'un tiers des situations similaires. Les statistiques reflètent une tendance probabiliste, non une certitude sportive.";
+    }
+
+    /**
+     * Analyse et évaluation du risque d'un combiné multi-sélections (CDC Section 9 & 28).
+     */
+    public function explainParlay(array $parlayContext): array
+    {
+        if (!$this->isConfigured()) {
+            return [
+                'provider' => 'deterministic_template',
+                'model' => 'deterministic_template',
+                'text' => $this->generateDeterministicParlayExplanation($parlayContext),
+            ];
+        }
+
+        $systemInstruction = "Tu es ORACLE FOOT, un assistant probabiliste de football impartial et rigoureux. "
+            . "Tu analyses un combiné généré à partir de calculs mathématiques réels (Dixon-Coles). "
+            . "Règles strictes : "
+            . "1. Ne promets JAMAIS de gain ni de 'pari sûr' ou 'garantie'. "
+            . "2. Rappelle que le produit des probabilités diminue rapidement la probabilité conjointe. "
+            . "3. Identifie clairement la sélection qui présente la plus forte incertitude. "
+            . "4. Mentionne explicitement que les cotes sont issues de relevés réels avec leur source. "
+            . "5. Ne cite AUCUN chiffre absent du contexte JSON fourni. "
+            . "Reste concis (3 à 4 paragraphes en français professionnel et clair).";
+
+        $prompt = "Voici les données mathématiques réelles du combiné :\n"
+            . json_encode($parlayContext, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+            . "\n\nFournis une évaluation lucide et transparente du risque de ce combiné.";
+
+        $apiKey = $this->getApiKey();
+        $model = $this->getModel();
+        $modelsToTry = array_unique([$model, 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+
+        foreach ($modelsToTry as $currentModel) {
+            try {
+                $url = "https://generativelanguage.googleapis.com/v1beta/models/{$currentModel}:generateContent";
+
+                $response = Http::timeout(15)
+                    ->withHeaders([
+                        'Content-Type' => 'application/json',
+                        'x-goog-api-key' => $apiKey,
+                    ])
+                    ->post($url, [
+                        'contents' => [
+                            ['role' => 'user', 'parts' => [['text' => $prompt]]],
+                        ],
+                        'systemInstruction' => [
+                            'parts' => [['text' => $systemInstruction]],
+                        ],
+                        'generationConfig' => [
+                            'temperature' => 0.2,
+                            'maxOutputTokens' => 600,
+                            'thinkingConfig' => ['thinkingBudget' => 0],
+                        ],
+                    ]);
+
+                if ($response->successful()) {
+                    $candidates = $response->json('candidates.0.content.parts', []);
+                    $parts = array_filter($candidates, fn ($part) => empty($part['thought']));
+                    $text = trim(implode("\n", array_column($parts, 'text')));
+
+                    if (!empty($text)) {
+                        return [
+                            'provider' => 'gemini',
+                            'model' => $currentModel,
+                            'text' => $text,
+                        ];
+                    }
+                }
+            } catch (Exception $e) {
+                Log::warning("Gemini parlay explanation failed with model {$currentModel}: {$e->getMessage()}");
+            }
+        }
+
+        return [
+            'provider' => 'deterministic_template',
+            'model' => 'deterministic_template',
+            'text' => $this->generateDeterministicParlayExplanation($parlayContext),
+        ];
+    }
+
+    public function generateDeterministicParlayExplanation(array $context): string
+    {
+        $combOdds = $context['combined_odds'] ?? 2.0;
+        $combProb = round(($context['combined_prob'] ?? 0.35) * 100, 1);
+        $riskScore = $context['risk_score'] ?? 6.5;
+        $count = count($context['selections'] ?? []);
+
+        return "### Analyse Statistique du Combiné ({$count} sélections)\n\n"
+            . "Ce combiné présente une cote totale cumulée de **{$combOdds}** pour une probabilité conjointe estimée à **{$combProb}%** par le modèle Dixon-Coles (indice de risque : **{$riskScore}/10**).\n\n"
+            . "**Règle de multiplication des probabilités** : Même si chaque rencontre individuelle possède une probabilité dominante, l'accumulation de plusieurs événements indépendants divise la chance globale de réussite. À titre indicatif, une probabilité conjointe de {$combProb}% signifie que la combinaison échoue dans plus de " . round(100 - $combProb) . "% des cas théoriques.\n\n"
+            . "> **Transparence éthique** : Les cotes répertoriées proviennent des relevés des bookmakers indiqués. Ce combiné est un outil d'observation statistique pédagogique sans garantie de résultat.";
     }
 }
 

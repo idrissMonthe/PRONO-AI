@@ -3,17 +3,76 @@
         <!-- En-tête -->
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-2 border-b border-[#303A32]">
             <div>
-                <h1 class="text-xl font-bold tracking-tight text-[#F0F0E8]">Matchs</h1>
-                <span class="sr-only">Calendrier</span>
-                <p class="text-xs text-[#A2ACA3] mt-1">Calendrier et analyses disponibles.</p>
+                <h1 class="text-xl font-bold tracking-tight text-[#F0F0E8]">Matchs & Calendrier</h1>
+                <p class="text-xs text-[#A2ACA3] mt-1">
+                    Rencontres réelles synchronisées depuis football-data.org · Fuseau : <strong>Africa/Douala (WAT / UTC+1)</strong>
+                </p>
             </div>
-            <div class="mono text-xs text-[#A2ACA3]">
-                Total affiché : <strong class="text-[#F0F0E8]">{{ $matches->total() }}</strong> rencontre(s)
+            <div class="flex items-center gap-3">
+                @if($lastSyncFormatted)
+                    <div class="mono text-[11px] text-[#A2ACA3]">
+                        Dernière sync API : <strong class="text-[#F0F0E8]">{{ $lastSyncFormatted }}</strong>
+                    </div>
+                @endif
+                <div class="mono text-xs text-[#A2ACA3]">
+                    Affichés : <strong class="text-[#C3A16A]">{{ $matches->total() }}</strong> match(s)
+                </div>
             </div>
         </div>
 
-        <!-- Barre de Filtres (CDC Section 5.1 & 5.5) -->
+        <!-- Onglets Temporels par Date (Africa/Douala) -->
+        <div class="flex items-center gap-2 overflow-x-auto pb-1 text-xs mono">
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'today'])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'today' ? 'bg-[#C3A16A] text-[#101513] font-bold border-[#C3A16A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#C3A16A] hover:text-[#F0F0E8]' }}">
+                <span>Aujourd'hui</span>
+                <span class="px-1.5 py-0.2 rounded-full text-[10px] {{ $dateFilter === 'today' ? 'bg-[#101513]/20 text-[#101513]' : 'bg-[#222B25] text-[#C3A16A]' }}">
+                    {{ $counts['today'] }}
+                </span>
+            </a>
+
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'tomorrow'])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'tomorrow' ? 'bg-[#C3A16A] text-[#101513] font-bold border-[#C3A16A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#C3A16A] hover:text-[#F0F0E8]' }}">
+                <span>Demain</span>
+                <span class="px-1.5 py-0.2 rounded-full text-[10px] {{ $dateFilter === 'tomorrow' ? 'bg-[#101513]/20 text-[#101513]' : 'bg-[#222B25] text-[#A2ACA3]' }}">
+                    {{ $counts['tomorrow'] }}
+                </span>
+            </a>
+
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'upcoming'])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'upcoming' ? 'bg-[#C3A16A] text-[#101513] font-bold border-[#C3A16A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#C3A16A] hover:text-[#F0F0E8]' }}">
+                <span>À venir</span>
+                <span class="px-1.5 py-0.2 rounded-full text-[10px] {{ $dateFilter === 'upcoming' ? 'bg-[#101513]/20 text-[#101513]' : 'bg-[#222B25] text-[#A2ACA3]' }}">
+                    {{ $counts['upcoming'] }}
+                </span>
+            </a>
+
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'live'])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'live' ? 'bg-[#88B69A] text-[#101513] font-bold border-[#88B69A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#88B69A] hover:text-[#88B69A]' }}">
+                <span class="w-2 h-2 rounded-full bg-[#88B69A] animate-pulse"></span>
+                <span>En direct</span>
+                <span class="px-1.5 py-0.2 rounded-full text-[10px] {{ $dateFilter === 'live' ? 'bg-[#101513]/20 text-[#101513]' : 'bg-[#222B25] text-[#88B69A]' }}">
+                    {{ $counts['live'] }}
+                </span>
+            </a>
+
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'finished'])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'finished' ? 'bg-[#C3A16A] text-[#101513] font-bold border-[#C3A16A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#C3A16A] hover:text-[#F0F0E8]' }}">
+                <span>Terminés</span>
+                <span class="px-1.5 py-0.2 rounded-full text-[10px] {{ $dateFilter === 'finished' ? 'bg-[#101513]/20 text-[#101513]' : 'bg-[#222B25] text-[#A2ACA3]' }}">
+                    {{ $counts['finished'] }}
+                </span>
+            </a>
+
+            <a href="{{ route('matches.index', array_merge(request()->except('page'), ['date_filter' => 'all'])) }}"
+               class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ $dateFilter === 'all' ? 'bg-[#C3A16A] text-[#101513] font-bold border-[#C3A16A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#C3A16A] hover:text-[#F0F0E8]' }}">
+                <span>Tous</span>
+            </a>
+        </div>
+
+        <!-- Barre de Filtres Complémentaires -->
         <form method="GET" action="{{ route('matches.index') }}" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end pb-4 border-b border-[#303A32]">
+            <input type="hidden" name="date_filter" value="{{ $dateFilter }}">
+
             <div>
                 <label class="block text-xs font-semibold text-[#A2ACA3] uppercase tracking-wider mb-1.5">Championnat</label>
                 <select name="league_id" class="w-full bg-[#222B25] border border-[#303A32] rounded-md px-3 py-2 text-xs text-[#F0F0E8] focus:border-[#C3A16A] focus:outline-none">
@@ -27,95 +86,108 @@
             </div>
 
             <div>
-                <label class="block text-xs font-semibold text-[#A2ACA3] uppercase tracking-wider mb-1.5">Statut</label>
-                <select name="status" class="w-full bg-[#222B25] border border-[#303A32] rounded-md px-3 py-2 text-xs text-[#F0F0E8] focus:border-[#C3A16A] focus:outline-none">
-                    <option value="">Tous les statuts</option>
-                    <option value="SCHEDULED" {{ request('status') === 'SCHEDULED' ? 'selected' : '' }}>À venir (SCHEDULED)</option>
-                    <option value="FINISHED" {{ request('status') === 'FINISHED' ? 'selected' : '' }}>Terminés (FINISHED)</option>
-                </select>
+                <label class="block text-xs font-semibold text-[#A2ACA3] uppercase tracking-wider mb-1.5">Recherche Équipe</label>
+                <input type="text" name="search" value="{{ request('search') }}" placeholder="Ex: Arsenal, Real Madrid, PSG..." class="w-full bg-[#222B25] border border-[#303A32] rounded-md px-3 py-2 text-xs text-[#F0F0E8] placeholder-[#A2ACA3]/50 focus:border-[#C3A16A] focus:outline-none">
             </div>
 
             <div>
-                <label class="block text-xs font-semibold text-[#A2ACA3] uppercase tracking-wider mb-1.5">Recherche Équipe</label>
-                <input type="text" name="search" value="{{ request('search') }}" placeholder="Ex: Arsenal, Real Madrid..." class="w-full bg-[#222B25] border border-[#303A32] rounded-md px-3 py-2 text-xs text-[#F0F0E8] placeholder-[#A2ACA3]/50 focus:border-[#C3A16A] focus:outline-none">
+                <label class="block text-xs font-semibold text-[#A2ACA3] uppercase tracking-wider mb-1.5">Tri chronologique</label>
+                <select name="sort" class="w-full bg-[#222B25] border border-[#303A32] rounded-md px-3 py-2 text-xs text-[#F0F0E8] focus:border-[#C3A16A] focus:outline-none">
+                    <option value="date_asc" {{ request('sort', 'date_asc') === 'date_asc' ? 'selected' : '' }}>Chronologique (croissant)</option>
+                    <option value="date_desc" {{ request('sort') === 'date_desc' ? 'selected' : '' }}>Antéchronologique (décroissant)</option>
+                </select>
             </div>
 
             <div class="flex items-center gap-2">
-                <button type="submit" class="flex-1 bg-[#C3A16A] hover:bg-[#d8b57c] text-[#101513] font-bold py-2 px-4 rounded-md text-xs transition-colors">
+                <button type="submit" class="flex-1 bg-[#C3A16A] hover:bg-[#d8b57c] text-[#101513] font-bold py-2 px-4 rounded-md text-xs transition-colors cursor-pointer">
                     Filtrer
                 </button>
-                <a href="{{ route('matches.index') }}" class="px-3 py-2 rounded-md bg-[#222B25] border border-[#303A32] text-xs text-[#A2ACA3] hover:text-[#F0F0E8] transition-colors">
+                <a href="{{ route('matches.index', ['date_filter' => $dateFilter]) }}" class="px-3 py-2 rounded-md bg-[#222B25] border border-[#303A32] text-xs text-[#A2ACA3] hover:text-[#F0F0E8] transition-colors">
                     Réinitialiser
                 </a>
             </div>
         </form>
 
-        <!-- Liste des Matchs (CDC Section 5.2) -->
+        <!-- Liste des Matchs -->
         <div class="lab-panel overflow-hidden">
+            <!-- Mobile View (Cartes cliquables) -->
             <div class="md:hidden divide-y divide-[#303A32]">
                 @forelse($matches as $m)
-                    @php $p = $m->officialPrediction; @endphp
-                    <article class="p-4 space-y-2">
+                    @php 
+                        $p = $m->officialPrediction; 
+                        $mDateWat = $m->match_date_utc->timezone('Africa/Douala');
+                    @endphp
+                    <article onclick="openMatchModal({{ $m->id }})" class="p-4 space-y-2 hover:bg-[#181F1B] cursor-pointer transition-colors">
                         <div class="flex items-center justify-between gap-3 text-[11px] text-[#A2ACA3]">
-                            <span>{{ $m->match_date_utc->translatedFormat('d M Y · H:i') }} UTC</span>
-                            <span>{{ $m->league->name }}</span>
+                            <span>{{ $mDateWat->translatedFormat('d M · H:i') }} WAT</span>
+                            <span class="text-[#C3A16A]">{{ $m->league->name }}</span>
                         </div>
-                        <div class="font-semibold text-sm text-[#F0F0E8] leading-snug">
-                            {{ $m->homeTeam->name }} <span class="text-[#A2ACA3] font-normal">vs</span> {{ $m->awayTeam->name }}
+                        <div class="font-bold text-sm text-[#F0F0E8] leading-snug">
+                            {{ $m->homeTeam->name }} <span class="text-[#A2ACA3] font-normal text-xs">vs</span> {{ $m->awayTeam->name }}
                         </div>
                         <div class="flex items-center justify-between gap-3 text-xs">
                             <span class="text-[#A2ACA3]">
                                 @if($m->status === 'FINISHED')
-                                    {{ $m->home_score }} - {{ $m->away_score }}
+                                    <strong class="text-[#C3A16A]">{{ $m->home_score }} - {{ $m->away_score }}</strong>
+                                @elseif($m->status === 'IN_PLAY' || $m->status === 'PAUSED')
+                                    <span class="text-[#88B69A] font-bold animate-pulse">DIRECT {{ $m->home_score ?? 0 }}-{{ $m->away_score ?? 0 }}</span>
                                 @else
-                                    À venir
+                                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-[#222B25] text-[#A2ACA3] mono">À VENIR</span>
                                 @endif
                             </span>
                             @if($p)
-                                <span class="mono text-[#F0F0E8]" aria-label="Chances domicile, nul, extérieur">
-                                    {{ round($p->prob_home * 100) }} · {{ round($p->prob_draw * 100) }} · {{ round($p->prob_away * 100) }}%
+                                <span class="mono text-[#F0F0E8] text-xs" aria-label="Chances 1N2">
+                                    <span class="text-[#88B69A]">{{ round($p->prob_home * 100) }}%</span> · 
+                                    <span class="text-[#A2ACA3]">{{ round($p->prob_draw * 100) }}%</span> · 
+                                    <span class="text-[#D68D86]">{{ round($p->prob_away * 100) }}%</span>
                                 </span>
                             @else
-                                <span class="text-[#A2ACA3]">Analyse en attente</span>
+                                <span class="text-[#A2ACA3] text-[11px]">Analyse disponible</span>
                             @endif
                         </div>
-                        <a href="{{ route('matches.show', $m->id) }}" class="inline-flex pt-1 text-xs font-medium text-[#C3A16A]">Voir l’analyse →</a>
                     </article>
                 @empty
-                    <div class="p-6 text-center text-sm text-[#A2ACA3]">Aucun match ne correspond aux filtres.</div>
+                    <div class="p-8 text-center text-xs text-[#A2ACA3] space-y-2">
+                        <div>Aucune rencontre ne correspond au filtre sélectionné pour cette date.</div>
+                        <div class="text-[11px] text-[#A2ACA3]/70">Les rencontres sont synchronisées quotidiennement depuis l'API football-data.org.</div>
+                    </div>
                 @endforelse
             </div>
 
+            <!-- Desktop View (Tableau cliquable) -->
             <div class="hidden md:block overflow-x-auto">
                 <table class="w-full min-w-[720px] text-left text-xs">
                     <thead class="bg-[#141A17] text-[#A2ACA3] border-b border-[#303A32] uppercase tracking-wider mono text-[11px]">
                         <tr>
-                            <th class="py-3 px-4">Date / Compétition</th>
+                            <th class="py-3 px-4">Date / Heure (WAT)</th>
                             <th class="py-3 px-4">Rencontre</th>
                             <th class="py-3 px-4 text-center">Statut / Score</th>
                             <th class="py-3 px-4 text-center">Probabilités 1N2</th>
-                            <th class="py-3 px-4 text-center">Score probable</th>
+                            <th class="py-3 px-4 text-center">Score Probable</th>
                             <th class="py-3 px-4 text-center">Qualité Données</th>
-                            <th class="py-3 px-4 text-right">Action</th>
+                            <th class="py-3 px-4 text-right">Analyse Détaillée</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-[#303A32]">
                         @forelse($matches as $m)
-                            @php $p = $m->officialPrediction; @endphp
-                            <tr class="hover:bg-[#181F1B]/80 transition-colors">
+                            @php 
+                                $p = $m->officialPrediction;
+                                $mDateWat = $m->match_date_utc->timezone('Africa/Douala');
+                            @endphp
+                            <tr onclick="openMatchModal({{ $m->id }})" class="hover:bg-[#181F1B]/90 transition-colors cursor-pointer group">
                                 <td class="py-3.5 px-4 text-[#A2ACA3] mono">
-                                    <div class="font-bold text-[#F0F0E8]">{{ $m->match_date_utc->translatedFormat('d M Y') }}</div>
-                                    <div class="text-[10px]">{{ $m->match_date_utc->format('H:i') }} UTC · {{ $m->league->name }}</div>
+                                    <div class="font-bold text-[#F0F0E8]">{{ $mDateWat->translatedFormat('d M Y') }}</div>
+                                    <div class="text-[10px]">{{ $mDateWat->format('H:i') }} WAT · {{ $m->league->name }}</div>
                                 </td>
                                 <td class="py-3.5 px-4">
-                                    <div class="font-bold text-sm text-[#F0F0E8] flex items-center gap-2">
+                                    <div class="font-bold text-sm text-[#F0F0E8] flex items-center gap-2 group-hover:text-[#C3A16A] transition-colors">
                                         <span>{{ $m->homeTeam->name }}</span>
                                         <span class="text-[#A2ACA3] font-normal text-xs">vs</span>
                                         <span>{{ $m->awayTeam->name }}</span>
                                     </div>
                                     @if($p)
                                         <div class="text-[10px] text-[#A2ACA3] mono mt-0.5">
-                                            Buts attendus : {{ $p->home_lambda }} - {{ $p->away_lambda }}
+                                            Buts attendus : <span class="text-[#88B69A]">{{ $p->home_lambda }}</span> - <span class="text-[#D68D86]">{{ $p->away_lambda }}</span>
                                         </div>
                                     @endif
                                 </td>
@@ -124,9 +196,13 @@
                                         <span class="mono font-extrabold text-sm px-2 py-0.5 rounded bg-[#222B25] text-[#C3A16A]">
                                             {{ $m->home_score }} - {{ $m->away_score }}
                                         </span>
+                                    @elseif($m->status === 'IN_PLAY' || $m->status === 'PAUSED')
+                                        <span class="text-[10px] px-2 py-0.5 rounded bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40 mono font-bold animate-pulse">
+                                            DIRECT {{ $m->home_score ?? 0 }}-{{ $m->away_score ?? 0 }}
+                                        </span>
                                     @else
-                                        <span class="text-[10px] px-2 py-0.5 rounded bg-[#88B69A]/15 text-[#88B69A] border border-[#88B69A]/30 mono">
-                                            PROGRAMMÉ
+                                        <span class="text-[10px] px-2 py-0.5 rounded bg-[#222B25] text-[#A2ACA3] border border-[#303A32] mono">
+                                            {{ $mDateWat->format('H:i') }}
                                         </span>
                                     @endif
                                 </td>
@@ -138,13 +214,12 @@
                                             <span class="text-[#D68D86]" title="Victoire Extérieur">{{ round($p->prob_away * 100) }}%</span>
                                         </div>
                                         @if(!empty($p->intervals_json['ci80']['home']))
-                                            <details class="text-[9px] text-[#A2ACA3] mono">
-                                                <summary class="cursor-pointer">Marge d’incertitude</summary>
-                                                <span>{{ round($p->intervals_json['ci80']['home'][0] * 100) }}% – {{ round($p->intervals_json['ci80']['home'][1] * 100) }}%</span>
-                                            </details>
+                                            <div class="text-[9px] text-[#A2ACA3]/70 mono">
+                                                CI80: {{ round($p->intervals_json['ci80']['home'][0] * 100) }}%–{{ round($p->intervals_json['ci80']['home'][1] * 100) }}%
+                                            </div>
                                         @endif
                                     @else
-                                        <span class="text-[#A2ACA3] italic">Non calculé</span>
+                                        <span class="text-[#A2ACA3] italic">Calcul automatique</span>
                                     @endif
                                 </td>
                                 <td class="py-3.5 px-4 text-center mono">
@@ -163,15 +238,18 @@
                                     </span>
                                 </td>
                                 <td class="py-3.5 px-4 text-right">
-                                    <a href="{{ route('matches.show', $m->id) }}" class="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-[#222B25] border border-[#303A32] text-xs font-medium text-[#C3A16A] hover:border-[#C3A16A] transition-colors">
+                                    <button type="button" onclick="event.stopPropagation(); openMatchModal({{ $m->id }})" class="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-[#222B25] border border-[#303A32] text-xs font-medium text-[#C3A16A] hover:border-[#C3A16A] transition-colors cursor-pointer">
                                         Analyse →
-                                    </a>
+                                    </button>
                                 </td>
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="7" class="py-8 text-center text-[#A2ACA3]">
-                                    Aucun match ne correspond aux filtres sélectionnés.
+                                <td colspan="7" class="py-12 text-center text-[#A2ACA3] space-y-2">
+                                    <div class="text-sm font-semibold text-[#F0F0E8]">Aucune rencontre disponible pour ce filtre</div>
+                                    <p class="text-xs text-[#A2ACA3]/70 max-w-md mx-auto">
+                                        Oracle Foot affiche exclusivement les données officielles des compétitions configurées sans inventer de calendrier fictif.
+                                    </p>
                                 </td>
                             </tr>
                         @endforelse
@@ -187,5 +265,7 @@
             @endif
         </div>
     </div>
-</x-app-layout>
 
+    <!-- Inclusion du Modal d'Analyse (4 Onglets) -->
+    @include('partials.match-modal')
+</x-app-layout>

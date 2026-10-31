@@ -15,6 +15,9 @@ class FootballMatch extends Model
     protected $table = 'matches';
 
     protected $fillable = [
+        'external_id',
+        'data_source',
+        'last_synced_at',
         'league_id',
         'season_id',
         'home_team_id',

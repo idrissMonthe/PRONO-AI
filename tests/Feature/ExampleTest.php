@@ -19,6 +19,11 @@ class ExampleTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        Http::fake([
+            'https://generativelanguage.googleapis.com/*' => Http::response([
+                'candidates' => [['content' => ['parts' => [['text' => 'Analyse synthétique disponible.']]]]],
+            ]),
+        ]);
         $this->seed(DatabaseSeeder::class);
         $this->seed(SampleMatchesSeeder::class);
     }

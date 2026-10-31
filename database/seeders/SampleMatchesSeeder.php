@@ -224,6 +224,8 @@ class SampleMatchesSeeder extends Seeder
                 'away_team_id' => $awayTeam->id,
                 'match_date_utc' => $md['date'],
             ], [
+                'external_id' => 'demo_' . md5($md['home'] . $md['away'] . $md['date']->toDateString()),
+                'data_source' => 'seeder_demo',
                 'status' => $md['status'],
                 'home_score' => $md['home_score'],
                 'away_score' => $md['away_score'],

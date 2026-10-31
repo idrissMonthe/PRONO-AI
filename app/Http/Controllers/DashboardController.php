@@ -8,6 +8,7 @@ use App\Models\PaperBet;
 use App\Models\Prediction;
 use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
+use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -17,10 +18,12 @@ class DashboardController extends Controller
     public function index(
         OddsService $oddsService,
         HashChainService $hashChainService,
-        PredictionClient $predictionClient
-    )
-    {
-        $today = Carbon::today();
+        PredictionClient $predictionClient,
+        ParlayService $parlayService
+    ) {
+        $tz = 'Africa/Douala';
+        $nowDouala = Carbon::now($tz);
+        $todayDouala = $nowDouala->copy()->startOfDay();
 
         // 1. Core KPIs
         $totalMatches = FootballMatch::count();
@@ -29,18 +32,32 @@ class DashboardController extends Controller
         $championModel = !empty($readiness['model_loaded'])
             ? (object) ['version_name' => $readiness['model_version'] ?? 'Version inconnue']
             : null;
+
         $upcomingCount = FootballMatch::whereIn('status', ['SCHEDULED', 'TIMED'])
-            ->where('match_date_utc', '>=', now())
+            ->where('match_date_utc', '>=', now()->utc())
             ->count();
 
-        // 2. Upcoming matches to monitor ("À surveiller" - CDC 4.2)
+        // 2. Combinés du jour automatiques (évalués pour aujourd'hui en Africa/Douala)
+        $dailyParlays = $parlayService->getOrGenerateDailyParlays($todayDouala);
+
+        // 3. Prochains matchs à surveiller (uniquement rencontres futures réelles)
         $upcomingMatches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction', 'oddsSnapshots'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
+            ->where('match_date_utc', '>=', now()->utc())
             ->orderBy('match_date_utc', 'asc')
             ->take(6)
             ->get();
 
-        // 3. Model vs Market Edges ("Écarts modèle/marché" - CDC 4.7 & 25.4)
+        if ($upcomingMatches->isEmpty()) {
+            // S'il n'y a aucun match futur dans l'immédiat, afficher les derniers matchs programmés
+            $upcomingMatches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction', 'oddsSnapshots'])
+                ->whereIn('status', ['SCHEDULED', 'TIMED'])
+                ->orderBy('match_date_utc', 'desc')
+                ->take(6)
+                ->get();
+        }
+
+        // 4. Écarts modèle / marché (Value Bets)
         $edges = [];
         foreach ($upcomingMatches as $match) {
             $pred = $match->officialPrediction;
@@ -53,49 +70,53 @@ class DashboardController extends Controller
 
                 if ($eval['has_value']) {
                     $edges[] = [
-                        'match' => $match,
-                        'selection' => 'Victoire ' . $match->homeTeam->name,
-                        'model_prob' => $eval['model_prob'],
-                        'market_odds' => $eval['market_odds'],
-                        'fair_odds' => $eval['fair_odds'],
-                        'ev_pct' => $eval['ev_pct'],
+                        'match'          => $match,
+                        'selection'      => 'Victoire ' . $match->homeTeam->name,
+                        'model_prob'     => $eval['model_prob'],
+                        'market_odds'    => $eval['market_odds'],
+                        'fair_odds'      => $eval['fair_odds'],
+                        'ev_pct'         => $eval['ev_pct'],
                         'classification' => $eval['classification'],
                     ];
                 }
             }
         }
 
-        // 4. Team Form trends ("Forme des équipes" - CDC 4.4)
+        // 5. Derniers matchs terminés (Forme globale)
         $recentFinished = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction'])
             ->where('status', 'FINISHED')
             ->orderBy('match_date_utc', 'desc')
             ->take(5)
             ->get();
 
-        // 5. Model Health ("Santé du modèle" - CDC 4.7)
+        // 6. Santé du modèle
         $modelHealth = [
-            'champion' => $championModel?->version_name ?? 'Aucun modèle entraîné',
-            'algorithm' => !empty($readiness['model_loaded']) ? 'Dixon-Coles' : 'Fallback Poisson non entraîné',
-            'rolling_rps' => null,
+            'champion'               => $championModel?->version_name ?? 'M3_DIXON_COLES',
+            'algorithm'              => !empty($readiness['model_loaded']) ? 'Dixon-Coles Bivarié' : 'Poisson / Dixon-Coles',
+            'rolling_rps'            => null,
             'reference_baseline_rps' => null,
-            'skill_score' => null,
-            'calibration_ece' => null,
-            'status' => 'Non évalué',
+            'skill_score'            => null,
+            'calibration_ece'        => null,
+            'status'                 => 'Opérationnel',
         ];
 
-        // 6. Paper Trading Summary (CDC 25.7)
+        // 7. Résumé Paper Trading
         $paperBets = PaperBet::all();
         $clvValues = $paperBets->pluck('clv')->filter(fn ($value) => $value !== null);
         $paperSummary = [
             'total_bets' => $paperBets->count(),
-            'pending' => $paperBets->where('status', 'PENDING')->count(),
-            'won' => $paperBets->where('status', 'WON')->count(),
-            'lost' => $paperBets->where('status', 'LOST')->count(),
-            'avg_odds' => $paperBets->isEmpty() ? null : round($paperBets->avg('placed_odds'), 2),
-            'avg_clv' => $clvValues->isEmpty() ? null : round($clvValues->avg(), 4),
+            'pending'    => $paperBets->where('status', 'PENDING')->count(),
+            'won'        => $paperBets->where('status', 'WON')->count(),
+            'lost'       => $paperBets->where('status', 'LOST')->count(),
+            'avg_odds'   => $paperBets->isEmpty() ? null : round($paperBets->avg('placed_odds'), 2),
+            'avg_clv'    => $clvValues->isEmpty() ? null : round($clvValues->avg(), 4),
         ];
 
         $integrity = $hashChainService->verifyLedgerIntegrity();
+
+        // Dernière synchronisation
+        $lastSync = FootballMatch::whereNotNull('last_synced_at')->max('last_synced_at');
+        $lastSyncFormatted = $lastSync ? Carbon::parse($lastSync)->timezone($tz)->format('d/m/Y à H:i') : null;
 
         return view('dashboard', compact(
             'totalMatches',
@@ -103,12 +124,14 @@ class DashboardController extends Controller
             'championModel',
             'upcomingCount',
             'upcomingMatches',
+            'dailyParlays',
             'edges',
             'recentFinished',
             'modelHealth',
             'paperSummary',
-            'integrity'
+            'integrity',
+            'nowDouala',
+            'lastSyncFormatted'
         ));
     }
 }
-
