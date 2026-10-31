@@ -1,0 +1,10 @@
+
+services:
+  ai-service:
+    build: .
+    container_name: pronoia-ai
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    restart: unless-stopped
