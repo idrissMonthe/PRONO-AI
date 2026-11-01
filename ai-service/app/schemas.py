@@ -146,9 +146,15 @@ class TrainRequest(BaseModel):
     matches: List[TrainingMatch] = Field(min_length=5, max_length=50000)
 
 
+class TrainedModelStatus(BaseModel):
+    trained: bool
+    item_count: int
+    observed_count: Optional[int] = None
+
+
 class TrainResponse(BaseModel):
     trained: bool
     match_count: int
     team_count: int
     training_hash: str
-
+    models: Dict[str, TrainedModelStatus]

@@ -23,7 +23,7 @@ from app.core.metrics import (
     calculate_log_loss,
     calculate_rps,
 )
-from app.core.poisson_regressor import DixonColesModel
+from app.core.poisson_regressor import DixonColesModel, MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS
 from app.core.elo import EloEngine
 from app.core.market_specialists import MarketSpecialists
 from app.schemas import (
@@ -40,6 +40,8 @@ from app.core.poisson_regressor import MatchData
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 MODEL_STATE_PATH = Path(os.getenv("MODEL_STATE_PATH", "/app/data/dixon_coles_model.json"))
+MODEL_VERSION = "M3_MARKET_SPECIALISTS_v3"
+CALIBRATION_VERSION = "calib_v5_market_backed_sparse_teams"
 
 app = FastAPI(
     title="ORACLE FOOT Predictive API",
@@ -70,12 +72,23 @@ def load_model_state() -> None:
         return
     try:
         state = json.loads(MODEL_STATE_PATH.read_text(encoding="utf-8"))
+        team_match_counts = state.get("team_match_counts")
+        if (
+            state.get("model_version") != MODEL_VERSION
+            or
+            state.get("team_strength_min_matches") != MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS
+            or not isinstance(team_match_counts, dict)
+            or not team_match_counts
+        ):
+            champion_model.is_fitted = False
+            return
         champion_model.teams = state["teams"]
         champion_model.team_indices = {name: index for index, name in enumerate(champion_model.teams)}
         champion_model.mu = float(state["mu"])
         champion_model.home_adv = float(state["home_adv"])
         champion_model.attack_strengths = np.array(state["attack_strengths"], dtype=float)
         champion_model.defense_strengths = np.array(state["defense_strengths"], dtype=float)
+        champion_model.team_match_counts = {team: int(count) for team, count in team_match_counts.items()}
         champion_model.training_hash = state.get("training_hash", "")
         champion_model.is_fitted = bool(state.get("is_fitted", False))
         elo_ratings.clear()
@@ -91,10 +104,13 @@ def save_model_state() -> None:
     MODEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     MODEL_STATE_PATH.write_text(json.dumps({
         "teams": champion_model.teams,
+        "model_version": MODEL_VERSION,
         "mu": champion_model.mu,
         "home_adv": champion_model.home_adv,
         "attack_strengths": champion_model.attack_strengths.tolist(),
         "defense_strengths": champion_model.defense_strengths.tolist(),
+        "team_match_counts": champion_model.team_match_counts,
+        "team_strength_min_matches": MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS,
         "training_hash": champion_model.training_hash,
         "is_fitted": champion_model.is_fitted,
         "elo_ratings": elo_ratings,
@@ -123,7 +139,7 @@ def ready():
     return {
         "status": "ready" if champion_model.is_fitted else "degraded",
         "model_loaded": champion_model.is_fitted,
-        "model_version": "M3_MARKET_SPECIALISTS_v1" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+        "model_version": MODEL_VERSION if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
         "family": "hybrid",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -132,7 +148,7 @@ def ready():
 @app.get("/v1/model/info", dependencies=[Depends(require_internal_secret)])
 def model_info():
     return {
-            "version": "M3_MARKET_SPECIALISTS_v1" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+            "version": MODEL_VERSION if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
         "model_loaded": champion_model.is_fitted,
         "family": "pure",
         "algorithm": "Dixon-Coles Bivariate Poisson with Time Decay and Low-Score Tau Correction",
@@ -188,8 +204,23 @@ def train(req: TrainRequest):
     return {
         "trained": champion_model.is_fitted,
         "match_count": len(training_rows),
-        "team_count": len(champion_model.teams),
+        "team_count": len(champion_model.team_match_counts),
         "training_hash": champion_model.training_hash,
+        "models": {
+            "dixon_coles": {
+                "trained": champion_model.is_fitted,
+                "item_count": len(champion_model.teams),
+                "observed_count": len(champion_model.team_match_counts),
+            },
+            "elo": {
+                "trained": len(elo_ratings) >= 2,
+                "item_count": len(elo_ratings),
+            },
+            "market_specialists": {
+                "trained": market_specialists.is_fitted,
+                "item_count": market_specialists.sample_count,
+            },
+        },
     }
 
 
@@ -231,6 +262,7 @@ def predict(req: PredictRequest):
         "totals": goals_markets["totals"],
         "btts": btts_markets["btts"],
         "combos": goals_markets["combos"],
+        "goal_margin": goals_markets["goal_margin"],
         "top_scores": exact_markets["top_scores"],
         "other_scores_mass": exact_markets["other_scores_mass"],
     }
@@ -258,14 +290,21 @@ def predict(req: PredictRequest):
     p_draw = round(0.65 * model_probs[1] + 0.25 * elo_probs["draw"] + 0.10 * form_probs[1], 4)
     p_away = round(0.65 * model_probs[2] + 0.25 * elo_probs["away"] + 0.10 * form_probs[2], 4)
     warnings.append("elo_form_ensemble_applied")
+    has_unknown_team = any(w.startswith("unknown_or_promoted_team:") for w in warnings)
+    has_low_sample_team = any(w.startswith("low_sample_team:") for w in warnings)
+    has_sparse_team_history = has_unknown_team or has_low_sample_team
     if req.market_probabilities is not None:
-        p_home = round(0.75 * p_home + 0.25 * req.market_probabilities[0], 4)
-        p_draw = round(0.75 * p_draw + 0.25 * req.market_probabilities[1], 4)
-        p_away = round(0.75 * p_away + 0.25 * req.market_probabilities[2], 4)
+        market_weight = 0.60 if has_sparse_team_history else 0.25
+        model_weight = 1.0 - market_weight
+        p_home = round(model_weight * p_home + market_weight * req.market_probabilities[0], 4)
+        p_draw = round(model_weight * p_draw + market_weight * req.market_probabilities[1], 4)
+        p_away = round(model_weight * p_away + market_weight * req.market_probabilities[2], 4)
         total = p_home + p_draw + p_away
         p_home, p_draw, p_away = [round(p / total, 4) for p in (p_home, p_draw, p_away)]
         markets["1N2"].update({"home": p_home, "draw": p_draw, "away": p_away})
         warnings.append("market_sanity_blend_applied")
+        if has_sparse_team_history:
+            warnings.append("market_weight_increased_due_to_sparse_history")
 
     # Credibility intervals
     unc_scale = max(0.02, (100.0 - req.quality_score) / 300.0 + 0.035)
@@ -281,7 +320,6 @@ def predict(req: PredictRequest):
     ordered_probs = sorted([p_home, p_draw, p_away], reverse=True)
     max_probability = ordered_probs[0]
     probability_margin = ordered_probs[0] - ordered_probs[1]
-    has_unknown_team = any(w.startswith("unknown_or_promoted_team:") for w in warnings)
 
     # Conservative selection policy: official picks must clear all gates.
     if not champion_model.is_fitted:
@@ -294,11 +332,27 @@ def predict(req: PredictRequest):
         confidence_tier = "low"
         is_abstained = True
         warnings.append("abstain_due_to_unverified_data_quality")
-    elif has_unknown_team:
+    elif has_sparse_team_history and req.market_probabilities is None:
         quality_tier = "degraded"
         confidence_tier = "low"
         is_abstained = True
-        warnings.append("abstain_due_to_unknown_team")
+        warnings.append("abstain_due_to_insufficient_team_history_without_market")
+    elif "expected_goals_clamped" in warnings:
+        quality_tier = "insufficient"
+        confidence_tier = "low"
+        is_abstained = True
+        warnings.append("abstain_due_to_extreme_expected_goals")
+    elif has_sparse_team_history:
+        if max_probability < 0.60 or probability_margin < 0.18:
+            quality_tier = "degraded"
+            confidence_tier = "low"
+            is_abstained = True
+            warnings.append("abstain_due_to_low_market_backed_separation")
+        else:
+            quality_tier = "degraded"
+            confidence_tier = "medium"
+            is_abstained = False
+            warnings.append("market_backed_prediction_with_limited_team_history")
     elif max_probability < 0.60 or probability_margin < 0.18:
         quality_tier = "degraded"
         confidence_tier = "low"
@@ -322,9 +376,9 @@ def predict(req: PredictRequest):
     return {
         "match_id": req.match_id or "match-sim",
         "model": {
-            "version": "M3_MARKET_SPECIALISTS_v1" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+            "version": MODEL_VERSION if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
             "family": "pure",
-            "calibration_version": "calib_v3_market_specialists",
+            "calibration_version": CALIBRATION_VERSION,
         },
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "data_snapshot_hash": snapshot_hash,
@@ -408,4 +462,3 @@ def evaluate_predictions(req: EvaluateRequest):
             "max_rps": round(float(max(rps_list)), 5),
         },
     }
-

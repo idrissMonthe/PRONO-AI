@@ -2,7 +2,10 @@
 
 namespace App\Services\Odds;
 
+use App\Models\OddsSnapshot;
 use App\Services\Prediction\PredictionClient;
+use Illuminate\Support\Collection;
+use InvalidArgumentException;
 
 class OddsService
 {
@@ -19,6 +22,39 @@ class OddsService
     public function removeMargin(array $decimalOdds, string $method = 'shin'): array
     {
         return $this->predictionClient->devig($decimalOdds, $method);
+    }
+
+    public function latestComplete1N2Set(Collection $snapshots, int $marketId): ?Collection
+    {
+        return $snapshots
+            ->where('market_id', $marketId)
+            ->where('is_closing', false)
+            ->groupBy('bookmaker_id')
+            ->flatMap(fn (Collection $bookmakerSnapshots) => $bookmakerSnapshots
+                ->groupBy(fn (OddsSnapshot $snapshot): int => $snapshot->snapshot_time_utc->timestamp)
+                ->map(function (Collection $set): ?Collection {
+                    $bySelection = $set->keyBy('selection');
+                    if (! collect(['HOME', 'DRAW', 'AWAY'])->every(fn (string $selection): bool => $bySelection->has($selection))) {
+                        return null;
+                    }
+
+                    return $bySelection;
+                })
+                ->filter())
+            ->sortByDesc(fn (Collection $set): int => $set->first()->snapshot_time_utc->timestamp)
+            ->first();
+    }
+
+    public function proportionalProbabilities(array $decimalOdds): array
+    {
+        if (count($decimalOdds) !== 3 || collect($decimalOdds)->contains(fn ($odds) => ! is_numeric($odds) || (float) $odds <= 1.0)) {
+            throw new InvalidArgumentException('Three valid decimal odds greater than 1 are required.');
+        }
+
+        $inverseOdds = array_map(fn ($odds): float => 1.0 / (float) $odds, $decimalOdds);
+        $inverseOddsTotal = array_sum($inverseOdds);
+
+        return array_map(fn (float $inverseOdds): float => $inverseOdds / $inverseOddsTotal, $inverseOdds);
     }
 
     /**
@@ -96,4 +132,3 @@ class OddsService
         ];
     }
 }
-

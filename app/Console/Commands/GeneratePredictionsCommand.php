@@ -3,9 +3,11 @@
 namespace App\Console\Commands;
 
 use App\Models\FootballMatch;
+use App\Models\Market;
 use App\Models\ModelVersion;
 use App\Models\Prediction;
 use App\Services\Integrity\HashChainService;
+use App\Services\Odds\OddsService;
 use App\Services\Prediction\PredictionClient;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -17,36 +19,52 @@ class GeneratePredictionsCommand extends Command
     protected $signature = 'oracle:generate-predictions {--limit=100 : Nombre maximal de matchs à analyser}';
     protected $description = 'Génère les prédictions officielles des prochains matchs.';
 
-    public function handle(PredictionClient $client, HashChainService $chain): int
+    public function handle(PredictionClient $client, HashChainService $chain, OddsService $oddsService): int
     {
         $model = ModelVersion::firstOrCreate(
-            ['version_name' => 'M3_MARKET_SPECIALISTS_v1'],
+            ['version_name' => 'M3_MARKET_SPECIALISTS_v3'],
             ['family' => 'hybrid', 'algorithm' => 'Dixon-Coles + marché calibré', 'status' => 'champion']
         );
+
+        $readiness = $client->modelReadiness();
+        if (! ($readiness['model_loaded'] ?? false)) {
+            $this->error('Le modèle IA n’est pas entraîné ; aucune prédiction ne sera générée.');
+
+            return self::FAILURE;
+        }
 
         $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots', 'playerAvailabilities'])
             ->whereNotNull('external_id')
             ->where('data_source', 'football-data.org')
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
-            ->whereDoesntHave('predictions', fn ($q) => $q->where('is_official', true)->where('model_version_id', $model->id))
+            ->whereDoesntHave('predictions', fn ($q) => $q
+                ->where('is_official', true)
+                ->where('model_version_id', $model->id)
+                ->whereNotNull('derived_markets_json->goal_margin'))
             ->orderBy('match_date_utc')
             ->limit(max(1, min(5000, (int) $this->option('limit'))))
             ->get();
 
+        $marketId = Market::where('code', '1N2')->value('id');
         $generated = 0;
         foreach ($matches as $match) {
             try {
-                $activeOdds = $match->oddsSnapshots
-                    ->where('is_closing', false)
-                    ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 10000000000 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0));
-                $oddsBySelection = $activeOdds->keyBy('selection');
+                $latestOddsSet = $marketId
+                    ? $oddsService->latestComplete1N2Set($match->oddsSnapshots, (int) $marketId)
+                    : null;
                 $marketProbabilities = null;
-                if ($oddsBySelection->has(['HOME', 'DRAW', 'AWAY'])) {
-                    $inverse = collect(['HOME', 'DRAW', 'AWAY'])
-                        ->map(fn ($selection) => 1 / max(1.01, (float) $oddsBySelection[$selection]->decimal_odds));
-                    $sum = $inverse->sum();
-                    $marketProbabilities = $inverse->map(fn ($value) => round($value / $sum, 6))->values()->all();
+                if ($latestOddsSet) {
+                    $marketProbabilities = $oddsService->proportionalProbabilities(
+                        collect(['HOME', 'DRAW', 'AWAY'])
+                            ->map(fn ($selection) => (float) $latestOddsSet[$selection]->decimal_odds)
+                            ->all()
+                    );
+                }
+
+                if ($marketProbabilities === null && (float) ($match->quality_score ?? 0) < 90.0) {
+                    $this->line("… {$match->homeTeam->short_name} – {$match->awayTeam->short_name} : en attente d’un marché complet ou de données fiables.");
+                    continue;
                 }
 
                 $absencePenalty = ['home' => 0.0, 'away' => 0.0];
@@ -125,4 +143,5 @@ class GeneratePredictionsCommand extends Command
         $this->info("{$generated} prédiction(s) officielle(s) générée(s).");
         return self::SUCCESS;
     }
+
 }

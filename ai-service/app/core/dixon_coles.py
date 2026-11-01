@@ -157,6 +157,14 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
 
     # 7. Asian Handicap (-0.5, 0.0, +0.5, -1.0, +1.0, -1.5, +1.5)
     goal_diff_grid = i_indices - j_indices
+    goal_margin = {
+        f"home_by_{margin}_plus": round(float(np.sum(matrix[goal_diff_grid >= margin])), 4)
+        for margin in (1, 2, 3)
+    }
+    goal_margin.update({
+        f"away_by_{margin}_plus": round(float(np.sum(matrix[goal_diff_grid <= -margin])), 4)
+        for margin in (1, 2, 3)
+    })
     # Home -0.5 is same as Home win (goal_diff >= 1)
     # Home +0.5 is same as 1X (goal_diff >= 0)
     # Home 0.0 is DNB
@@ -198,6 +206,7 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
             "away": round(p_dnb_away, 4),
             "push_prob": round(p_draw, 4),
         },
+        "goal_margin": goal_margin,
         "totals": totals,
         "combos": combos,
         "btts": {
@@ -211,4 +220,3 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
         "top_scores": top_10,
         "other_scores_mass": round(residual_other_scores, 4),
     }
-

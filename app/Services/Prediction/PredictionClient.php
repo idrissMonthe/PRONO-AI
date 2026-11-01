@@ -126,7 +126,7 @@ class PredictionClient
         }
 
         try {
-            $response = Http::timeout(30)
+            $response = Http::timeout(300)
                 ->withHeaders(['X-Service-Secret' => $this->secret])
                 ->post("{$this->baseUrl}/v1/train", ['matches' => $matches]);
 
@@ -217,6 +217,25 @@ class PredictionClient
             $totals['under_' . $key] = round(1.0 - $over, 4);
         }
 
+        $goalMargin = [];
+        foreach ([1, 2, 3] as $margin) {
+            $homeByMargin = 0.0;
+            $awayByMargin = 0.0;
+            foreach ($homeScores as $homeGoals => $homeProbability) {
+                foreach ($awayScores as $awayGoals => $awayProbability) {
+                    $cell = ($homeProbability * $awayProbability) / $matrixMass;
+                    if ($homeGoals - $awayGoals >= $margin) {
+                        $homeByMargin += $cell;
+                    }
+                    if ($awayGoals - $homeGoals >= $margin) {
+                        $awayByMargin += $cell;
+                    }
+                }
+            }
+            $goalMargin['home_by_'.$margin.'_plus'] = round($homeByMargin, 4);
+            $goalMargin['away_by_'.$margin.'_plus'] = round($awayByMargin, 4);
+        }
+
         $combos = [];
         foreach ([1.5, 2.5, 3.5, 4.5] as $threshold) {
             $key = str_replace('.', '_', (string) $threshold);
@@ -280,6 +299,7 @@ class PredictionClient
                 ],
                 'totals' => $totals,
                 'combos' => $combos,
+                'goal_margin' => $goalMargin,
                 'btts' => [
                     'yes' => round($bttsMass / $matrixMass, 4),
                     'no' => round(1.0 - $bttsMass / $matrixMass, 4),
@@ -317,4 +337,3 @@ class PredictionClient
         return $probabilities;
     }
 }
-

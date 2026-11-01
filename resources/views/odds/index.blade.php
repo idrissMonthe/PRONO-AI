@@ -34,7 +34,7 @@
             <div class="lab-panel p-4">
                 <div class="text-[#A2ACA3] text-xs mono mb-1">Écart à la cote finale</div>
                 <div class="text-2xl font-extrabold mono text-[#88B69A]">{{ $avgClv !== null ? number_format($avgClv * 100, 1) . '%' : '—' }}</div>
-                <div class="text-[10px] text-[#A2ACA3] mt-1">Indicateur précoce d'avantage mathématique</div>
+                <div class="text-[10px] text-[#A2ACA3] mt-1">CLV face à la clôture sans marge</div>
             </div>
             </div>
         </details>
@@ -110,6 +110,49 @@
         </div>
 
         <details class="border-t border-[#303A32] pt-3">
+            <summary class="cursor-pointer text-sm font-semibold text-[#A2ACA3] hover:text-[#F0F0E8]">Évolution du marché sans marge ({{ count($oddsMovements) }})</summary>
+            <div class="pt-4 space-y-3">
+                <div>
+                    <h2 class="text-sm font-bold text-[#F0F0E8] uppercase tracking-wider mono">Ouverture → dernière cote</h2>
+                    <p class="text-[11px] text-[#A2ACA3] mt-1">Les probabilités de marché sont recalculées après retrait de la marge. Un écart positif signifie que le modèle estime l’issue plus probable que le marché.</p>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full min-w-[900px] text-left text-xs">
+                        <thead class="bg-[#141A17] text-[#A2ACA3] border-b border-[#303A32] mono text-[11px]">
+                            <tr>
+                                <th class="py-2.5 px-3">Rencontre</th>
+                                <th class="py-2.5 px-3">Issue · bookmaker</th>
+                                <th class="py-2.5 px-3 text-center">Cotes ouverture → actuelle</th>
+                                <th class="py-2.5 px-3 text-center">Marché sans marge</th>
+                                <th class="py-2.5 px-3 text-center">Variation</th>
+                                <th class="py-2.5 px-3 text-center">Modèle</th>
+                                <th class="py-2.5 px-3 text-center">Écart modèle / marché</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-[#303A32]">
+                            @forelse($oddsMovements as $movement)
+                                <tr class="hover:bg-[#181F1B]">
+                                    <td class="py-2.5 px-3">
+                                        <div class="font-semibold text-[#F0F0E8]">{{ $movement['match']->homeTeam->short_name }} vs {{ $movement['match']->awayTeam->short_name }}</div>
+                                        <div class="text-[10px] text-[#A2ACA3]">{{ $movement['match']->league->name ?? 'Football' }}</div>
+                                    </td>
+                                    <td class="py-2.5 px-3 text-[#F0F0E8]">{{ $movement['selection_label'] }}<small class="block text-[#A2ACA3]">{{ $movement['bookmaker'] }}</small></td>
+                                    <td class="py-2.5 px-3 text-center mono">{{ number_format($movement['opening_odds'], 2) }} → {{ number_format($movement['current_odds'], 2) }}<small class="block text-[#A2ACA3]">{{ \Carbon\Carbon::createFromTimestampUTC($movement['current_at'])->timezone('Africa/Douala')->format('d/m H:i') }} WAT</small></td>
+                                    <td class="py-2.5 px-3 text-center mono">{{ number_format($movement['opening_probability'] * 100, 1) }}% → {{ number_format($movement['current_probability'] * 100, 1) }}%</td>
+                                    <td class="py-2.5 px-3 text-center mono {{ $movement['market_movement'] <= 0 ? 'text-[#88B69A]' : 'text-[#D68D86]' }}">{{ $movement['market_movement'] > 0 ? '+' : '' }}{{ number_format($movement['market_movement'] * 100, 1) }} pts</td>
+                                    <td class="py-2.5 px-3 text-center mono">{{ number_format($movement['model_probability'] * 100, 1) }}%</td>
+                                    <td class="py-2.5 px-3 text-center mono font-bold {{ $movement['model_market_edge'] >= 0 ? 'text-[#88B69A]' : 'text-[#D68D86]' }}">{{ $movement['model_market_edge'] > 0 ? '+' : '' }}{{ number_format($movement['model_market_edge'] * 100, 1) }} pts</td>
+                                </tr>
+                            @empty
+                                <tr><td colspan="7" class="py-6 text-center text-[#A2ACA3]">Les variations apparaîtront après plusieurs relevés complets des trois issues d’un même bookmaker.</td></tr>
+                            @endforelse
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </details>
+
+        <details class="border-t border-[#303A32] pt-3">
             <summary class="cursor-pointer text-sm font-semibold text-[#A2ACA3] hover:text-[#F0F0E8]">Comparaisons détaillées ({{ count($valueOpportunities) }})</summary>
             <div class="pt-4">
             <div class="flex items-center justify-between">
@@ -131,6 +174,8 @@
                             <th class="py-2.5 px-3 text-center">Cote Marché</th>
                             <th class="py-2.5 px-3 text-center">Cote Juste Modèle</th>
                             <th class="py-2.5 px-3 text-center">Probabilité Modèle</th>
+                            <th class="py-2.5 px-3 text-center">Marché sans marge</th>
+                            <th class="py-2.5 px-3 text-center">Écart modèle</th>
                             <th class="py-2.5 px-3 text-center">Espérance (EV)</th>
                             <th class="py-2.5 px-3 text-center">Robustesse</th>
                             <th class="py-2.5 px-3 text-right">Paper Trading</th>
@@ -147,6 +192,8 @@
                                 <td class="py-3 px-3 text-center font-bold text-[#F0F0E8] mono">{{ $vo['market_odds'] }}</td>
                                 <td class="py-3 px-3 text-center text-[#88B69A] mono font-bold">{{ $vo['fair_odds'] }}</td>
                                 <td class="py-3 px-3 text-center mono">{{ round($vo['model_prob'] * 100, 1) }}%</td>
+                                <td class="py-3 px-3 text-center mono">{{ round($vo['market_prob'] * 100, 1) }}%</td>
+                                <td class="py-3 px-3 text-center mono font-bold {{ $vo['model_market_edge'] >= 0 ? 'text-[#88B69A]' : 'text-[#D68D86]' }}">{{ $vo['model_market_edge'] > 0 ? '+' : '' }}{{ number_format($vo['model_market_edge'] * 100, 1) }} pts</td>
                                 <td class="py-3 px-3 text-center font-bold text-[#88B69A] mono">+{{ $vo['ev_pct'] }}%</td>
                                 <td class="py-3 px-3 text-center">
                                     <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase {{ $vo['classification'] === 'robuste' ? 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40' : 'bg-[#C3A16A]/20 text-[#C3A16A] border border-[#C3A16A]/40' }}">
@@ -168,7 +215,7 @@
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="8" class="py-6 text-center text-[#A2ACA3]">
+                                <td colspan="10" class="py-6 text-center text-[#A2ACA3]">
                                     Aucun écart significatif détecté sur les rencontres à venir.
                                 </td>
                             </tr>
@@ -199,8 +246,9 @@
                             <th class="py-2 px-3">Match</th>
                             <th class="py-2 px-3">Sélection</th>
                             <th class="py-2 px-3 text-center">Cote Prise</th>
+                            <th class="py-2 px-3 text-center">Cote Clôture</th>
                             <th class="py-2 px-3 text-center">Mise</th>
-                            <th class="py-2 px-3 text-center">CLV</th>
+                            <th class="py-2 px-3 text-center">CLV sans marge</th>
                             <th class="py-2 px-3 text-center">Statut</th>
                             <th class="py-2 px-3 text-right">Profit Virtuel</th>
                         </tr>
@@ -212,8 +260,9 @@
                                 <td class="py-2.5 px-3 font-semibold text-[#F0F0E8]">{{ $b->match->homeTeam->short_name }} vs {{ $b->match->awayTeam->short_name }}</td>
                                 <td class="py-2.5 px-3 text-[#C3A16A]">{{ $b->selection }}</td>
                                 <td class="py-2.5 px-3 text-center font-bold text-[#F0F0E8]">{{ $b->placed_odds }}</td>
+                                <td class="py-2.5 px-3 text-center">{{ $b->closing_odds !== null ? number_format($b->closing_odds, 2) : '—' }}</td>
                                 <td class="py-2.5 px-3 text-center">{{ $b->stake_units }} u</td>
-                                <td class="py-2.5 px-3 text-center text-[#88B69A]">+{{ number_format($b->clv * 100, 1) }}%</td>
+                                <td class="py-2.5 px-3 text-center {{ $b->clv === null ? 'text-[#A2ACA3]' : ($b->clv >= 0 ? 'text-[#88B69A]' : 'text-[#D68D86]') }}">{{ $b->clv !== null ? (($b->clv > 0 ? '+' : '').number_format($b->clv * 100, 1).'%') : '—' }}</td>
                                 <td class="py-2.5 px-3 text-center">
                                     <span class="px-2 py-0.5 rounded text-[10px] font-bold {{ $b->status === 'WON' ? 'bg-[#88B69A]/20 text-[#88B69A]' : ($b->status === 'LOST' ? 'bg-[#D68D86]/20 text-[#D68D86]' : 'bg-[#222B25] text-[#A2ACA3]') }}">
                                         {{ $b->status }}
@@ -225,7 +274,7 @@
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="8" class="py-6 text-center text-[#A2ACA3]">
+                                <td colspan="9" class="py-6 text-center text-[#A2ACA3]">
                                     Aucun pronostic virtuel n'a encore été enregistré.
                                 </td>
                             </tr>
@@ -241,4 +290,3 @@
         </details>
     </div>
 </x-app-layout>
-

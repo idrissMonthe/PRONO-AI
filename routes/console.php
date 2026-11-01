@@ -7,6 +7,7 @@ use App\Console\Commands\GeneratePredictionsCommand;
 use App\Console\Commands\SyncOddsCommand;
 use App\Console\Commands\SyncLiveScoresCommand;
 use App\Console\Commands\SettlePredictionsCommand;
+use App\Console\Commands\UpdateOddsMovementCommand;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -36,6 +37,13 @@ Schedule::command(SyncOddsCommand::class)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-odds.log'));
 
+Schedule::command(UpdateOddsMovementCommand::class)
+    ->everyTenMinutes()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-odds-movement.log'));
+
 // Scores et statuts live : un appel par minute, côté serveur.
 Schedule::command(SyncLiveScoresCommand::class)
     ->everyMinute()
@@ -51,7 +59,7 @@ Schedule::command(SettlePredictionsCommand::class)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-settlement.log'));
 
-// Réentraînement en fin de journée, après les derniers scores et évaluations.
+// Entraîne chaque composante Python (Dixon-Coles, Elo et spécialistes) sur l'historique actualisé.
 Schedule::command(TrainPredictionModelCommand::class)
     ->dailyAt('23:55')
     ->timezone('Africa/Douala')
@@ -60,7 +68,7 @@ Schedule::command(TrainPredictionModelCommand::class)
     ->appendOutputTo(storage_path('logs/oracle-training.log'));
 
 Schedule::command(GeneratePredictionsCommand::class)
-    ->dailyAt('06:45')
+    ->everyFifteenMinutes()
     ->timezone('Africa/Douala')
     ->withoutOverlapping()
     ->runInBackground()

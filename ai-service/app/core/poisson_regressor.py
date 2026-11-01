@@ -11,6 +11,9 @@ import numpy as np
 from scipy.optimize import minimize
 from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
 
+TEAM_STRENGTH_PRIOR_MATCHES = 5.0
+MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS = 5
+
 
 class MatchData:
     def __init__(
@@ -46,6 +49,7 @@ class DixonColesModel:
         self.home_adv: float = 0.25
         self.attack_strengths: np.ndarray = np.array([])
         self.defense_strengths: np.ndarray = np.array([])
+        self.team_match_counts: Dict[str, int] = {}
         self.is_fitted: bool = False
         self.training_hash: str = ""
 
@@ -60,9 +64,19 @@ class DixonColesModel:
         all_teams = sorted(list(set(
             [m.home_team for m in matches] + [m.away_team for m in matches]
         )))
-        self.teams = all_teams
-        self.team_indices = {t: i for i, t in enumerate(all_teams)}
-        num_teams = len(all_teams)
+        self.team_match_counts = {team: 0 for team in all_teams}
+        for match in matches:
+            self.team_match_counts[match.home_team] += 1
+            self.team_match_counts[match.away_team] += 1
+        modeled_teams = [
+            team for team in all_teams
+            if self.team_match_counts[team] >= MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS
+        ]
+        if len(modeled_teams) < 2:
+            modeled_teams = []
+        self.teams = modeled_teams
+        self.team_indices = {team: index for index, team in enumerate(modeled_teams)}
+        num_teams = len(modeled_teams)
 
         # Precompute weights w_k = exp(-xi * days_ago)
         weights = np.array([np.exp(-self.xi * m.days_ago) for m in matches])
@@ -72,8 +86,8 @@ class DixonColesModel:
         # [1]: home_adv (h)
         # [2 : 2 + num_teams - 1]: att (last team constrained to sum to 0)
         # [2 + num_teams - 1 : 2 + 2 * (num_teams - 1)]: def (last team constrained to sum to 0)
-        num_free_att = num_teams - 1
-        num_free_def = num_teams - 1
+        num_free_att = max(0, num_teams - 1)
+        num_free_def = max(0, num_teams - 1)
         total_params = 2 + num_free_att + num_free_def
 
         x0 = np.zeros(total_params)
@@ -96,12 +110,16 @@ class DixonColesModel:
             loss = 0.0
             for idx, m in enumerate(matches):
                 w = weights[idx]
-                h_idx = self.team_indices[m.home_team]
-                a_idx = self.team_indices[m.away_team]
+                h_idx = self.team_indices.get(m.home_team)
+                a_idx = self.team_indices.get(m.away_team)
+                att_h = att[h_idx] if h_idx is not None else 0.0
+                def_h = defense[h_idx] if h_idx is not None else 0.0
+                att_a = att[a_idx] if a_idx is not None else 0.0
+                def_a = defense[a_idx] if a_idx is not None else 0.0
 
                 eff_h = 0.0 if m.is_neutral else h
-                log_lambda_h = mu + eff_h + att[h_idx] - defense[a_idx]
-                log_lambda_a = mu + att[a_idx] - defense[h_idx]
+                log_lambda_h = mu + eff_h + att_h - def_a
+                log_lambda_a = mu + att_a - def_h
 
                 lambda_h = np.exp(np.clip(log_lambda_h, -5.0, 5.0))
                 lambda_a = np.exp(np.clip(log_lambda_a, -5.0, 5.0))
@@ -122,10 +140,10 @@ class DixonColesModel:
         self.home_adv = float(res.x[1])
 
         free_att = res.x[2 : 2 + num_free_att]
-        self.attack_strengths = np.append(free_att, -np.sum(free_att))
+        self.attack_strengths = np.append(free_att, -np.sum(free_att)) if num_teams else np.array([])
 
         free_def = res.x[2 + num_free_att : 2 + num_free_att + num_free_def]
-        self.defense_strengths = np.append(free_def, -np.sum(free_def))
+        self.defense_strengths = np.append(free_def, -np.sum(free_def)) if num_teams else np.array([])
 
         self.is_fitted = True
         return self
@@ -147,15 +165,33 @@ class DixonColesModel:
 
         # Check for unknown teams
         if home_team in self.team_indices:
-            att_h = self.attack_strengths[self.team_indices[home_team]]
-            def_h = self.defense_strengths[self.team_indices[home_team]]
+            appearances = self.team_match_counts.get(home_team, 0)
+            if appearances < MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS:
+                att_h, def_h = 0.0, 0.0
+                warnings.append(f"low_sample_team:{home_team}:{appearances}")
+            else:
+                reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
+                att_h = self.attack_strengths[self.team_indices[home_team]] * reliability
+                def_h = self.defense_strengths[self.team_indices[home_team]] * reliability
+        elif home_team in self.team_match_counts:
+            att_h, def_h = 0.0, 0.0
+            warnings.append(f"low_sample_team:{home_team}:{self.team_match_counts[home_team]}")
         else:
             att_h, def_h = 0.0, 0.0  # League average prior
             warnings.append(f"unknown_or_promoted_team:{home_team}")
 
         if away_team in self.team_indices:
-            att_a = self.attack_strengths[self.team_indices[away_team]]
-            def_a = self.defense_strengths[self.team_indices[away_team]]
+            appearances = self.team_match_counts.get(away_team, 0)
+            if appearances < MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS:
+                att_a, def_a = 0.0, 0.0
+                warnings.append(f"low_sample_team:{away_team}:{appearances}")
+            else:
+                reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
+                att_a = self.attack_strengths[self.team_indices[away_team]] * reliability
+                def_a = self.defense_strengths[self.team_indices[away_team]] * reliability
+        elif away_team in self.team_match_counts:
+            att_a, def_a = 0.0, 0.0
+            warnings.append(f"low_sample_team:{away_team}:{self.team_match_counts[away_team]}")
         else:
             att_a, def_a = 0.0, 0.0  # League average prior
             warnings.append(f"unknown_or_promoted_team:{away_team}")
@@ -165,8 +201,10 @@ class DixonColesModel:
         log_lh = self.mu + h + att_h - def_a
         log_la = self.mu + att_a - def_h
 
-        lh = float(np.exp(np.clip(log_lh, -3.0, 3.0)))
-        la = float(np.exp(np.clip(log_la, -3.0, 3.0)))
+        lh = float(np.exp(np.clip(log_lh, np.log(0.1), np.log(8.0))))
+        la = float(np.exp(np.clip(log_la, np.log(0.1), np.log(8.0))))
+        if log_lh < np.log(0.1) or log_lh > np.log(8.0) or log_la < np.log(0.1) or log_la > np.log(8.0):
+            warnings.append("expected_goals_clamped")
 
         return lh, la, warnings
 
@@ -244,4 +282,3 @@ class DixonColesModel:
             "abstain": is_abstained,
             "warnings": warnings,
         }
-

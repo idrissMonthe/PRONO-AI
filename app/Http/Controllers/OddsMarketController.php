@@ -8,6 +8,7 @@ use App\Models\OddsSnapshot;
 use App\Models\PaperBet;
 use App\Services\Odds\OddsService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 
 class OddsMarketController extends Controller
 {
@@ -28,43 +29,74 @@ class OddsMarketController extends Controller
         // 2. Value Opportunities (CDC 25.6)
         $upcoming = FootballMatch::with(['homeTeam', 'awayTeam', 'officialPrediction', 'oddsSnapshots.bookmaker'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
+            ->where('match_date_utc', '>=', now()->utc())
             ->orderBy('match_date_utc', 'asc')
             ->get();
 
         $valueOpportunities = [];
+        $oddsMovements = [];
+        $marketId = Market::where('code', '1N2')->value('id');
         foreach ($upcoming as $match) {
             $pred = $match->officialPrediction;
-            if (!$pred || $pred->is_abstained) continue;
+            if (! $pred || $pred->is_abstained || ! $marketId) {
+                continue;
+            }
 
-            $odds = $match->oddsSnapshots->where('is_closing', false)
-                ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 10000000000 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0));
-            $homeOdds = $odds->where('selection', 'HOME')->first();
-            $drawOdds = $odds->where('selection', 'DRAW')->first();
-            $awayOdds = $odds->where('selection', 'AWAY')->first();
+            $completeSets = $this->complete1N2SnapshotSets($match->oddsSnapshots, (int) $marketId);
+            if ($completeSets->isEmpty()) {
+                continue;
+            }
+
+            $latestSet = $completeSets->last();
+            $openingSet = $completeSets
+                ->where('bookmaker_id', $latestSet['bookmaker_id'])
+                ->first();
+            $latestOdds = $this->oddsServiceProbabilities($oddsService, $latestSet['snapshots']);
+            $openingOdds = $this->oddsServiceProbabilities($oddsService, $openingSet['snapshots']);
 
             $checks = [
-                ['sel' => 'HOME', 'label' => 'Victoire ' . $match->homeTeam->short_name, 'prob' => (float)$pred->prob_home, 'ci_low' => (float)($pred->intervals_json['ci80']['home'][0] ?? $pred->prob_home - 0.04), 'oddsObj' => $homeOdds],
-                ['sel' => 'DRAW', 'label' => 'Match Nul', 'prob' => (float)$pred->prob_draw, 'ci_low' => (float)($pred->intervals_json['ci80']['draw'][0] ?? $pred->prob_draw - 0.03), 'oddsObj' => $drawOdds],
-                ['sel' => 'AWAY', 'label' => 'Victoire ' . $match->awayTeam->short_name, 'prob' => (float)$pred->prob_away, 'ci_low' => (float)($pred->intervals_json['ci80']['away'][0] ?? $pred->prob_away - 0.04), 'oddsObj' => $awayOdds],
+                ['sel' => 'HOME', 'label' => 'Victoire ' . $match->homeTeam->short_name, 'prob' => (float) $pred->prob_home, 'ci_low' => (float) ($pred->intervals_json['ci80']['home'][0] ?? $pred->prob_home - 0.04)],
+                ['sel' => 'DRAW', 'label' => 'Match Nul', 'prob' => (float) $pred->prob_draw, 'ci_low' => (float) ($pred->intervals_json['ci80']['draw'][0] ?? $pred->prob_draw - 0.03)],
+                ['sel' => 'AWAY', 'label' => 'Victoire ' . $match->awayTeam->short_name, 'prob' => (float) $pred->prob_away, 'ci_low' => (float) ($pred->intervals_json['ci80']['away'][0] ?? $pred->prob_away - 0.04)],
             ];
 
             foreach ($checks as $c) {
-                if ($c['oddsObj'] && $c['oddsObj']->decimal_odds > 1.0) {
-                    $eval = $oddsService->evaluateValue($c['prob'], $c['ci_low'], (float)$c['oddsObj']->decimal_odds);
-                    if ($eval['has_value']) {
-                        $valueOpportunities[] = [
-                            'match' => $match,
-                            'selection_code' => $c['sel'],
-                            'selection_label' => $c['label'],
-                            'bookmaker' => $c['oddsObj']->bookmaker->name ?? 'Pinnacle',
-                            'market_odds' => $eval['market_odds'],
-                            'fair_odds' => $eval['fair_odds'],
-                            'model_prob' => $eval['model_prob'],
-                            'ev_pct' => $eval['ev_pct'],
-                            'classification' => $eval['classification'],
-                            'odds_snapshot_id' => $c['oddsObj']->id,
-                        ];
-                    }
+                $snapshot = $latestSet['snapshots'][$c['sel']];
+                $marketProbability = $latestOdds['true_probabilities'][$c['sel']];
+                $probabilityEdge = $c['prob'] - $marketProbability;
+                $ev = $oddsService->evaluateValue($c['prob'], $c['ci_low'], (float) $snapshot->decimal_odds);
+
+                $oddsMovements[] = [
+                    'match' => $match,
+                    'selection_label' => $c['label'],
+                    'selection_code' => $c['sel'],
+                    'bookmaker' => $snapshot->bookmaker->name ?? 'Marché',
+                    'opening_odds' => (float) $openingSet['snapshots'][$c['sel']]->decimal_odds,
+                    'current_odds' => (float) $snapshot->decimal_odds,
+                    'opening_at' => $openingSet['timestamp'],
+                    'current_at' => $latestSet['timestamp'],
+                    'opening_probability' => $openingOdds['true_probabilities'][$c['sel']],
+                    'current_probability' => $marketProbability,
+                    'market_movement' => $marketProbability - $openingOdds['true_probabilities'][$c['sel']],
+                    'model_probability' => $c['prob'],
+                    'model_market_edge' => $probabilityEdge,
+                ];
+
+                if ($ev['has_value']) {
+                    $valueOpportunities[] = [
+                        'match' => $match,
+                        'selection_code' => $c['sel'],
+                        'selection_label' => $c['label'],
+                        'bookmaker' => $snapshot->bookmaker->name ?? 'Marché',
+                        'market_odds' => $ev['market_odds'],
+                        'fair_odds' => $ev['fair_odds'],
+                        'model_prob' => $ev['model_prob'],
+                        'market_prob' => $marketProbability,
+                        'model_market_edge' => $probabilityEdge,
+                        'ev_pct' => $ev['ev_pct'],
+                        'classification' => $ev['classification'],
+                        'odds_snapshot_id' => $snapshot->id,
+                    ];
                 }
             }
         }
@@ -84,8 +116,51 @@ class OddsMarketController extends Controller
             'avgOdds',
             'avgClv',
             'valueOpportunities',
+            'oddsMovements',
             'calculatorResult'
         ));
+    }
+
+    private function complete1N2SnapshotSets(Collection $snapshots, int $marketId): Collection
+    {
+        return $snapshots
+            ->where('market_id', $marketId)
+            ->groupBy('bookmaker_id')
+            ->flatMap(function ($bookmakerSnapshots, $bookmakerId) {
+                return $bookmakerSnapshots
+                    ->groupBy(fn (OddsSnapshot $snapshot): int => $snapshot->snapshot_time_utc->timestamp)
+                    ->map(function ($snapshotGroup) use ($bookmakerId) {
+                        $bySelection = $snapshotGroup->keyBy('selection');
+                        if (! collect(['HOME', 'DRAW', 'AWAY'])->every(fn (string $selection): bool => $bySelection->has($selection))) {
+                            return null;
+                        }
+
+                        return [
+                            'bookmaker_id' => (int) $bookmakerId,
+                            'timestamp' => $snapshotGroup->max(fn (OddsSnapshot $snapshot): int => $snapshot->snapshot_time_utc->timestamp),
+                            'snapshots' => $bySelection,
+                        ];
+                    })
+                    ->filter();
+            })
+            ->sortBy('timestamp')
+            ->values();
+    }
+
+    private function oddsServiceProbabilities(OddsService $oddsService, Collection $snapshots): array
+    {
+        $result = $oddsService->removeMargin([
+            (float) $snapshots['HOME']->decimal_odds,
+            (float) $snapshots['DRAW']->decimal_odds,
+            (float) $snapshots['AWAY']->decimal_odds,
+        ]);
+
+        return [
+            'true_probabilities' => array_combine(
+                ['HOME', 'DRAW', 'AWAY'],
+                $result['true_probabilities']
+            ),
+        ];
     }
 
     public function recordPaperBet(Request $request, OddsService $oddsService)
@@ -181,4 +256,3 @@ class OddsMarketController extends Controller
         return redirect()->route('odds.index')->with('success', 'Pronostic virtuel enregistré dans le registre immuable.');
     }
 }
-

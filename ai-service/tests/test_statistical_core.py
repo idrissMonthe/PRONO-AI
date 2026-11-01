@@ -7,6 +7,9 @@ from app.core.devig import devig_odds, devig_power, devig_proportional, devig_sh
 from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
 from app.core.metrics import calculate_brier_multiclass, calculate_ece, calculate_log_loss, calculate_rps, diebold_mariano_test
 from app.core.elo import EloEngine
+from app.core.poisson_regressor import DixonColesModel, MatchData
+from app.schemas import PredictRequest
+import app.main as prediction_api
 
 
 def test_score_matrix_sum_and_residual_mass():
@@ -38,6 +41,13 @@ def test_derived_markets_coherence():
 
     # Over 2.5 + Under 2.5 == 1
     assert abs((markets["totals"]["over_2_5"] + markets["totals"]["under_2_5"]) - 1.0) < 1e-4
+
+    margin = markets["goal_margin"]
+    assert margin["home_by_1_plus"] == pytest.approx(p1n2["home"], abs=1e-4)
+    assert margin["away_by_1_plus"] == pytest.approx(p1n2["away"], abs=1e-4)
+    assert margin["home_by_3_plus"] <= margin["home_by_2_plus"] <= margin["home_by_1_plus"]
+    assert margin["away_by_3_plus"] <= margin["away_by_2_plus"] <= margin["away_by_1_plus"]
+    assert margin["home_by_2_plus"] + margin["away_by_2_plus"] <= 1.0
 
 
 def test_devigging_methods():
@@ -85,3 +95,97 @@ def test_elo_symmetry_on_neutral_ground():
     assert abs(pred_1["away"] - pred_2["home"]) < 1e-4
     assert abs(pred_1["draw"] - pred_2["draw"]) < 1e-4
 
+
+def test_sparse_team_attack_strength_is_shrunk_toward_league_average():
+    model = DixonColesModel()
+    model.teams = ["Juventus FC", "SSC Napoli"]
+    model.team_indices = {team: index for index, team in enumerate(model.teams)}
+    model.mu = -0.5065608707166517
+    model.home_adv = 0.012080760992424402
+    model.attack_strengths = np.array([-0.3000304944051351, 3.495553974945187])
+    model.defense_strengths = np.array([0.2799618242891912, -0.29708934797308056])
+    model.team_match_counts = {"Juventus FC": 1, "SSC Napoli": 1}
+    model.is_fitted = True
+
+    _, away_goals, warnings = model.predict_lambdas("Juventus FC", "SSC Napoli")
+
+    assert away_goals < 2.0
+    assert any(warning.startswith("low_sample_team:SSC Napoli:1") for warning in warnings)
+
+
+def test_training_tracks_per_team_match_counts():
+    matches = [
+        MatchData("Home A", "Away A", 1, 0, 0),
+        MatchData("Home A", "Away B", 2, 1, 1),
+        MatchData("Home B", "Away A", 0, 0, 2),
+        MatchData("Home C", "Away B", 1, 2, 3),
+        MatchData("Home B", "Away C", 1, 1, 4),
+    ]
+
+    model = DixonColesModel().fit(matches)
+
+    assert model.team_match_counts["Home A"] == 2
+    assert model.team_match_counts["Away A"] == 2
+    assert model.team_match_counts["Home C"] == 1
+    assert model.team_indices == {}
+
+
+def test_reliable_team_strengths_are_shrunk_toward_league_average():
+    model = DixonColesModel()
+    model.teams = ["Home FC", "Away FC"]
+    model.team_indices = {team: index for index, team in enumerate(model.teams)}
+    model.attack_strengths = np.array([0.0, np.log(4.0)])
+    model.defense_strengths = np.zeros(2)
+    model.team_match_counts = {"Home FC": 5, "Away FC": 5}
+    model.is_fitted = True
+
+    _, away_goals, warnings = model.predict_lambdas("Home FC", "Away FC")
+
+    assert away_goals == pytest.approx(2.0)
+    assert not any(warning.startswith("low_sample_team:") for warning in warnings)
+
+
+def test_low_sample_team_predictions_are_abstained(monkeypatch):
+    model = DixonColesModel()
+    model.teams = ["Home FC", "Away FC"]
+    model.team_indices = {team: index for index, team in enumerate(model.teams)}
+    model.mu = np.log(1.4)
+    model.home_adv = 0.2
+    model.attack_strengths = np.zeros(2)
+    model.defense_strengths = np.zeros(2)
+    model.team_match_counts = {"Home FC": 1, "Away FC": 1}
+    model.is_fitted = True
+    monkeypatch.setattr(prediction_api, "champion_model", model)
+
+    result = prediction_api.predict(PredictRequest(
+        home_team="Home FC",
+        away_team="Away FC",
+        quality_score=100,
+    ))
+
+    assert result["abstain"] is True
+    assert "abstain_due_to_insufficient_team_history_without_market" in result["warnings"]
+
+
+def test_sparse_team_prediction_can_use_a_strong_market_snapshot(monkeypatch):
+    model = DixonColesModel()
+    model.teams = ["Home FC", "Away FC"]
+    model.team_indices = {team: index for index, team in enumerate(model.teams)}
+    model.mu = np.log(1.4)
+    model.home_adv = 0.2
+    model.attack_strengths = np.zeros(2)
+    model.defense_strengths = np.zeros(2)
+    model.team_match_counts = {"Home FC": 1, "Away FC": 1}
+    model.is_fitted = True
+    monkeypatch.setattr(prediction_api, "champion_model", model)
+
+    result = prediction_api.predict(PredictRequest(
+        home_team="Home FC",
+        away_team="Away FC",
+        quality_score=100,
+        market_probabilities=[0.80, 0.12, 0.08],
+    ))
+
+    assert result["abstain"] is False
+    assert result["confidence_tier"] == "medium"
+    assert "market_backed_prediction_with_limited_team_history" in result["warnings"]

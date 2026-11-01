@@ -5,8 +5,13 @@
             'equilibre' => ['title' => 'Équilibrés', 'subtitle' => 'Un compromis entre probabilité et intérêt', 'class' => 'pick-tier-equilibre'],
             'audacieux' => ['title' => 'Audacieux', 'subtitle' => 'Plus risqués, pour tenter un scénario intéressant', 'class' => 'pick-tier-audacieux'],
         ];
+        $bigParlayGroups = [
+            'prudent' => ['title' => 'Version prudente', 'subtitle' => 'Doubles chances et marchés à probabilité élevée', 'class' => 'pick-tier-prudent'],
+            'equilibre' => ['title' => 'Version équilibrée', 'subtitle' => 'Résultats 1N2 et marchés intermédiaires', 'class' => 'pick-tier-equilibre'],
+            'audacieux' => ['title' => 'Version audacieuse', 'subtitle' => 'Scénarios plus risqués pour viser une cote potentielle plus élevée', 'class' => 'pick-tier-audacieux'],
+        ];
         $pickCount = collect($dailyPicks)->flatten(1)->count();
-        $bigParlayLeagueCount = collect($bigParlayPicks)->pluck('league_key')->unique()->count();
+        $bigParlayPickCount = collect($bigParlayPicks)->sum(fn ($picks) => count($picks));
     @endphp
 
     <section class="hero-card">
@@ -26,7 +31,7 @@
 
     <section id="today-picks" class="section-block">
         <div class="section-heading">
-            <div><span class="eyebrow">SÉLECTION DU JOUR</span><h2>Les matchs à surveiller</h2></div>
+            <div><span class="eyebrow">SÉLECTION DU JOUR</span><h2>Les matchs à surveiller</h2><p>Le modèle est prioritaire ; si ses données sont insuffisantes, les résultats 1N2 peuvent être estimés depuis des cotes complètes sans marge.</p></div>
             <a href="{{ route('matches.index') }}" class="text-link">Tous les matchs →</a>
         </div>
 
@@ -45,7 +50,7 @@
                                     <div class="pick-card-top"><span>{{ $match->league->name ?? 'Football' }}</span><span>{{ $match->match_date_utc->timezone('Africa/Douala')->format('d M · H:i') }}</span></div>
                                     <div class="teams"><strong>{{ $match->homeTeam->short_name }}</strong><span>vs</span><strong>{{ $match->awayTeam->short_name }}</strong></div>
                                     <div class="pick-verdict"><span class="lock-dot"></span><strong>{{ $pick['label'] }}</strong><span class="pick-prob">{{ round($pick['prob'] * 100) }}%</span></div>
-                                    <div class="pick-footer"><span class="reliability">{{ $pick['market'] }}</span><span class="score-pill">{{ $group['title'] }}</span></div>
+                                    <div class="pick-footer"><span class="reliability">{{ $pick['source'] }} · {{ $pick['market'] }}</span><span class="score-pill">{{ $group['title'] }}</span></div>
                                 </a>
                             @endforeach
                         </div>
@@ -59,29 +64,37 @@
 
     <section class="section-block big-parlay-section">
         <div class="section-heading">
-            <div><span class="eyebrow">SÉLECTION ÉLARGIE</span><h2>Gros combinés</h2><p>Au moins 10 pronostics parmi les championnats disponibles, avec une première sélection par championnat et une fiabilité croissante.</p></div>
-            <span class="big-parlay-meta">{{ count($bigParlayPicks) }} pronostics · {{ $bigParlayLeagueCount }} championnat{{ $bigParlayLeagueCount > 1 ? 's' : '' }}</span>
+            <div><span class="eyebrow">SÉLECTION ÉLARGIE</span><h2>Gros combinés</h2><p>Trois versions de risque, classées par fiabilité croissante et diversifiées entre championnats. En cas d’abstention du modèle, seules les sélections dérivées des cotes 1N2 complètes sans marge sont proposées.</p></div>
+            <span class="big-parlay-meta">{{ $bigParlayPickCount }} sélections · 3 niveaux de risque</span>
         </div>
 
-        @if(count($bigParlayPicks) >= 10)
-            <div class="big-parlay-card">
-                <div class="big-parlay-head"><span>Fiabilité croissante</span><span>Probabilité conjointe indicative : {{ round($bigParlayProbability * 100, 2) }}%</span></div>
-                <div class="big-parlay-list">
-                    @foreach($bigParlayPicks as $index => $pick)
-                        @php $match = $pick['match']; @endphp
-                        <a href="{{ route('matches.show', $match->id) }}" class="big-parlay-row">
-                            <span class="big-parlay-rank">{{ $index + 1 }}</span>
-                            <span class="big-parlay-match"><small>{{ $match->league->name ?? 'Football' }} · {{ $match->match_date_utc->timezone('Africa/Douala')->format('d/m · H:i') }}</small><strong>{{ $match->homeTeam->short_name }} <i>vs</i> {{ $match->awayTeam->short_name }}</strong></span>
-                            <span class="big-parlay-market">{{ $pick['market'] }}<strong>{{ $pick['label'] }}</strong></span>
-                            <span class="big-parlay-prob" data-probability="{{ number_format($pick['prob'], 6, '.', '') }}">{{ number_format($pick['prob'] * 100, 1, ',', '') }}%</span>
-                        </a>
-                    @endforeach
+        @foreach($bigParlayGroups as $risk => $group)
+            @if(count($bigParlayPicks[$risk]) >= 10)
+                <div class="pick-tier {{ $group['class'] }} big-parlay-tier">
+                    <div class="pick-tier-heading">
+                        <div><h3>{{ $group['title'] }}</h3><p>{{ $group['subtitle'] }}</p></div>
+                        <span>{{ count($bigParlayPicks[$risk]) }} pronostics · probabilité conjointe indicative : {{ $bigParlayProbabilities[$risk] * 100 < 0.01 ? 'moins de 0,01 %' : number_format($bigParlayProbabilities[$risk] * 100, 2, ',', '').' %' }}</span>
+                    </div>
+                    <div class="big-parlay-card">
+                        <div class="big-parlay-head"><span>Fiabilité croissante</span><span>{{ collect($bigParlayPicks[$risk])->pluck('league_key')->unique()->count() }} championnat{{ collect($bigParlayPicks[$risk])->pluck('league_key')->unique()->count() > 1 ? 's' : '' }}</span></div>
+                        <div class="big-parlay-list">
+                            @foreach($bigParlayPicks[$risk] as $index => $pick)
+                                @php $match = $pick['match']; @endphp
+                                <a href="{{ route('matches.show', $match->id) }}" class="big-parlay-row">
+                                    <span class="big-parlay-rank">{{ $index + 1 }}</span>
+                                    <span class="big-parlay-match"><small>{{ $match->league->name ?? 'Football' }} · {{ $match->match_date_utc->timezone('Africa/Douala')->format('d/m · H:i') }}</small><strong>{{ $match->homeTeam->short_name }} <i>vs</i> {{ $match->awayTeam->short_name }}</strong></span>
+                                    <span class="big-parlay-market">{{ $pick['source'] }} · {{ $pick['market'] }}<strong>{{ $pick['label'] }}</strong></span>
+                                    <span class="big-parlay-prob" data-probability="{{ number_format($pick['prob'], 6, '.', '') }}">{{ number_format($pick['prob'] * 100, 1, ',', '') }}%</span>
+                                </a>
+                            @endforeach
+                        </div>
+                        <div class="big-parlay-foot">La probabilité conjointe suppose une indépendance approximative entre les matchs. Le risque augmente de la version prudente à la version audacieuse.</div>
+                    </div>
                 </div>
-                <div class="big-parlay-foot">La probabilité conjointe suppose une indépendance approximative entre les matchs. Ce combiné est volontairement plus risqué que « Les matchs à surveiller ».</div>
-            </div>
-        @else
-            <div class="empty-card">Les gros combinés apparaîtront dès que 10 pronostics officiels, fiables et issus des matchs futurs seront disponibles. Aucun pronostic n’est ajouté artificiellement.</div>
-        @endif
+            @else
+                <div class="empty-card">{{ $group['title'] }} : cette version apparaîtra dès que 10 sélections adaptées seront disponibles. Aucun choix n’est ajouté artificiellement.</div>
+            @endif
+        @endforeach
     </section>
 
     <section class="how-section">

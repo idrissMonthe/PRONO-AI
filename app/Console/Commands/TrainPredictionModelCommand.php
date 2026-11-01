@@ -38,7 +38,28 @@ class TrainPredictionModelCommand extends Command
 
         try {
             $result = $predictionClient->train($matches);
-            $this->info("Modèle entraîné sur {$result['match_count']} matchs et {$result['team_count']} équipes.");
+            $modelLabels = [
+                'dixon_coles' => 'Dixon-Coles',
+                'elo' => 'Elo',
+                'market_specialists' => 'Spécialistes de marchés',
+            ];
+            foreach ($modelLabels as $key => $label) {
+                $model = $result['models'][$key] ?? null;
+                if (! is_array($model) || ! ($model['trained'] ?? false)) {
+                    $this->error("L’entraînement du modèle {$label} n’a pas abouti.");
+                    return self::FAILURE;
+                }
+
+                if ($key === 'dixon_coles') {
+                    $this->line("{$label} : entraînement réussi ({$model['item_count']} équipes modélisées sur {$model['observed_count']} observées).");
+                    continue;
+                }
+
+                $unit = $key === 'market_specialists' ? 'matchs' : 'équipes';
+                $this->line("{$label} : entraînement réussi ({$model['item_count']} {$unit}).");
+            }
+
+            $this->info("Modèles entraînés sur {$result['match_count']} matchs et {$result['team_count']} équipes observées.");
             $this->line("Hash d’entraînement : {$result['training_hash']}");
             return self::SUCCESS;
         } catch (Throwable $e) {
