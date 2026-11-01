@@ -51,7 +51,7 @@ class MatchController extends Controller
                 break;
 
             case 'live':
-                $query->whereIn('status', ['IN_PLAY', 'PAUSED']);
+                $query->whereIn('status', ['LIVE', 'IN_PLAY', 'PAUSED']);
                 break;
 
             case 'finished':
@@ -72,7 +72,7 @@ class MatchController extends Controller
             } elseif ($statusVal === 'FINISHED') {
                 $query->whereIn('status', ['FINISHED', 'AWARDED']);
             } elseif ($statusVal === 'LIVE') {
-                $query->whereIn('status', ['IN_PLAY', 'PAUSED']);
+                $query->whereIn('status', ['LIVE', 'IN_PLAY', 'PAUSED']);
             } else {
                 $query->where('status', $statusVal);
             }
@@ -132,7 +132,7 @@ class MatchController extends Controller
             'upcoming' => FootballMatch::where('match_date_utc', '>=', now()->utc())
                 ->whereIn('status', ['SCHEDULED', 'TIMED'])
                 ->count(),
-            'live' => FootballMatch::whereIn('status', ['IN_PLAY', 'PAUSED'])->count(),
+            'live' => FootballMatch::whereIn('status', ['LIVE', 'IN_PLAY', 'PAUSED'])->count(),
             'finished' => FootballMatch::whereIn('status', ['FINISHED', 'AWARDED'])->count(),
         ];
 
@@ -148,6 +148,56 @@ class MatchController extends Controller
             'nowDouala',
             'lastSyncFormatted'
         ));
+    }
+
+    /**
+     * État court des matchs récents et à venir pour le rafraîchissement live.
+     * Les scores viennent de la dernière synchronisation football-data.org.
+     */
+    public function liveScores(): JsonResponse
+    {
+        $now = Carbon::now('Africa/Douala');
+
+        $matches = FootballMatch::with(['homeTeam:id,name', 'awayTeam:id,name'])
+            ->whereBetween('match_date_utc', [
+                $now->copy()->subDay()->utc(),
+                $now->copy()->addDays(2)->utc(),
+            ])
+            ->whereIn('status', ['SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED', 'POSTPONED', 'CANCELLED'])
+            ->orderBy('match_date_utc')
+            ->get()
+            ->map(function (FootballMatch $match) use ($now): array {
+                $isLive = in_array($match->status, ['LIVE', 'IN_PLAY', 'PAUSED'], true);
+                $minute = null;
+                if (in_array($match->status, ['LIVE', 'IN_PLAY'], true)) {
+                    $elapsedSeconds = abs((int) $match->match_date_utc->diffInSeconds($now));
+                    $minute = max(1, min(120, (int) floor($elapsedSeconds / 60)));
+                }
+
+                return [
+                    'id' => $match->id,
+                    'status' => $match->status,
+                    'status_label' => match ($match->status) {
+                        'LIVE', 'IN_PLAY' => 'DIRECT',
+                        'PAUSED' => 'MI-TEMPS',
+                        'FINISHED' => 'TERMINE',
+                        'POSTPONED' => 'REPORTÉ',
+                        'CANCELLED' => 'ANNULÉ',
+                        default => 'À VENIR',
+                    },
+                    'home_score' => $match->home_score,
+                    'away_score' => $match->away_score,
+                    'minute' => $minute,
+                    'is_live' => $isLive,
+                    'updated_at' => $match->last_synced_at?->timezone('Africa/Douala')?->toIso8601String(),
+                ];
+            });
+
+        return response()->json([
+            'data' => $matches,
+            'source' => 'football-data.org',
+            'checked_at' => $now->toIso8601String(),
+        ])->header('Cache-Control', 'no-store, no-cache, must-revalidate');
     }
 
     /**

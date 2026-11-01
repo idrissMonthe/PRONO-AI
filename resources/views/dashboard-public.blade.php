@@ -1,9 +1,12 @@
 <x-app-layout>
     @php
-        $picks = $upcomingMatches
-            ->filter(fn ($m) => $m->officialPrediction && !$m->officialPrediction->is_abstained)
-            ->unique(fn ($m) => $m->home_team_id.'-'.$m->away_team_id.'-'.$m->match_date_utc->timestamp)
-            ->values();
+        $pickGroups = [
+            'prudent' => ['title' => 'Les plus sûrs', 'subtitle' => 'Marchés simples et forte probabilité', 'class' => 'pick-tier-prudent'],
+            'equilibre' => ['title' => 'Équilibrés', 'subtitle' => 'Un compromis entre probabilité et intérêt', 'class' => 'pick-tier-equilibre'],
+            'audacieux' => ['title' => 'Audacieux', 'subtitle' => 'Plus risqués, pour tenter un scénario intéressant', 'class' => 'pick-tier-audacieux'],
+        ];
+        $pickCount = collect($dailyPicks)->flatten(1)->count();
+        $bigParlayLeagueCount = collect($bigParlayPicks)->pluck('league_key')->unique()->count();
     @endphp
 
     <section class="hero-card">
@@ -15,7 +18,7 @@
     </section>
 
     <section class="stats-strip">
-        <div><strong>{{ $picks->count() }}</strong><span>PRONOSTICS DISPONIBLES</span></div>
+        <div><strong>{{ $pickCount }}</strong><span>PRONOSTICS DISPONIBLES</span></div>
         <div><strong>{{ $upcomingCount }}</strong><span>MATCHS À VENIR</span></div>
         <div><strong>{{ $predictedMatches }}</strong><span>ANALYSES RÉALISÉES</span></div>
         <div><strong>24/7</strong><span>DONNÉES ACTUALISÉES</span></div>
@@ -27,28 +30,57 @@
             <a href="{{ route('matches.index') }}" class="text-link">Tous les matchs →</a>
         </div>
 
-        @if($picks->isNotEmpty())
-            <div class="pick-grid">
-                @foreach($picks->take(9) as $match)
-                    @php
-                        $pred = $match->officialPrediction;
-                        $probabilities = ['home' => (float) $pred->prob_home, 'draw' => (float) $pred->prob_draw, 'away' => (float) $pred->prob_away];
-                        $winner = array_keys($probabilities, max($probabilities), true)[0];
-                        $label = $winner === 'home' ? 'Victoire '.$match->homeTeam->short_name : ($winner === 'away' ? 'Victoire '.$match->awayTeam->short_name : 'Match nul');
-                        $probability = max($probabilities);
-                        $reliability = (int) max(1, min(10, round(((float) ($pred->quality_score ?? 0) / 100) * 5 + $probability * 4 + ($pred->confidence_tier === 'high' ? 1 : 0))));
-                        $reliabilityLabel = $reliability >= 8 ? 'Élevée' : ($reliability >= 6 ? 'Moyenne' : 'Faible');
-                    @endphp
-                    <a href="{{ route('matches.show', $match->id) }}" class="pick-card">
-                        <div class="pick-card-top"><span>{{ $match->league->name ?? 'Football' }}</span><span>{{ $match->match_date_utc->timezone('Africa/Douala')->format('d M · H:i') }}</span></div>
-                        <div class="teams"><strong>{{ $match->homeTeam->short_name }}</strong><span>vs</span><strong>{{ $match->awayTeam->short_name }}</strong></div>
-                        <div class="pick-verdict"><span class="lock-dot"></span><strong>{{ $label }}</strong><span class="pick-prob">{{ round($probability * 100) }}%</span></div>
-                        <div class="pick-footer"><span class="reliability reliability-{{ strtolower($reliabilityLabel) }}">Fiabilité {{ $reliabilityLabel }}</span><span class="score-pill">{{ $reliability }}/10</span></div>
-                    </a>
-                @endforeach
-            </div>
+        @if($pickCount > 0)
+            @foreach($pickGroups as $risk => $group)
+                @if(!empty($dailyPicks[$risk]))
+                    <div class="pick-tier {{ $group['class'] }}">
+                        <div class="pick-tier-heading">
+                            <div><h3>{{ $group['title'] }}</h3><p>{{ $group['subtitle'] }}</p></div>
+                            <span>{{ count($dailyPicks[$risk]) }} sélection{{ count($dailyPicks[$risk]) > 1 ? 's' : '' }}</span>
+                        </div>
+                        <div class="pick-grid">
+                            @foreach($dailyPicks[$risk] as $pick)
+                                @php $match = $pick['match']; @endphp
+                                <a href="{{ route('matches.show', $match->id) }}" class="pick-card">
+                                    <div class="pick-card-top"><span>{{ $match->league->name ?? 'Football' }}</span><span>{{ $match->match_date_utc->timezone('Africa/Douala')->format('d M · H:i') }}</span></div>
+                                    <div class="teams"><strong>{{ $match->homeTeam->short_name }}</strong><span>vs</span><strong>{{ $match->awayTeam->short_name }}</strong></div>
+                                    <div class="pick-verdict"><span class="lock-dot"></span><strong>{{ $pick['label'] }}</strong><span class="pick-prob">{{ round($pick['prob'] * 100) }}%</span></div>
+                                    <div class="pick-footer"><span class="reliability">{{ $pick['market'] }}</span><span class="score-pill">{{ $group['title'] }}</span></div>
+                                </a>
+                            @endforeach
+                        </div>
+                    </div>
+                @endif
+            @endforeach
         @else
             <div class="empty-card">Aucun pronostic fiable n’est disponible pour le moment. Synchronise les matchs depuis les paramètres.</div>
+        @endif
+    </section>
+
+    <section class="section-block big-parlay-section">
+        <div class="section-heading">
+            <div><span class="eyebrow">SÉLECTION ÉLARGIE</span><h2>Gros combinés</h2><p>Au moins 10 pronostics parmi les championnats disponibles, avec une première sélection par championnat et une fiabilité croissante.</p></div>
+            <span class="big-parlay-meta">{{ count($bigParlayPicks) }} pronostics · {{ $bigParlayLeagueCount }} championnat{{ $bigParlayLeagueCount > 1 ? 's' : '' }}</span>
+        </div>
+
+        @if(count($bigParlayPicks) >= 10)
+            <div class="big-parlay-card">
+                <div class="big-parlay-head"><span>Fiabilité croissante</span><span>Probabilité conjointe indicative : {{ round($bigParlayProbability * 100, 2) }}%</span></div>
+                <div class="big-parlay-list">
+                    @foreach($bigParlayPicks as $index => $pick)
+                        @php $match = $pick['match']; @endphp
+                        <a href="{{ route('matches.show', $match->id) }}" class="big-parlay-row">
+                            <span class="big-parlay-rank">{{ $index + 1 }}</span>
+                            <span class="big-parlay-match"><small>{{ $match->league->name ?? 'Football' }} · {{ $match->match_date_utc->timezone('Africa/Douala')->format('d/m · H:i') }}</small><strong>{{ $match->homeTeam->short_name }} <i>vs</i> {{ $match->awayTeam->short_name }}</strong></span>
+                            <span class="big-parlay-market">{{ $pick['market'] }}<strong>{{ $pick['label'] }}</strong></span>
+                            <span class="big-parlay-prob" data-probability="{{ number_format($pick['prob'], 6, '.', '') }}">{{ number_format($pick['prob'] * 100, 1, ',', '') }}%</span>
+                        </a>
+                    @endforeach
+                </div>
+                <div class="big-parlay-foot">La probabilité conjointe suppose une indépendance approximative entre les matchs. Ce combiné est volontairement plus risqué que « Les matchs à surveiller ».</div>
+            </div>
+        @else
+            <div class="empty-card">Les gros combinés apparaîtront dès que 10 pronostics officiels, fiables et issus des matchs futurs seront disponibles. Aucun pronostic n’est ajouté artificiellement.</div>
         @endif
     </section>
 

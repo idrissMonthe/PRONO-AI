@@ -3,6 +3,7 @@
 use App\Http\Controllers\FootballDataApiController;
 use App\Http\Controllers\GeminiController;
 use App\Http\Controllers\IntegrityApiController;
+use App\Http\Controllers\MatchController;
 use App\Http\Controllers\OddsApiController;
 use App\Http\Controllers\PredictionApiController;
 use Illuminate\Support\Facades\Route;
@@ -44,3 +45,6 @@ Route::prefix('football-data')->name('api.football-data.')->group(function () {
 
 Route::get('/integrity/ledger', [IntegrityApiController::class, 'verifyLedger'])
     ->name('api.integrity.ledger');
+
+Route::get('/matches/live', [MatchController::class, 'liveScores'])
+    ->name('api.matches.live');

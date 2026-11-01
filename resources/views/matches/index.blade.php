@@ -121,7 +121,7 @@
                         $p = $m->officialPrediction; 
                         $mDateWat = $m->match_date_utc->timezone('Africa/Douala');
                     @endphp
-                    <article onclick="openMatchModal({{ $m->id }})" class="p-4 space-y-2 hover:bg-[#181F1B] cursor-pointer transition-colors">
+                    <article data-match-id="{{ $m->id }}" onclick="openMatchModal({{ $m->id }})" class="p-4 space-y-2 hover:bg-[#181F1B] cursor-pointer transition-colors">
                         <div class="flex items-center justify-between gap-3 text-[11px] text-[#A2ACA3]">
                             <span>{{ $mDateWat->translatedFormat('d M · H:i') }} WAT</span>
                             <span class="text-[#C3A16A]">{{ $m->league->name }}</span>
@@ -130,10 +130,10 @@
                             {{ $m->homeTeam->name }} <span class="text-[#A2ACA3] font-normal text-xs">vs</span> {{ $m->awayTeam->name }}
                         </div>
                         <div class="flex items-center justify-between gap-3 text-xs">
-                            <span class="text-[#A2ACA3]">
+                            <span data-live-score class="text-[#A2ACA3]">
                                 @if($m->status === 'FINISHED')
                                     <strong class="text-[#C3A16A]">{{ $m->home_score }} - {{ $m->away_score }}</strong>
-                                @elseif($m->status === 'IN_PLAY' || $m->status === 'PAUSED')
+                                @elseif(in_array($m->status, ['LIVE', 'IN_PLAY', 'PAUSED'], true))
                                     <span class="text-[#88B69A] font-bold animate-pulse">DIRECT {{ $m->home_score ?? 0 }}-{{ $m->away_score ?? 0 }}</span>
                                 @else
                                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-[#222B25] text-[#A2ACA3] mono">À VENIR</span>
@@ -178,7 +178,7 @@
                                 $p = $m->officialPrediction;
                                 $mDateWat = $m->match_date_utc->timezone('Africa/Douala');
                             @endphp
-                            <tr onclick="openMatchModal({{ $m->id }})" class="hover:bg-[#181F1B]/90 transition-colors cursor-pointer group">
+                            <tr data-match-id="{{ $m->id }}" onclick="openMatchModal({{ $m->id }})" class="hover:bg-[#181F1B]/90 transition-colors cursor-pointer group">
                                 <td class="py-3.5 px-4 text-[#A2ACA3] mono">
                                     <div class="font-bold text-[#F0F0E8]">{{ $mDateWat->translatedFormat('d M Y') }}</div>
                                     <div class="text-[10px]">{{ $mDateWat->format('H:i') }} WAT · {{ $m->league->name }}</div>
@@ -195,12 +195,12 @@
                                         </div>
                                     @endif
                                 </td>
-                                <td class="py-3.5 px-4 text-center">
+                                <td data-live-score class="py-3.5 px-4 text-center">
                                     @if($m->status === 'FINISHED')
                                         <span class="mono font-extrabold text-sm px-2 py-0.5 rounded bg-[#222B25] text-[#C3A16A]">
                                             {{ $m->home_score }} - {{ $m->away_score }}
                                         </span>
-                                    @elseif($m->status === 'IN_PLAY' || $m->status === 'PAUSED')
+                                    @elseif(in_array($m->status, ['LIVE', 'IN_PLAY', 'PAUSED'], true))
                                         <span class="text-[10px] px-2 py-0.5 rounded bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40 mono font-bold animate-pulse">
                                             DIRECT {{ $m->home_score ?? 0 }}-{{ $m->away_score ?? 0 }}
                                         </span>
@@ -272,4 +272,47 @@
 
     <!-- Inclusion du Modal d'Analyse (4 Onglets) -->
     @include('partials.match-modal')
+
+    <script>
+        (() => {
+            const rows = document.querySelectorAll('[data-match-id]');
+            if (!rows.length) return;
+
+            const renderScore = (match) => {
+                const status = match.status;
+                const home = match.home_score ?? 0;
+                const away = match.away_score ?? 0;
+                const minute = (status === 'LIVE' || status === 'IN_PLAY') && match.minute ? ' · ' + match.minute + "'" : '';
+                const label = match.status_label || 'À VENIR';
+                const live = match.is_live;
+                const classes = live
+                    ? 'text-[10px] px-2 py-0.5 rounded bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40 mono font-bold animate-pulse whitespace-nowrap'
+                    : status === 'FINISHED'
+                        ? 'mono font-extrabold text-sm px-2 py-0.5 rounded bg-[#222B25] text-[#C3A16A]'
+                        : 'text-[10px] px-2 py-0.5 rounded bg-[#222B25] text-[#A2ACA3] border border-[#303A32] mono';
+                const score = (status === 'SCHEDULED' || status === 'TIMED') ? '' : ' ' + home + '-' + away;
+                return '<span class="' + classes + '">' + label + score + minute + '</span>';
+            };
+
+            const refreshLiveScores = async () => {
+                try {
+                    const response = await fetch('{{ url('/api/matches/live') }}', {
+                        headers: { Accept: 'application/json' },
+                        cache: 'no-store',
+                    });
+                    if (!response.ok) return;
+                    const payload = await response.json();
+                    (payload.data || []).forEach((match) => {
+                        document.querySelectorAll('[data-match-id="' + match.id + '"] [data-live-score]')
+                            .forEach((cell) => { cell.innerHTML = renderScore(match); });
+                    });
+                } catch (_) {
+                    // L'affichage serveur reste disponible si le polling échoue.
+                }
+            };
+
+            refreshLiveScores();
+            window.setInterval(refreshLiveScores, 30000);
+        })();
+    </script>
 </x-app-layout>

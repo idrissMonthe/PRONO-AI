@@ -11,6 +11,7 @@ use App\Services\Odds\OddsService;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Http\Request;
 
 class DashboardController extends Controller
@@ -83,6 +84,13 @@ class DashboardController extends Controller
                 ->get();
         }
 
+        $dailyPicks = $this->buildDailyPicks($upcomingMatches);
+        $bigParlayPicks = $this->buildBigParlayPicks();
+        $bigParlayProbability = collect($bigParlayPicks)->reduce(
+            fn (float $carry, array $pick): float => $carry * $pick['prob'],
+            1.0
+        );
+
         // 4. Écarts modèle / marché (Value Bets)
         $edges = [];
         foreach ($upcomingMatches as $match) {
@@ -150,6 +158,9 @@ class DashboardController extends Controller
             'championModel',
             'upcomingCount',
             'upcomingMatches',
+            'dailyPicks',
+            'bigParlayPicks',
+            'bigParlayProbability',
             'dailyParlays',
             'edges',
             'recentFinished',
@@ -159,5 +170,173 @@ class DashboardController extends Controller
             'nowDouala',
             'lastSyncFormatted'
         ));
+    }
+
+    /**
+     * Construit des sélections par marché et par niveau de risque.
+     * Les probabilités viennent directement de la matrice de scores du modèle.
+     */
+    private function buildDailyPicks(Collection $matches): array
+    {
+        $groups = [
+            'prudent' => [],
+            'equilibre' => [],
+            'audacieux' => [],
+        ];
+
+        foreach ($matches as $match) {
+            $prediction = $match->officialPrediction;
+            if (! $prediction || $prediction->is_abstained) {
+                continue;
+            }
+
+            $markets = $prediction->derived_markets_json ?? [];
+            $home = $match->homeTeam->short_name;
+            $away = $match->awayTeam->short_name;
+            $oneN2 = $markets['1N2'] ?? [
+                'home' => (float) $prediction->prob_home,
+                'draw' => (float) $prediction->prob_draw,
+                'away' => (float) $prediction->prob_away,
+            ];
+            $totals = $markets['totals'] ?? [];
+            $btts = $markets['btts'] ?? [];
+            $doubleChance = $markets['double_chance'] ?? [];
+            $combos = $markets['combos'] ?? [];
+
+            $candidates = [
+                'prudent' => [
+                    ['key' => '1X', 'label' => $home.' ou nul', 'prob' => $doubleChance['1X'] ?? null, 'market' => 'Double chance'],
+                    ['key' => 'X2', 'label' => $away.' ou nul', 'prob' => $doubleChance['X2'] ?? null, 'market' => 'Double chance'],
+                    ['key' => 'over_1_5', 'label' => 'Plus de 1,5 but', 'prob' => $totals['over_1_5'] ?? null, 'market' => 'Total buts'],
+                    ['key' => 'under_4_5', 'label' => 'Moins de 4,5 buts', 'prob' => $totals['under_4_5'] ?? null, 'market' => 'Total buts'],
+                ],
+                'equilibre' => [
+                    ['key' => 'home', 'label' => 'Victoire '.$home, 'prob' => $oneN2['home'] ?? null, 'market' => 'Résultat'],
+                    ['key' => 'draw', 'label' => 'Match nul', 'prob' => $oneN2['draw'] ?? null, 'market' => 'Résultat'],
+                    ['key' => 'away', 'label' => 'Victoire '.$away, 'prob' => $oneN2['away'] ?? null, 'market' => 'Résultat'],
+                    ['key' => 'over_2_5', 'label' => 'Plus de 2,5 buts', 'prob' => $totals['over_2_5'] ?? null, 'market' => 'Total buts'],
+                    ['key' => 'under_2_5', 'label' => 'Moins de 2,5 buts', 'prob' => $totals['under_2_5'] ?? null, 'market' => 'Total buts'],
+                    ['key' => 'btts_yes', 'label' => 'Les deux équipes marquent', 'prob' => $btts['yes'] ?? null, 'market' => 'BTTS'],
+                    ['key' => 'btts_no', 'label' => 'Au moins une équipe ne marque pas', 'prob' => $btts['no'] ?? null, 'market' => 'BTTS'],
+                    ['key' => 'home_win_over_1_5', 'label' => 'Victoire '.$home.' + plus de 1,5 but', 'prob' => $combos['home_win_over_1_5'] ?? null, 'market' => 'Combiné'],
+                    ['key' => 'away_win_over_1_5', 'label' => 'Victoire '.$away.' + plus de 1,5 but', 'prob' => $combos['away_win_over_1_5'] ?? null, 'market' => 'Combiné'],
+                ],
+                'audacieux' => [
+                    ['key' => 'home_win_over_2_5', 'label' => 'Victoire '.$home.' + plus de 2,5 buts', 'prob' => $combos['home_win_over_2_5'] ?? null, 'market' => 'Combiné'],
+                    ['key' => 'away_win_over_2_5', 'label' => 'Victoire '.$away.' + plus de 2,5 buts', 'prob' => $combos['away_win_over_2_5'] ?? null, 'market' => 'Combiné'],
+                    ['key' => 'home_win_btts_yes', 'label' => 'Victoire '.$home.' + les deux marquent', 'prob' => $combos['home_win_btts_yes'] ?? null, 'market' => 'Combiné'],
+                    ['key' => 'away_win_btts_yes', 'label' => 'Victoire '.$away.' + les deux marquent', 'prob' => $combos['away_win_btts_yes'] ?? null, 'market' => 'Combiné'],
+                    ['key' => 'btts_yes', 'label' => 'Les deux équipes marquent', 'prob' => $btts['yes'] ?? null, 'market' => 'BTTS'],
+                ],
+            ];
+
+            $topScore = $prediction->top_scores_json[0] ?? null;
+            if ($topScore && isset($topScore['p'], $topScore['score'])) {
+                $candidates['audacieux'][] = [
+                    'key' => 'exact_score',
+                    'label' => 'Score exact '.$topScore['score'],
+                    'prob' => $topScore['p'],
+                    'market' => 'Score exact',
+                ];
+            }
+
+            foreach ($candidates as $risk => $options) {
+                $options = collect($options)
+                    ->filter(fn (array $option) => is_numeric($option['prob']))
+                    ->map(fn (array $option) => array_merge($option, [
+                        'match' => $match,
+                        'prob' => (float) $option['prob'],
+                    ]))
+                    ->sortByDesc('prob')
+                    ->values();
+
+                $minimum = $risk === 'prudent' ? 0.65 : ($risk === 'equilibre' ? 0.50 : 0.18);
+                $pick = $options->first(fn (array $option) => $option['prob'] >= $minimum);
+                if ($pick) {
+                    $groups[$risk][] = $pick;
+                }
+            }
+        }
+
+        foreach ($groups as $risk => $picks) {
+            $groups[$risk] = collect($picks)
+                ->sortByDesc('prob')
+                ->unique(fn (array $pick) => $pick['match']->id)
+                ->take(4)
+                ->values()
+                ->all();
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Sélection longue destinée au gros combiné.
+     * Une seule sélection par match, priorité aux marchés à forte probabilité.
+     */
+    private function buildBigParlayPicks(): array
+    {
+        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction'])
+            ->whereIn('status', ['SCHEDULED', 'TIMED'])
+            ->where('match_date_utc', '>=', now()->utc())
+            ->whereHas('officialPrediction', fn ($query) => $query
+                ->where('is_official', true)
+                ->where('is_abstained', false))
+            ->orderBy('match_date_utc')
+            ->get();
+
+        $candidates = $matches->map(function (FootballMatch $match): ?array {
+            $prediction = $match->officialPrediction;
+            $markets = $prediction?->derived_markets_json ?? [];
+            $home = $match->homeTeam->short_name;
+            $away = $match->awayTeam->short_name;
+            $oneN2 = $markets['1N2'] ?? [
+                'home' => (float) $prediction->prob_home,
+                'draw' => (float) $prediction->prob_draw,
+                'away' => (float) $prediction->prob_away,
+            ];
+            $doubleChance = $markets['double_chance'] ?? [];
+            $totals = $markets['totals'] ?? [];
+            $btts = $markets['btts'] ?? [];
+
+            $options = [
+                ['label' => $home.' ou nul', 'prob' => $doubleChance['1X'] ?? null, 'market' => 'Double chance'],
+                ['label' => $away.' ou nul', 'prob' => $doubleChance['X2'] ?? null, 'market' => 'Double chance'],
+                ['label' => 'Plus de 1,5 but', 'prob' => $totals['over_1_5'] ?? null, 'market' => 'Total buts'],
+                ['label' => 'Moins de 4,5 buts', 'prob' => $totals['under_4_5'] ?? null, 'market' => 'Total buts'],
+                ['label' => 'Victoire '.$home, 'prob' => $oneN2['home'] ?? null, 'market' => '1N2'],
+                ['label' => 'Victoire '.$away, 'prob' => $oneN2['away'] ?? null, 'market' => '1N2'],
+                ['label' => 'Les deux équipes marquent', 'prob' => $btts['yes'] ?? null, 'market' => 'BTTS'],
+            ];
+
+            $best = collect($options)
+                ->filter(fn (array $option) => is_numeric($option['prob']))
+                ->map(fn (array $option) => array_merge($option, ['prob' => (float) $option['prob']]))
+                ->sortByDesc('prob')
+                ->first(fn (array $option) => $option['prob'] >= 0.55);
+
+            if (! $best) return null;
+
+            return [
+                'match' => $match,
+                'label' => $best['label'],
+                'market' => $best['market'],
+                'prob' => $best['prob'],
+                'league_key' => $match->league?->id ?? $match->league?->name ?? 'unknown',
+            ];
+        })->filter()->sortByDesc('prob')->values();
+
+        $diversified = $candidates->groupBy('league_key')->map(fn (Collection $league) => $league->first());
+        $selected = $diversified->values();
+
+        if ($selected->count() < 10) {
+            $used = $selected->pluck('match.id')->all();
+            $selected = $selected->concat(
+                $candidates->reject(fn (array $pick) => in_array($pick['match']->id, $used, true))
+                    ->take(10 - $selected->count())
+            );
+        }
+
+        return $selected->sortBy('prob')->values()->all();
     }
 }

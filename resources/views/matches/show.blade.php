@@ -7,7 +7,7 @@
                 <span>/</span>
                 <span class="text-[#F0F0E8] font-medium">{{ $match->league->name }}</span>
                 <span>·</span>
-                <span class="mono">{{ $match->match_date_utc->translatedFormat('d F Y à H:i') }} UTC</span>
+                <span class="mono">{{ $match->match_date_utc->timezone('Africa/Douala')->translatedFormat('d F Y à H:i') }} WAT</span>
             </div>
 
             <div class="flex items-center gap-3">

@@ -141,7 +141,7 @@
                             <tr class="hover:bg-[#181F1B] transition-colors">
                                 <td class="py-3 px-3">
                                     <div class="font-bold text-[#F0F0E8]">{{ $vo['match']->homeTeam->name }} vs {{ $vo['match']->awayTeam->name }}</div>
-                                    <div class="text-[10px] text-[#A2ACA3] mono">{{ $vo['match']->match_date_utc->translatedFormat('d M H:i') }} UTC</div>
+                                    <div class="text-[10px] text-[#A2ACA3] mono">{{ $vo['match']->match_date_utc->timezone('Africa/Douala')->translatedFormat('d M H:i') }} WAT</div>
                                 </td>
                                 <td class="py-3 px-3 font-semibold text-[#F0F0E8]">{{ $vo['selection_label'] }}</td>
                                 <td class="py-3 px-3 text-center font-bold text-[#F0F0E8] mono">{{ $vo['market_odds'] }}</td>

@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Services\FootballData\FootballDataService;
+use App\Services\Prediction\PredictionSettlementService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Log;
@@ -62,6 +63,8 @@ class SyncMatchesCommand extends Command
 
         try {
             $result = $this->footballDataService->syncFromFootballDataOrg($dateFrom, $dateTo);
+            $settled = app(PredictionSettlementService::class)->settleFinishedPredictions();
+            $result['evaluations'] = $settled;
 
             $elapsed = round((microtime(true) - $startTime) * 1000);
 
@@ -75,6 +78,7 @@ class SyncMatchesCommand extends Command
                     ['De',                $result['date_from']],
                     ['À',                 $result['date_to']],
                     ['Durée',             "{$elapsed} ms"],
+                    ['Évaluations',       $settled],
                 ]
             );
 

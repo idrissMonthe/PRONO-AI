@@ -25,6 +25,7 @@ from app.core.metrics import (
 )
 from app.core.poisson_regressor import DixonColesModel
 from app.core.elo import EloEngine
+from app.core.market_specialists import MarketSpecialists
 from app.schemas import (
     DevigRequest,
     DevigResponse,
@@ -61,6 +62,7 @@ champion_model = DixonColesModel(xi=0.0019, l2_reg=0.01, rho=-0.04)
 elo_engine = EloEngine(k_factor=20.0, default_home_adv=65.0)
 elo_ratings: Dict[str, float] = {}
 recent_form: Dict[str, List[float]] = {}
+market_specialists = MarketSpecialists()
 
 
 def load_model_state() -> None:
@@ -80,6 +82,7 @@ def load_model_state() -> None:
         elo_ratings.update({k: float(v) for k, v in state.get("elo_ratings", {}).items()})
         recent_form.clear()
         recent_form.update({k: [float(x) for x in v] for k, v in state.get("recent_form", {}).items()})
+        market_specialists.load_state(state.get("market_specialists", {}))
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         champion_model.is_fitted = False
 
@@ -96,6 +99,7 @@ def save_model_state() -> None:
         "is_fitted": champion_model.is_fitted,
         "elo_ratings": elo_ratings,
         "recent_form": recent_form,
+        "market_specialists": market_specialists.state(),
     }), encoding="utf-8")
 
 
@@ -119,7 +123,7 @@ def ready():
     return {
         "status": "ready" if champion_model.is_fitted else "degraded",
         "model_loaded": champion_model.is_fitted,
-        "model_version": "M3_DIXON_COLES_v2.1_CALIBRATED" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+        "model_version": "M3_MARKET_SPECIALISTS_v1" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
         "family": "hybrid",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -128,7 +132,7 @@ def ready():
 @app.get("/v1/model/info", dependencies=[Depends(require_internal_secret)])
 def model_info():
     return {
-        "version": "M3_DIXON_COLES_v2.0" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+            "version": "M3_MARKET_SPECIALISTS_v1" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
         "model_loaded": champion_model.is_fitted,
         "family": "pure",
         "algorithm": "Dixon-Coles Bivariate Poisson with Time Decay and Low-Score Tau Correction",
@@ -159,6 +163,7 @@ def train(req: TrainRequest):
         for item in req.matches
     ]
     champion_model.fit(training_rows)
+    market_specialists.fit(training_rows)
     elo_ratings.clear()
     recent_form.clear()
     # Rebuild signals chronologically so no future result leaks into an earlier rating.
@@ -216,7 +221,20 @@ def predict(req: PredictRequest):
 
     # Compute score matrix
     matrix, residual_mass, n = compute_score_matrix(lh, la, champion_model.rho)
-    markets = extract_match_markets_from_matrix(matrix)
+    specialist_matrices = market_specialists.predict(matrix)
+    outcome_markets = extract_match_markets_from_matrix(specialist_matrices["outcome"])
+    goals_markets = extract_match_markets_from_matrix(specialist_matrices["goals"])
+    btts_markets = extract_match_markets_from_matrix(specialist_matrices["btts"])
+    exact_markets = extract_match_markets_from_matrix(specialist_matrices["exact_score"])
+    markets = {
+        **outcome_markets,
+        "totals": goals_markets["totals"],
+        "btts": btts_markets["btts"],
+        "combos": goals_markets["combos"],
+        "top_scores": exact_markets["top_scores"],
+        "other_scores_mass": exact_markets["other_scores_mass"],
+    }
+    warnings.append("specialized_market_models_applied")
 
     p_home = markets["1N2"]["home"]
     p_draw = markets["1N2"]["draw"]
@@ -304,9 +322,9 @@ def predict(req: PredictRequest):
     return {
         "match_id": req.match_id or "match-sim",
         "model": {
-            "version": "M3_DIXON_COLES_v2.1_CALIBRATED" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
+            "version": "M3_MARKET_SPECIALISTS_v1" if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
             "family": "pure",
-            "calibration_version": "calib_v2_market_blend_gated",
+            "calibration_version": "calib_v3_market_specialists",
         },
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "data_snapshot_hash": snapshot_hash,

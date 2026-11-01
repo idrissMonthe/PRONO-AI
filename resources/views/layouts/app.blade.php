@@ -36,7 +36,7 @@
 
         <div class="flex items-center space-x-3 text-xs">
             <div class="hidden sm:block text-[#A2ACA3] mono">
-                <span>{{ now()->translatedFormat('d M Y') }}</span>
+                <span>{{ now('Africa/Douala')->translatedFormat('d M Y') }}</span>
             </div>
 
             <a href="{{ route('settings.index') }}" class="p-2 rounded border border-[#303A32] bg-[#181F1B] hover:border-[#C3A16A]/60 text-[#A2ACA3] hover:text-[#F0F0E8] transition-colors" title="Réglages">
@@ -79,6 +79,10 @@
 
                 <a href="{{ route('results') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('results') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
                     <span class="w-4 text-center">✓</span><span>Résultats</span>
+                </a>
+
+                <a href="{{ route('performance.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('performance.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
+                    <span class="w-4 text-center">↗</span><span>Performance IA</span>
                 </a>
 
                 <a href="{{ route('comparator.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('comparator.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
@@ -134,6 +138,10 @@
 
                 <a href="{{ route('results') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('results') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
                     <span class="w-4 text-center">✓</span><span>Résultats</span>
+                </a>
+
+                <a href="{{ route('performance.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('performance.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">
+                    <span class="w-4 text-center">↗</span><span>Performance IA</span>
                 </a>
 
                 <a href="{{ route('comparator.index') }}" class="flex items-center space-x-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors {{ request()->routeIs('comparator.*') ? 'bg-[#222B25] text-[#C3A16A] border border-[#303A32]' : 'text-[#A2ACA3] hover:text-[#F0F0E8] hover:bg-[#181F1B]' }}">

@@ -36,6 +36,7 @@ class FootballMatch extends Model
 
     protected $casts = [
         'match_date_utc' => 'datetime',
+        'last_synced_at' => 'datetime',
         'is_neutral_ground' => 'boolean',
         'quality_score' => 'decimal:2',
         'home_score' => 'integer',

@@ -20,7 +20,7 @@ class GeneratePredictionsCommand extends Command
     public function handle(PredictionClient $client, HashChainService $chain): int
     {
         $model = ModelVersion::firstOrCreate(
-            ['version_name' => 'M3_DIXON_COLES_v2.1_CALIBRATED'],
+            ['version_name' => 'M3_MARKET_SPECIALISTS_v1'],
             ['family' => 'hybrid', 'algorithm' => 'Dixon-Coles + marché calibré', 'status' => 'champion']
         );
 

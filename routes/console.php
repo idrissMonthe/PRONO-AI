@@ -5,6 +5,8 @@ use App\Console\Commands\SyncMatchesCommand;
 use App\Console\Commands\TrainPredictionModelCommand;
 use App\Console\Commands\GeneratePredictionsCommand;
 use App\Console\Commands\SyncOddsCommand;
+use App\Console\Commands\SyncLiveScoresCommand;
+use App\Console\Commands\SettlePredictionsCommand;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -27,19 +29,35 @@ Schedule::command(SyncMatchesCommand::class)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-sync.log'));
 
-Schedule::command(TrainPredictionModelCommand::class)
-    ->dailyAt('06:30')
-    ->timezone('Africa/Douala')
-    ->withoutOverlapping()
-    ->runInBackground()
-    ->appendOutputTo(storage_path('logs/oracle-training.log'));
-
 Schedule::command(SyncOddsCommand::class)
     ->everyThirtyMinutes()
     ->timezone('Africa/Douala')
     ->withoutOverlapping()
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-odds.log'));
+
+// Scores et statuts live : un appel par minute, côté serveur.
+Schedule::command(SyncLiveScoresCommand::class)
+    ->everyMinute()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-live.log'));
+
+Schedule::command(SettlePredictionsCommand::class)
+    ->everyTenMinutes()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-settlement.log'));
+
+// Réentraînement en fin de journée, après les derniers scores et évaluations.
+Schedule::command(TrainPredictionModelCommand::class)
+    ->dailyAt('23:55')
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-training.log'));
 
 Schedule::command(GeneratePredictionsCommand::class)
     ->dailyAt('06:45')

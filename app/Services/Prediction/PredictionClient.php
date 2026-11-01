@@ -152,6 +152,8 @@ class PredictionClient
         $bttsMass = 0.0;
         $cleanSheetHomeMass = 0.0;
         $cleanSheetAwayMass = 0.0;
+        $homeWinBttsMass = 0.0;
+        $awayWinBttsMass = 0.0;
         $totalGoalsMass = [];
         $scoreRows = [];
 
@@ -174,6 +176,8 @@ class PredictionClient
 
                 if ($homeGoals > 0 && $awayGoals > 0) {
                     $bttsMass += $probability;
+                    if ($homeGoals > $awayGoals) $homeWinBttsMass += $probability;
+                    if ($awayGoals > $homeGoals) $awayWinBttsMass += $probability;
                 }
                 if ($awayGoals === 0) {
                     $cleanSheetHomeMass += $probability;
@@ -213,6 +217,33 @@ class PredictionClient
             $totals['under_' . $key] = round(1.0 - $over, 4);
         }
 
+        $combos = [];
+        foreach ([1.5, 2.5, 3.5, 4.5] as $threshold) {
+            $key = str_replace('.', '_', (string) $threshold);
+            $homeWinOver = 0.0;
+            $awayWinOver = 0.0;
+            $homeWinUnder = 0.0;
+            $awayWinUnder = 0.0;
+            foreach ($homeScores as $homeGoals => $homeProbability) {
+                foreach ($awayScores as $awayGoals => $awayProbability) {
+                    $cell = ($homeProbability * $awayProbability) / $matrixMass;
+                    $isHomeWin = $homeGoals > $awayGoals;
+                    $isAwayWin = $awayGoals > $homeGoals;
+                    $isOver = ($homeGoals + $awayGoals) > $threshold;
+                    if ($isHomeWin && $isOver) $homeWinOver += $cell;
+                    if ($isAwayWin && $isOver) $awayWinOver += $cell;
+                    if ($isHomeWin && ! $isOver) $homeWinUnder += $cell;
+                    if ($isAwayWin && ! $isOver) $awayWinUnder += $cell;
+                }
+            }
+            $combos['home_win_over_'.$key] = round($homeWinOver, 4);
+            $combos['away_win_over_'.$key] = round($awayWinOver, 4);
+            $combos['home_win_under_'.$key] = round($homeWinUnder, 4);
+            $combos['away_win_under_'.$key] = round($awayWinUnder, 4);
+        }
+        $combos['home_win_btts_yes'] = round($homeWinBttsMass / $matrixMass, 4);
+        $combos['away_win_btts_yes'] = round($awayWinBttsMass / $matrixMass, 4);
+
         $probabilityHome = $homeWinMass / $matrixMass;
         $probabilityDraw = $drawMass / $matrixMass;
         $probabilityAway = $awayWinMass / $matrixMass;
@@ -248,6 +279,7 @@ class PredictionClient
                     '12' => round($probabilityHome + $probabilityAway, 4),
                 ],
                 'totals' => $totals,
+                'combos' => $combos,
                 'btts' => [
                     'yes' => round($bttsMass / $matrixMass, 4),
                     'no' => round(1.0 - $bttsMass / $matrixMass, 4),

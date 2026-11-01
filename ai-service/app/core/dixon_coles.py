@@ -127,6 +127,23 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
         totals[f"over_{str(threshold).replace('.', '_')}"] = round(p_over, 4)
         totals[f"under_{str(threshold).replace('.', '_')}"] = round(p_under, 4)
 
+    # Joint markets: probabilities are summed from the same score matrix.
+    # They are not estimated by multiplying separate market probabilities.
+    combos = {}
+    for threshold in [1.5, 2.5, 3.5, 4.5]:
+        total_mask = total_goals_grid > threshold
+        home_win = np.tril(np.ones_like(matrix, dtype=bool), -1)
+        away_win = np.triu(np.ones_like(matrix, dtype=bool), 1)
+        key = str(threshold).replace('.', '_')
+        combos[f"home_win_over_{key}"] = round(float(np.sum(matrix[home_win & total_mask])), 4)
+        combos[f"away_win_over_{key}"] = round(float(np.sum(matrix[away_win & total_mask])), 4)
+        combos[f"home_win_under_{key}"] = round(float(np.sum(matrix[home_win & ~total_mask])), 4)
+        combos[f"away_win_under_{key}"] = round(float(np.sum(matrix[away_win & ~total_mask])), 4)
+
+    btts_yes_mask = (i_indices >= 1) & (j_indices >= 1)
+    combos["home_win_btts_yes"] = round(float(np.sum(matrix[home_win & btts_yes_mask])), 4)
+    combos["away_win_btts_yes"] = round(float(np.sum(matrix[away_win & btts_yes_mask])), 4)
+
     # 5. Both Teams To Score (BTTS)
     # i >= 1 and j >= 1
     p_btts_yes = float(np.sum(matrix[1:, 1:]))
@@ -182,6 +199,7 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
             "push_prob": round(p_draw, 4),
         },
         "totals": totals,
+        "combos": combos,
         "btts": {
             "yes": round(p_btts_yes, 4),
             "no": round(p_btts_no, 4),

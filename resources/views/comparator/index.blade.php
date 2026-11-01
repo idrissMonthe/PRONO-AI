@@ -135,7 +135,7 @@
                 <div class="divide-y divide-[#303A32] text-xs">
                     @forelse($h2hMatches as $hm)
                         <div class="py-2.5 flex items-center justify-between">
-                            <span class="mono text-[#A2ACA3]">{{ $hm->match_date_utc->translatedFormat('d M Y') }}</span>
+                            <span class="mono text-[#A2ACA3]">{{ $hm->match_date_utc->timezone('Africa/Douala')->translatedFormat('d M Y') }}</span>
                             <span class="font-bold text-[#F0F0E8]">{{ $hm->homeTeam->name }} vs {{ $hm->awayTeam->name }}</span>
                             <span class="mono font-extrabold px-2 py-0.5 rounded bg-[#222B25] text-[#C3A16A]">
                                 {{ $hm->home_score }} - {{ $hm->away_score }}

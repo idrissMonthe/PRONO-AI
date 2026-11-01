@@ -238,7 +238,7 @@ class FootballDataService
             $missing[] = 'source_unverified';
         }
 
-        if (in_array($match->status, ['SCHEDULED', 'TIMED', 'IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED'], true)) {
+        if (in_array($match->status, ['SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED'], true)) {
             $score += 5;
         } else {
             $missing[] = 'status_uncertain';
