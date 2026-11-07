@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\PredictionEvaluation;
+use App\Models\ModelVersion;
 use Illuminate\Http\Request;
 
 class PredictionPerformanceController extends Controller
@@ -43,6 +44,21 @@ class PredictionPerformanceController extends Controller
                 'rate' => $row->total > 0 ? round(($row->won / $row->total) * 100, 1) : 0,
             ]);
 
-        return view('performance.index', compact('evaluations', 'total', 'won', 'lost', 'rate', 'marketStats'));
+        $calibrationStats = ModelVersion::query()
+            ->whereNotNull('validation_metrics')
+            ->orderByDesc('updated_at')
+            ->get()
+            ->flatMap(function (ModelVersion $model): array {
+                return collect($model->validation_metrics['markets'] ?? [])->map(fn (array $metrics, string $market) => [
+                    'model' => $model->version_name,
+                    'market' => $market,
+                    'sample_size' => $metrics['sample_size'] ?? 0,
+                    'brier' => $metrics['brier'] ?? null,
+                    'log_loss' => $metrics['log_loss'] ?? null,
+                    'ece' => $metrics['ece'] ?? null,
+                ])->all();
+            })->values();
+
+        return view('performance.index', compact('evaluations', 'total', 'won', 'lost', 'rate', 'marketStats', 'calibrationStats'));
     }
 }

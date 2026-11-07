@@ -114,18 +114,24 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
     p_dnb_home = p_home / (1.0 - p_draw) if p_draw < 0.999 else 0.5
     p_dnb_away = p_away / (1.0 - p_draw) if p_draw < 0.999 else 0.5
 
-    # 4. Over / Under Totals (0.5 to 4.5)
+    # 4. Over / Under Totals. All probabilities are direct sums of the same
+    # score matrix, so the market families remain mathematically coherent.
     # Total goals k = i + j
     totals = {}
     i_indices, j_indices = np.indices((n_plus_one, n_plus_one))
     total_goals_grid = i_indices + j_indices
 
-    for threshold in [0.5, 1.5, 2.5, 3.5, 4.5]:
+    for threshold in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         mask_over = total_goals_grid > threshold
         p_over = float(np.sum(matrix[mask_over]))
         p_under = 1.0 - p_over
         totals[f"over_{str(threshold).replace('.', '_')}"] = round(p_over, 4)
         totals[f"under_{str(threshold).replace('.', '_')}"] = round(p_under, 4)
+
+    exact_totals = {
+        str(goals): round(float(np.sum(matrix[total_goals_grid == goals])), 4)
+        for goals in range(min(10, int(total_goals_grid.max()) + 1))
+    }
 
     # Joint markets: probabilities are summed from the same score matrix.
     # They are not estimated by multiplying separate market probabilities.
@@ -155,7 +161,8 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
     # Clean sheet away = i == 0
     p_cs_away = float(np.sum(matrix[0, :]))
 
-    # 7. Asian Handicap (-0.5, 0.0, +0.5, -1.0, +1.0, -1.5, +1.5)
+    # 7. European and Asian handicaps. Quarter lines are split across their
+    # adjacent half-lines and retain win/push/half-win/half-loss outcomes.
     goal_diff_grid = i_indices - j_indices
     goal_margin = {
         f"home_by_{margin}_plus": round(float(np.sum(matrix[goal_diff_grid >= margin])), 4)
@@ -165,6 +172,48 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
         f"away_by_{margin}_plus": round(float(np.sum(matrix[goal_diff_grid <= -margin])), 4)
         for margin in (1, 2, 3)
     })
+    european_handicap = {
+        str(line).replace('-', 'm').replace('.', '_'): {
+            'home': round(float(np.sum(matrix[goal_diff_grid + line > 0])), 4),
+            'draw': round(float(np.sum(matrix[goal_diff_grid + line == 0])), 4),
+            'away': round(float(np.sum(matrix[goal_diff_grid + line < 0])), 4),
+        }
+        for line in (-2, -1, 0, 1, 2)
+    }
+    asian_handicap = {}
+    for line in (-2.0, -1.5, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 1.5, 2.0):
+        lower = np.floor(line * 2.0) / 2.0
+        upper = np.ceil(line * 2.0) / 2.0
+        lower_outcome = goal_diff_grid + lower
+        upper_outcome = goal_diff_grid + upper
+        win = float(np.sum(matrix[(lower_outcome > 0) & (upper_outcome > 0)]))
+        push = float(np.sum(matrix[(lower_outcome == 0) & (upper_outcome == 0)]))
+        loss = float(np.sum(matrix[(lower_outcome < 0) & (upper_outcome < 0)]))
+        half_win = float(np.sum(matrix[((lower_outcome == 0) & (upper_outcome > 0)) | ((upper_outcome == 0) & (lower_outcome > 0))]))
+        half_loss = float(np.sum(matrix[((lower_outcome == 0) & (upper_outcome < 0)) | ((upper_outcome == 0) & (lower_outcome < 0))]))
+        key = str(line).replace('-', 'm').replace('.', '_')
+        asian_handicap[key] = {
+            'home': {'win': round(win, 4), 'push': round(push, 4), 'half_win': round(half_win, 4), 'half_loss': round(half_loss, 4), 'loss': round(loss, 4)},
+            'away': {'win': round(loss, 4), 'push': round(push, 4), 'half_win': round(half_loss, 4), 'half_loss': round(half_win, 4), 'loss': round(win, 4)},
+            'line_home': line,
+        }
+    team_totals = {"home": {}, "away": {}}
+    home_goal_probabilities = np.sum(matrix, axis=1)
+    away_goal_probabilities = np.sum(matrix, axis=0)
+    for threshold in (0.5, 1.5, 2.5, 3.5):
+        key = str(threshold).replace(".", "_")
+        team_totals["home"][f"over_{key}"] = round(
+            float(np.sum(home_goal_probabilities[np.arange(n_plus_one) > threshold])), 4
+        )
+        team_totals["home"][f"under_{key}"] = round(
+            1.0 - team_totals["home"][f"over_{key}"], 4
+        )
+        team_totals["away"][f"over_{key}"] = round(
+            float(np.sum(away_goal_probabilities[np.arange(n_plus_one) > threshold])), 4
+        )
+        team_totals["away"][f"under_{key}"] = round(
+            1.0 - team_totals["away"][f"over_{key}"], 4
+        )
     # Home -0.5 is same as Home win (goal_diff >= 1)
     # Home +0.5 is same as 1X (goal_diff >= 0)
     # Home 0.0 is DNB
@@ -207,7 +256,11 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
             "push_prob": round(p_draw, 4),
         },
         "goal_margin": goal_margin,
+        "european_handicap": european_handicap,
+        "asian_handicap": asian_handicap,
+        "team_totals": team_totals,
         "totals": totals,
+        "exact_totals": exact_totals,
         "combos": combos,
         "btts": {
             "yes": round(p_btts_yes, 4),

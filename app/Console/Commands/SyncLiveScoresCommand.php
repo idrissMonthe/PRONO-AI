@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\SystemAlert;
 use App\Services\FootballData\FootballDataService;
 use App\Services\Prediction\PredictionSettlementService;
 use Carbon\Carbon;
@@ -21,8 +22,10 @@ class SyncLiveScoresCommand extends Command
             $settled = app(PredictionSettlementService::class)->settleFinishedPredictions();
             $result['evaluations'] = $settled;
             $this->info("Scores live actualisés : {$result['imported']} match(s).");
+            SystemAlert::resolve('provider.football-data.org.live_stale');
             return self::SUCCESS;
         } catch (Throwable $exception) {
+            SystemAlert::raise('provider.football-data.org.live_stale', 'Les scores live ne peuvent plus être actualisés : '.$exception->getMessage(), 'critical', 'football-data.org');
             $this->error($exception->getMessage());
             return self::FAILURE;
         }

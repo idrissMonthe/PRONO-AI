@@ -18,6 +18,14 @@
         @endforelse
     </div>
 
+    @if($calibrationStats->isNotEmpty())
+        <div class="performance-market-grid">
+            @foreach($calibrationStats->take(8) as $stat)
+                <div class="performance-market-card"><span>{{ $stat['market'] }}</span><strong>ECE {{ $stat['ece'] !== null ? number_format($stat['ece'] * 100, 1) : '—' }}%</strong><small>{{ $stat['sample_size'] }} obs. · Brier {{ $stat['brier'] ?? '—' }} · {{ $stat['model'] }}</small></div>
+            @endforeach
+        </div>
+    @endif
+
     <form method="GET" class="filter-bar">
         <label>Statut
             <select name="status"><option value="">Tous</option><option value="WON" @selected(request('status') === 'WON')>Réussis</option><option value="LOST" @selected(request('status') === 'LOST')>Manqués</option></select>

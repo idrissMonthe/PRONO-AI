@@ -97,11 +97,21 @@ class MatchController extends Controller
             });
         }
 
+        $reliableQuery = clone $query;
+        $reliableQuery->whereHas('officialPrediction', function ($predictionQuery) {
+                $predictionQuery->where('is_official', true)
+                    ->where('is_abstained', false)
+                    ->whereNotNull('published_market')
+                    ->whereIn('confidence_tier', ['medium', 'high']);
+            });
+        $reliableCount = $reliableQuery->count();
+
         if ($request->boolean('reliable')) {
             $query->whereHas('officialPrediction', function ($predictionQuery) {
                 $predictionQuery->where('is_official', true)
                     ->where('is_abstained', false)
-                    ->where('confidence_tier', 'high');
+                    ->whereNotNull('published_market')
+                    ->whereIn('confidence_tier', ['medium', 'high']);
             });
         }
 
@@ -134,6 +144,7 @@ class MatchController extends Controller
                 ->count(),
             'live' => FootballMatch::whereIn('status', ['LIVE', 'IN_PLAY', 'PAUSED'])->count(),
             'finished' => FootballMatch::whereIn('status', ['FINISHED', 'AWARDED'])->count(),
+            'reliable' => $reliableCount,
         ];
 
         // Indicateur de dernière synchronisation depuis l'API
@@ -147,6 +158,7 @@ class MatchController extends Controller
             'counts',
             'nowDouala',
             'lastSyncFormatted'
+            ,'reliableCount'
         ));
     }
 
@@ -170,7 +182,7 @@ class MatchController extends Controller
                 $isLive = in_array($match->status, ['LIVE', 'IN_PLAY', 'PAUSED'], true);
                 $minute = null;
                 if (in_array($match->status, ['LIVE', 'IN_PLAY'], true)) {
-                    $elapsedSeconds = abs((int) $match->match_date_utc->diffInSeconds($now));
+                    $elapsedSeconds = max(0, $now->timestamp - $match->match_date_utc->timestamp);
                     $minute = max(1, min(120, (int) floor($elapsedSeconds / 60)));
                 }
 
@@ -231,6 +243,7 @@ class MatchController extends Controller
             'predData'      => $data['pronostic'],
             'scoreMatrix'   => $data['score_matrix'],
             'devigAnalysis' => $data['cotes']['devig_analysis'] ?? null,
+            'marketOdds'    => $data['cotes']['markets'] ?? [],
             'aiExplanation' => $data['signaux_ia'],
             'homeRating'    => $data['forme']['home_elo'] ?? null,
             'awayRating'    => $data['forme']['away_elo'] ?? null,
@@ -258,6 +271,7 @@ class MatchController extends Controller
             'officialPrediction.hashChain',
             'officialPrediction.modelVersion',
             'oddsSnapshots.bookmaker',
+            'oddsSnapshots.market',
             'stats',
         ])->findOrFail($id);
 
@@ -400,6 +414,21 @@ class MatchController extends Controller
             ];
         }
 
+        // Catalogue normalisé des marchés réellement reçus d'un fournisseur.
+        // Une absence de cote reste une absence : aucune cote synthétique n'est
+        // présentée comme une cote bookmaker.
+        $marketOdds = $oddsSnapshots
+            ->where('is_closing', false)
+            ->sortByDesc(fn ($odd) => ($odd->snapshot_time_utc?->timestamp ?? 0))
+            ->groupBy(fn ($odd) => $odd->market?->code ?? 'UNKNOWN')
+            ->map(fn ($rows) => $rows->unique(fn ($odd) => ($odd->selection ?? '').'|'.($odd->line ?? ''))->values()->map(fn ($odd) => [
+                'selection' => $odd->selection,
+                'line' => $odd->line !== null ? (float) $odd->line : null,
+                'odds' => (float) $odd->decimal_odds,
+                'bookmaker' => $odd->bookmaker?->name ?? $odd->source,
+                'updated_at' => $odd->snapshot_time_utc?->timezone($tz)->format('d/m/Y H:i'),
+            ])->all())->all();
+
         // ─────────────────────────────────────────────────────────────────────
         // TAB 4: FORME & HISTORIQUE (5 derniers matchs réels de chaque équipe)
         // ─────────────────────────────────────────────────────────────────────
@@ -496,6 +525,7 @@ class MatchController extends Controller
                 'has_odds'       => ($homeOdds && $drawOdds && $awayOdds),
                 'summary'        => $oddsSummary,
                 'devig_analysis' => $devigAnalysis,
+                'markets'        => $marketOdds,
             ],
             'forme' => [
                 'home_form_letters' => $homeForm['letters'],

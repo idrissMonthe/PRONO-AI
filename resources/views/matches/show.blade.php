@@ -225,8 +225,13 @@
             @php
                 $derivedMarkets = $predData['markets'] ?? [];
                 $totals = $derivedMarkets['totals'] ?? [];
+                $exactTotals = $derivedMarkets['exact_totals'] ?? [];
+                $asianHandicap = $derivedMarkets['asian_handicap'] ?? [];
+                $topScores = $predData['top_scores'] ?? [];
                 $btts = $derivedMarkets['btts'] ?? [];
                 $cleanSheet = $derivedMarkets['clean_sheet'] ?? [];
+                $teamTotals = $derivedMarkets['team_totals'] ?? [];
+                $goalMargin = $derivedMarkets['goal_margin'] ?? [];
             @endphp
 
             <div class="grid grid-cols-2 gap-3 text-xs">
@@ -294,8 +299,92 @@
                         <strong class="text-[#A2ACA3]">{{ isset($btts['no']) ? round($btts['no'] * 100, 1) . '%' : '—' }}</strong>
                     </div>
                     <div class="text-[10px] text-[#A2ACA3] pt-0.5 mono">
-                        CS {{ $match->homeTeam->short_name }}: {{ isset($cleanSheet['home']) ? round($cleanSheet['home'] * 100, 1) . '%' : '—' }}
+                        {{ $match->awayTeam->short_name }} ne marque pas: {{ isset($cleanSheet['home']) ? round($cleanSheet['home'] * 100, 1) . '%' : '—' }}
                     </div>
+                    <div class="text-[10px] text-[#A2ACA3] mono">
+                        {{ $match->homeTeam->short_name }} ne marque pas: {{ isset($cleanSheet['away']) ? round($cleanSheet['away'] * 100, 1) . '%' : '—' }}
+                    </div>
+                </div>
+
+                <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
+                    <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Lignes étendues</span>
+                    @foreach(['over_0_5' => '+0,5', 'over_3_5' => '+3,5', 'over_4_5' => '+4,5', 'over_5_5' => '+5,5'] as $key => $label)
+                        <div class="flex justify-between mono">
+                            <span>{{ $label }} buts :</span>
+                            <strong class="text-[#C3A16A]">{{ isset($totals[$key]) ? round($totals[$key] * 100, 1) . '%' : '—' }}</strong>
+                        </div>
+                    @endforeach
+                </div>
+
+                <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
+                    <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Handicap asiatique</span>
+                    @foreach(['m1_5' => '-1,5', 'm0_5' => '-0,5', 'm0_25' => '-0,25', '0' => '0', '0_25' => '+0,25', '0_5' => '+0,5', '1_5' => '+1,5'] as $key => $label)
+                        @if(isset($asianHandicap[$key]['home']))
+                            <div class="flex justify-between mono">
+                                <span>{{ $match->homeTeam->short_name }} {{ $label }} :</span>
+                                <strong class="text-[#F0F0E8]">{{ round(($asianHandicap[$key]['home']['win'] + 0.5 * $asianHandicap[$key]['home']['half_win']) * 100, 1) }}%</strong>
+                            </div>
+                        @endif
+                    @endforeach
+                    <div class="text-[10px] text-[#A2ACA3]">La valeur affichée intègre les demi-gains ; remboursement et demi-perte sont conservés dans le détail du modèle.</div>
+                </div>
+
+                <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
+                    <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Scores et totaux exacts</span>
+                    @foreach(array_slice($topScores, 0, 5) as $score)
+                        <div class="flex justify-between mono"><span>Score {{ $score['score'] ?? '—' }} :</span><strong class="text-[#C3A16A]">{{ round(($score['p'] ?? 0) * 100, 1) }}%</strong></div>
+                    @endforeach
+                    @foreach(array_slice($exactTotals, 0, 4, true) as $goals => $probability)
+                        <div class="flex justify-between mono"><span>Total exact {{ $goals }} :</span><strong class="text-[#A2ACA3]">{{ round($probability * 100, 1) }}%</strong></div>
+                    @endforeach
+                    <div class="text-[10px] text-[#D68D86]">Marché fortement incertain : le score en tête n’est pas une sélection sûre.</div>
+                </div>
+
+                <div class="col-span-2 p-3 rounded bg-[#222B25] border border-[#303A32] space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Cotes de marchés disponibles</span>
+                        <span class="text-[10px] text-[#A2ACA3]">Aucune cote n’est créée si le fournisseur ne la transmet pas.</span>
+                    </div>
+                    @forelse($marketOdds as $marketCode => $rows)
+                        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] mono">
+                            <strong class="text-[#C3A16A]">{{ $marketCode }}</strong>
+                            @foreach(array_slice($rows, 0, 8) as $odd)
+                                <span class="text-[#F0F0E8]">{{ $odd['selection'] }}{{ $odd['line'] !== null ? ' '.$odd['line'] : '' }} : {{ number_format($odd['odds'], 2) }}</span>
+                            @endforeach
+                        </div>
+                    @empty
+                        <div class="text-[11px] text-[#A2ACA3]">Aucun marché bookmaker supplémentaire disponible pour ce match.</div>
+                    @endforelse
+                </div>
+
+                <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
+                    <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Buts par équipe</span>
+                    @foreach(['home' => $match->homeTeam->short_name, 'away' => $match->awayTeam->short_name] as $side => $teamName)
+                        <div class="flex justify-between mono">
+                            <span>{{ $teamName }} +0,5 :</span>
+                            <strong class="text-[#88B69A]">{{ isset($teamTotals[$side]['over_0_5']) ? round($teamTotals[$side]['over_0_5'] * 100, 1) . '%' : '—' }}</strong>
+                        </div>
+                        <div class="flex justify-between mono">
+                            <span>{{ $teamName }} +1,5 :</span>
+                            <strong class="text-[#C3A16A]">{{ isset($teamTotals[$side]['over_1_5']) ? round($teamTotals[$side]['over_1_5'] * 100, 1) . '%' : '—' }}</strong>
+                        </div>
+                    @endforeach
+                </div>
+
+                <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
+                    <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Marge de victoire</span>
+                    @foreach([
+                        'home_by_1_plus' => $match->homeTeam->short_name.' par 1+',
+                        'home_by_2_plus' => $match->homeTeam->short_name.' par 2+',
+                        'away_by_1_plus' => $match->awayTeam->short_name.' par 1+',
+                        'away_by_2_plus' => $match->awayTeam->short_name.' par 2+',
+                    ] as $key => $label)
+                        <div class="flex justify-between mono">
+                            <span>{{ $label }} :</span>
+                            <strong class="text-[#C3A16A]">{{ isset($goalMargin[$key]) ? round($goalMargin[$key] * 100, 1) . '%' : '—' }}</strong>
+                        </div>
+                    @endforeach
+                </div>
                 </div>
             </div>
         </div>
@@ -515,4 +604,3 @@
         });
     </script>
 </x-app-layout>
-

@@ -3,14 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Models\FootballMatch;
-use App\Models\Market;
-use App\Models\OddsSnapshot;
 use App\Models\PaperBet;
 use App\Models\Prediction;
+use App\Models\SystemAlert;
 use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
+use App\Services\Prediction\LiveFlashPickService;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Http\Request;
@@ -47,7 +47,8 @@ class DashboardController extends Controller
         OddsService $oddsService,
         HashChainService $hashChainService,
         PredictionClient $predictionClient,
-        ParlayService $parlayService
+        ParlayService $parlayService,
+        LiveFlashPickService $liveFlashPickService
     ) {
         $tz = 'Africa/Douala';
         $nowDouala = Carbon::now($tz);
@@ -85,15 +86,42 @@ class DashboardController extends Controller
                 ->get();
         }
 
-        $oneN2MarketId = Market::where('code', '1N2')->value('id');
-        $dailyPicks = $this->buildDailyPicks($upcomingMatches, $oddsService, $oneN2MarketId);
-        $bigParlayPicks = $this->buildBigParlayPicks($oddsService, $oneN2MarketId);
+        $dailyPicks = $this->buildDailyPicks($upcomingMatches);
+        $liveMatches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction', 'stats'])
+            ->whereIn('status', ['LIVE', 'IN_PLAY', 'PAUSED'])
+            ->whereNotNull('home_score')
+            ->whereNotNull('away_score')
+            ->where('last_synced_at', '>=', now()->utc()->subMinutes(3))
+            ->get();
+        $hasLiveMatches = $liveMatches->isNotEmpty();
+        $liveFlashPicks = $liveMatches
+            ->map(fn (FootballMatch $match): ?array => $liveFlashPickService->build($match))
+            ->filter()
+            ->sortByDesc('prob')
+            ->values()
+            ->all();
+        $bigParlayPicks = $this->buildBigParlayPicks();
         $bigParlayProbabilities = collect($bigParlayPicks)->map(
             fn (array $picks): float => collect($picks)->reduce(
                 fn (float $carry, array $pick): float => $carry * $pick['prob'],
                 1.0
             )
         )->all();
+        $bigParlayStatus = [
+            'future_matches' => FootballMatch::whereIn('status', ['SCHEDULED', 'TIMED'])
+                ->where('match_date_utc', '>=', now()->utc())
+                ->count(),
+            'official_predictions' => FootballMatch::whereIn('status', ['SCHEDULED', 'TIMED'])
+                ->where('match_date_utc', '>=', now()->utc())
+                ->whereHas('officialPrediction', fn ($query) => $query->where('is_official', true))
+                ->count(),
+            'validated_predictions' => FootballMatch::whereIn('status', ['SCHEDULED', 'TIMED'])
+                ->where('match_date_utc', '>=', now()->utc())
+                ->whereHas('officialPrediction', fn ($query) => $query
+                    ->where('is_official', true)
+                    ->where('is_abstained', false))
+                ->count(),
+        ];
 
         // 4. Écarts modèle / marché (Value Bets)
         $edges = [];
@@ -151,6 +179,7 @@ class DashboardController extends Controller
         ];
 
         $integrity = $hashChainService->verifyLedgerIntegrity();
+        $systemAlerts = SystemAlert::where('status', 'open')->orderByDesc('severity')->orderByDesc('last_seen_at_utc')->take(3)->get();
 
         // Dernière synchronisation
         $lastSync = FootballMatch::whereNotNull('last_synced_at')->max('last_synced_at');
@@ -163,14 +192,18 @@ class DashboardController extends Controller
             'upcomingCount',
             'upcomingMatches',
             'dailyPicks',
+            'liveFlashPicks',
+            'hasLiveMatches',
             'bigParlayPicks',
             'bigParlayProbabilities',
+            'bigParlayStatus',
             'dailyParlays',
             'edges',
             'recentFinished',
             'modelHealth',
             'paperSummary',
             'integrity',
+            'systemAlerts',
             'nowDouala',
             'lastSyncFormatted'
         ));
@@ -178,9 +211,9 @@ class DashboardController extends Controller
 
     /**
      * Construit des sélections par marché et par niveau de risque.
-     * Les abstentions ne peuvent utiliser que des résultats dérivés de cotes 1N2 complètes.
+     * Les probabilités affichées proviennent toujours de la prédiction du modèle.
      */
-    private function buildDailyPicks(Collection $matches, OddsService $oddsService, ?int $marketId): array
+    private function buildDailyPicks(Collection $matches): array
     {
         $groups = [
             'prudent' => [],
@@ -194,16 +227,24 @@ class DashboardController extends Controller
                 continue;
             }
 
-            $source = 'Modèle';
-            $markets = $prediction->derived_markets_json ?? [];
-            if ($prediction->is_abstained) {
-                $marketFallback = $marketId ? $this->marketFallback($match, $oddsService, $marketId) : null;
-                if (! $marketFallback) {
-                    continue;
-                }
+            if ($prediction->published_market) {
+                if ($prediction->is_abstained) continue;
+                $published = $this->publishedPick($match, $prediction);
+                if (! $published) continue;
+                $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
+                $groups[$risk][] = array_merge($published, [
+                    'match' => $match,
+                    'source' => 'Révision validée',
+                ]);
+                continue;
+            }
 
-                $markets = $marketFallback;
-                $source = 'Marché sans marge';
+            $source = 'Modèle';
+            $sourceLabel = $prediction->is_abstained ? 'Modèle · fiabilité limitée' : 'Modèle';
+            $markets = $prediction->derived_markets_json ?? [];
+            $supportsScoreMarkets = $this->supportsScoreMarketPicks($prediction);
+            if (! $supportsScoreMarkets) {
+                $markets = array_intersect_key($markets, ['1N2' => true, 'double_chance' => true]);
             }
             $home = $match->homeTeam->short_name;
             $away = $match->awayTeam->short_name;
@@ -217,23 +258,10 @@ class DashboardController extends Controller
             $doubleChance = $markets['double_chance'] ?? [];
             $combos = $markets['combos'] ?? [];
             $goalMargin = $markets['goal_margin'] ?? [];
+            $teamTotals = $markets['team_totals'] ?? [];
+            $cleanSheet = $markets['clean_sheet'] ?? [];
 
-            $candidates = $source === 'Marché sans marge' ? [
-                'prudent' => [
-                    ['key' => '1X', 'label' => $home.' ou nul', 'prob' => $doubleChance['1X'] ?? null, 'market' => 'Double chance'],
-                    ['key' => 'X2', 'label' => $away.' ou nul', 'prob' => $doubleChance['X2'] ?? null, 'market' => 'Double chance'],
-                ],
-                'equilibre' => [
-                    ['key' => 'home', 'label' => 'Victoire '.$home, 'prob' => $oneN2['home'] ?? null, 'market' => 'Résultat'],
-                    ['key' => 'draw', 'label' => 'Match nul', 'prob' => $oneN2['draw'] ?? null, 'market' => 'Résultat'],
-                    ['key' => 'away', 'label' => 'Victoire '.$away, 'prob' => $oneN2['away'] ?? null, 'market' => 'Résultat'],
-                ],
-                'audacieux' => [
-                    ['key' => 'home', 'label' => 'Victoire '.$home, 'prob' => $oneN2['home'] ?? null, 'market' => 'Résultat'],
-                    ['key' => 'draw', 'label' => 'Match nul', 'prob' => $oneN2['draw'] ?? null, 'market' => 'Résultat'],
-                    ['key' => 'away', 'label' => 'Victoire '.$away, 'prob' => $oneN2['away'] ?? null, 'market' => 'Résultat'],
-                ],
-            ] : [
+            $candidates = [
                 'prudent' => [
                     ['key' => '1X', 'label' => $home.' ou nul', 'prob' => $doubleChance['1X'] ?? null, 'market' => 'Double chance'],
                     ['key' => 'X2', 'label' => $away.' ou nul', 'prob' => $doubleChance['X2'] ?? null, 'market' => 'Double chance'],
@@ -264,8 +292,27 @@ class DashboardController extends Controller
                 ],
             ];
 
+            if ($source === 'Modèle') {
+                $candidates['prudent'] = array_merge($candidates['prudent'], [
+                    ['key' => 'home_over_0_5', 'label' => $home.' marque au moins 1 but', 'prob' => $teamTotals['home']['over_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['key' => 'away_over_0_5', 'label' => $away.' marque au moins 1 but', 'prob' => $teamTotals['away']['over_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['key' => 'home_clean_sheet', 'label' => $away.' ne marque pas', 'prob' => $cleanSheet['home'] ?? null, 'market' => 'Clean sheet'],
+                    ['key' => 'away_clean_sheet', 'label' => $home.' ne marque pas', 'prob' => $cleanSheet['away'] ?? null, 'market' => 'Clean sheet'],
+                ]);
+                $candidates['equilibre'] = array_merge($candidates['equilibre'], [
+                    ['key' => 'home_over_1_5', 'label' => $home.' marque au moins 2 buts', 'prob' => $teamTotals['home']['over_1_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['key' => 'away_over_1_5', 'label' => $away.' marque au moins 2 buts', 'prob' => $teamTotals['away']['over_1_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['key' => 'home_under_0_5', 'label' => $home.' ne marque pas', 'prob' => $teamTotals['home']['under_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['key' => 'away_under_0_5', 'label' => $away.' ne marque pas', 'prob' => $teamTotals['away']['under_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                ]);
+                $candidates['audacieux'] = array_merge($candidates['audacieux'], [
+                    ['key' => 'home_over_2_5', 'label' => $home.' marque au moins 3 buts', 'prob' => $teamTotals['home']['over_2_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['key' => 'away_over_2_5', 'label' => $away.' marque au moins 3 buts', 'prob' => $teamTotals['away']['over_2_5'] ?? null, 'market' => 'Buts par équipe'],
+                ]);
+            }
+
             $topScore = $prediction->top_scores_json[0] ?? null;
-            if ($source === 'Modèle' && $topScore && isset($topScore['p'], $topScore['score'])) {
+            if ($supportsScoreMarkets && $topScore && isset($topScore['p'], $topScore['score'])) {
                 $candidates['audacieux'][] = [
                     'key' => 'exact_score',
                     'label' => 'Score exact '.$topScore['score'],
@@ -280,16 +327,19 @@ class DashboardController extends Controller
                     ->map(fn (array $option) => array_merge($option, [
                         'match' => $match,
                         'prob' => (float) $option['prob'],
-                        'source' => $source,
+                        'source' => $sourceLabel,
                     ]))
                     ->sortByDesc('prob')
                     ->values();
 
                 $minimum = $risk === 'prudent' ? 0.65 : ($risk === 'equilibre' ? 0.50 : 0.18);
-                $pick = $risk === 'audacieux'
-                    ? $options->first(fn (array $option) => $option['market'] === 'Marge de buts' && $option['prob'] >= 0.08)
-                    : null;
-                $pick ??= $options->first(fn (array $option) => $option['prob'] >= $minimum);
+                $maximum = $risk === 'audacieux' ? 0.45 : 1.0;
+                if ($risk === 'audacieux' && $source === 'Modèle') {
+                    $minimum = 0.12;
+                }
+                $eligible = $options->filter(fn (array $option): bool => $option['prob'] >= $minimum
+                    && $option['prob'] <= $maximum);
+                $pick = $this->selectMarketOption($eligible, $risk, $source, (int) $match->id);
                 if ($pick) {
                     $groups[$risk][] = $pick;
                 }
@@ -308,32 +358,71 @@ class DashboardController extends Controller
         return $groups;
     }
 
+    private function publishedPick(FootballMatch $match, Prediction $prediction): ?array
+    {
+        $market = $prediction->published_market;
+        $selection = $prediction->published_selection;
+        $probability = (float) ($prediction->published_probability ?? 0);
+        if (! $market || ! $selection || $probability <= 0 || $probability >= 1) return null;
+        $home = $match->homeTeam->short_name;
+        $away = $match->awayTeam->short_name;
+        $label = match ($market) {
+            '1N2' => ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$selection] ?? null,
+            'double_chance' => ['1X' => $home.' ou nul', 'X2' => $away.' ou nul', '12' => 'Pas de match nul'][$selection] ?? null,
+            'btts' => ['yes' => 'Les deux équipes marquent', 'no' => 'Au moins une équipe ne marque pas'][$selection] ?? null,
+            'exact_score' => 'Score exact '.$selection,
+            'totals' => preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts' : null,
+            default => null,
+        };
+        if (! $label) return null;
+        return [
+            'key' => $selection,
+            'label' => $label,
+            'prob' => $probability,
+            'market' => match ($market) {
+                '1N2' => 'Résultat', 'double_chance' => 'Double chance', 'btts' => 'BTTS', 'totals' => 'Total buts', 'exact_score' => 'Score exact', default => $market,
+            },
+        ];
+    }
+
     /**
      * Construit trois versions de combinés, de la plus sûre à la plus risquée.
      */
-    private function buildBigParlayPicks(OddsService $oddsService, ?int $marketId): array
+    private function buildBigParlayPicks(): array
     {
-        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction', 'oddsSnapshots'])
+        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
-            ->whereHas('officialPrediction', fn ($query) => $query->where('is_official', true))
+            ->whereHas('officialPrediction', fn ($query) => $query
+                ->where('is_official', true)
+                ->where('is_abstained', false))
             ->orderBy('match_date_utc')
             ->get();
 
-        $candidates = $matches->map(function (FootballMatch $match) use ($oddsService, $marketId): ?array {
+        $candidates = $matches->map(function (FootballMatch $match): ?array {
             $prediction = $match->officialPrediction;
-            if (! $prediction) {
+            if (! $prediction || $prediction->is_abstained) {
                 return null;
             }
 
+            if ($prediction->published_market) {
+                $published = $this->publishedPick($match, $prediction);
+                if (! $published) return null;
+                $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
+                return [
+                    'prudent' => $risk === 'prudent' ? array_merge($published, ['match' => $match, 'source' => 'Révision validée', 'league_key' => $match->league?->id ?? 'unknown']) : null,
+                    'equilibre' => $risk === 'equilibre' ? array_merge($published, ['match' => $match, 'source' => 'Révision validée', 'league_key' => $match->league?->id ?? 'unknown']) : null,
+                    'audacieux' => $risk === 'audacieux' ? array_merge($published, ['match' => $match, 'source' => 'Révision validée', 'league_key' => $match->league?->id ?? 'unknown']) : null,
+                ];
+            }
+
             $source = 'Modèle';
+            $sourceLabel = 'Modèle';
             $markets = $prediction?->derived_markets_json ?? [];
-            if ($prediction->is_abstained) {
-                $markets = $marketId ? $this->marketFallback($match, $oddsService, $marketId) : null;
-                if (! $markets) {
-                    return null;
-                }
-                $source = 'Marché sans marge';
+            $supportsScoreMarkets = $this->supportsScoreMarketPicks($prediction);
+            if (! $supportsScoreMarkets) {
+                $markets = array_intersect_key($markets, ['1N2' => true, 'double_chance' => true]);
             }
 
             $home = $match->homeTeam->short_name;
@@ -347,6 +436,8 @@ class DashboardController extends Controller
             $totals = $markets['totals'] ?? [];
             $btts = $markets['btts'] ?? [];
             $goalMargin = $markets['goal_margin'] ?? [];
+            $teamTotals = $markets['team_totals'] ?? [];
+            $cleanSheet = $markets['clean_sheet'] ?? [];
 
             $safeOptions = [
                 ['label' => $home.' ou nul', 'prob' => $doubleChance['1X'] ?? null, 'market' => 'Double chance'],
@@ -359,18 +450,32 @@ class DashboardController extends Controller
             ];
             $audaciousOptions = [];
 
-            if ($source === 'Modèle') {
-                $safeOptions = array_merge($safeOptions, [
+            $safeOptions = array_merge($safeOptions, [
                     ['label' => 'Plus de 1,5 but', 'prob' => $totals['over_1_5'] ?? null, 'market' => 'Total buts'],
                     ['label' => 'Moins de 4,5 buts', 'prob' => $totals['under_4_5'] ?? null, 'market' => 'Total buts'],
-                ]);
-                $balancedOptions = array_merge($balancedOptions, [
+                    ['label' => $home.' marque au moins 1 but', 'prob' => $teamTotals['home']['over_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => $away.' marque au moins 1 but', 'prob' => $teamTotals['away']['over_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => $away.' ne marque pas', 'prob' => $cleanSheet['home'] ?? null, 'market' => 'Clean sheet'],
+                    ['label' => $home.' ne marque pas', 'prob' => $cleanSheet['away'] ?? null, 'market' => 'Clean sheet'],
+            ]);
+            $balancedOptions = array_merge($balancedOptions, [
                     ['label' => 'Plus de 2,5 buts', 'prob' => $totals['over_2_5'] ?? null, 'market' => 'Total buts'],
                     ['label' => 'Moins de 2,5 buts', 'prob' => $totals['under_2_5'] ?? null, 'market' => 'Total buts'],
                     ['label' => 'Les deux équipes marquent', 'prob' => $btts['yes'] ?? null, 'market' => 'BTTS'],
-                ]);
-                $combos = $markets['combos'] ?? [];
-                $audaciousOptions = [
+                    ['label' => $home.' marque au moins 2 buts', 'prob' => $teamTotals['home']['over_1_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => $away.' marque au moins 2 buts', 'prob' => $teamTotals['away']['over_1_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => $home.' ne marque pas', 'prob' => $teamTotals['home']['under_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => $away.' ne marque pas', 'prob' => $teamTotals['away']['under_0_5'] ?? null, 'market' => 'Buts par équipe'],
+            ]);
+            $combos = $markets['combos'] ?? [];
+            $audaciousOptions = [
+                    ['label' => 'Victoire '.$home, 'prob' => $oneN2['home'] ?? null, 'market' => '1N2'],
+                    ['label' => 'Match nul', 'prob' => $oneN2['draw'] ?? null, 'market' => '1N2'],
+                    ['label' => 'Victoire '.$away, 'prob' => $oneN2['away'] ?? null, 'market' => '1N2'],
+                    ['label' => 'Les deux équipes marquent', 'prob' => $btts['yes'] ?? null, 'market' => 'BTTS'],
+                    ['label' => 'Au moins une équipe ne marque pas', 'prob' => $btts['no'] ?? null, 'market' => 'BTTS'],
+                    ['label' => 'Plus de 2,5 buts', 'prob' => $totals['over_2_5'] ?? null, 'market' => 'Total buts'],
+                    ['label' => 'Moins de 2,5 buts', 'prob' => $totals['under_2_5'] ?? null, 'market' => 'Total buts'],
                     ['label' => 'Victoire '.$home.' + plus de 2,5 buts', 'prob' => $combos['home_win_over_2_5'] ?? null, 'market' => 'Combiné'],
                     ['label' => 'Victoire '.$away.' + plus de 2,5 buts', 'prob' => $combos['away_win_over_2_5'] ?? null, 'market' => 'Combiné'],
                     ['label' => 'Victoire '.$home.' + les deux marquent', 'prob' => $combos['home_win_btts_yes'] ?? null, 'market' => 'Combiné'],
@@ -379,35 +484,27 @@ class DashboardController extends Controller
                     ['label' => $away.' gagne par 2 buts ou plus', 'prob' => $goalMargin['away_by_2_plus'] ?? null, 'market' => 'Marge de buts'],
                     ['label' => $home.' gagne par 3 buts ou plus', 'prob' => $goalMargin['home_by_3_plus'] ?? null, 'market' => 'Marge de buts'],
                     ['label' => $away.' gagne par 3 buts ou plus', 'prob' => $goalMargin['away_by_3_plus'] ?? null, 'market' => 'Marge de buts'],
-                    ['label' => 'Score exact '.($prediction->top_scores_json[0]['score'] ?? ''), 'prob' => $prediction->top_scores_json[0]['p'] ?? null, 'market' => 'Score exact'],
-                ];
-            } else {
-                $leastLikelyOutcome = collect($balancedOptions)
-                    ->filter(fn (array $option) => is_numeric($option['prob']))
-                    ->sortBy('prob')
-                    ->first();
-                if ($leastLikelyOutcome) {
-                    $audaciousOptions[] = $leastLikelyOutcome;
-                }
-            }
+                    ['label' => $home.' marque au moins 3 buts', 'prob' => $teamTotals['home']['over_2_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => $away.' marque au moins 3 buts', 'prob' => $teamTotals['away']['over_2_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => 'Score exact '.($prediction->top_scores_json[0]['score'] ?? ''), 'prob' => $supportsScoreMarkets ? ($prediction->top_scores_json[0]['p'] ?? null) : null, 'market' => 'Score exact'],
+            ];
 
             $pickForTier = function (
                 array $options,
                 float $minimum,
-                bool $lowest = false,
-                ?string $preferredMarket = null
-            ) use ($match, $source): ?array {
+                float $maximum = 1.0
+            ) use ($match, $source, $sourceLabel): ?array {
                 $options = collect($options)
-                    ->filter(fn (array $option) => is_numeric($option['prob']) && (float) $option['prob'] >= $minimum)
+                    ->filter(fn (array $option) => is_numeric($option['prob'])
+                        && (float) $option['prob'] >= $minimum
+                        && (float) $option['prob'] <= $maximum)
                     ->map(fn (array $option) => array_merge($option, ['prob' => (float) $option['prob']]));
-                $preferred = $preferredMarket
-                    ? $options->where('market', $preferredMarket)->sortByDesc('prob')->first()
-                    : null;
-                $best = $preferred ?? ($lowest ? $options->sortBy('prob')->first() : $options->sortByDesc('prob')->first());
+                $risk = $minimum >= 0.65 ? 'prudent' : ($maximum <= 0.45 ? 'audacieux' : 'equilibre');
+                $best = $this->selectMarketOption($options, $risk, $source, (int) $match->id);
 
                 return $best ? array_merge($best, [
                     'match' => $match,
-                    'source' => $source,
+                    'source' => $sourceLabel,
                     'league_key' => $match->league?->id ?? $match->league?->name ?? 'unknown',
                 ]) : null;
             };
@@ -415,12 +512,7 @@ class DashboardController extends Controller
             return [
                 'prudent' => $pickForTier($safeOptions, 0.65),
                 'equilibre' => $pickForTier($balancedOptions, 0.30),
-                'audacieux' => $pickForTier(
-                    $audaciousOptions,
-                    0.08,
-                    $source === 'Marché sans marge',
-                    $source === 'Modèle' ? 'Marge de buts' : null
-                ),
+                'audacieux' => $pickForTier($audaciousOptions, $source === 'Modèle' ? 0.12 : 0.18, 0.45),
             ];
         })->filter()->values();
         $tiers = ['prudent' => [], 'equilibre' => [], 'audacieux' => []];
@@ -450,23 +542,47 @@ class DashboardController extends Controller
         return $tiers;
     }
 
-    private function marketFallback(FootballMatch $match, OddsService $oddsService, int $marketId): ?array
+    private function selectMarketOption(Collection $options, string $risk, string $source, int $offset): ?array
     {
-        $snapshotSet = $oddsService->latestComplete1N2Set($match->oddsSnapshots, $marketId);
-        if (! $snapshotSet) {
+        if ($options->isEmpty()) {
             return null;
         }
 
-        $probabilities = $oddsService->proportionalProbabilities(
-            collect(['HOME', 'DRAW', 'AWAY'])
-                ->map(fn (string $selection): float => (float) $snapshotSet[$selection]->decimal_odds)
-                ->all()
-        );
-        [$home, $draw, $away] = $probabilities;
+        $marketOrder = match ($risk) {
+            'prudent' => ['Total buts', 'Buts par équipe', 'Double chance', 'Clean sheet', '1N2'],
+            'equilibre' => ['BTTS', 'Total buts', 'Buts par équipe', 'Combiné', '1N2', 'Résultat', 'Double chance'],
+            default => ['Marge de buts', 'Combiné', 'Buts par équipe', 'BTTS', 'Total buts', '1N2', 'Résultat', 'Score exact'],
+        };
+        $rotation = $offset % count($marketOrder);
+        $marketOrder = array_merge(array_slice($marketOrder, $rotation), array_slice($marketOrder, 0, $rotation));
 
-        return [
-            '1N2' => ['home' => $home, 'draw' => $draw, 'away' => $away],
-            'double_chance' => ['1X' => $home + $draw, 'X2' => $draw + $away],
-        ];
+        foreach ($marketOrder as $market) {
+            $pick = $options->where('market', $market)->sortByDesc('prob')->first();
+            if ($pick) {
+                return $pick;
+            }
+        }
+
+        return $options->sortByDesc('prob')->first();
     }
+
+    private function supportsScoreMarketPicks(Prediction $prediction): bool
+    {
+        if ($prediction->is_abstained
+            || ! in_array($prediction->confidence_tier, ['medium', 'high'], true)
+            || (float) $prediction->quality_score < 70
+            || (float) $prediction->home_lambda <= 0
+            || (float) $prediction->away_lambda <= 0
+            || (float) $prediction->truncated_residual_mass > 0.01) {
+            return false;
+        }
+
+        return ! collect($prediction->warnings_json ?? [])->contains(
+            fn ($warning): bool => str_starts_with((string) $warning, 'model_not_trained')
+                || str_starts_with((string) $warning, 'untrained_poisson_fallback')
+                || str_starts_with((string) $warning, 'unknown_or_promoted_team:')
+                || $warning === 'expected_goals_clamped'
+        );
+    }
+
 }

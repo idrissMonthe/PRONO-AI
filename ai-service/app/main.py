@@ -40,8 +40,9 @@ from app.core.poisson_regressor import MatchData
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 MODEL_STATE_PATH = Path(os.getenv("MODEL_STATE_PATH", "/app/data/dixon_coles_model.json"))
-MODEL_VERSION = "M3_MARKET_SPECIALISTS_v3"
-CALIBRATION_VERSION = "calib_v5_market_backed_sparse_teams"
+MODEL_VERSION = "M3_MARKET_SPECIALISTS_v6"
+CALIBRATION_VERSION = "calib_v8_shrunk_team_lambdas"
+MIN_OFFICIAL_QUALITY_SCORE = 82.0
 
 app = FastAPI(
     title="ORACLE FOOT Predictive API",
@@ -152,6 +153,7 @@ def model_info():
         "model_loaded": champion_model.is_fitted,
         "family": "pure",
         "algorithm": "Dixon-Coles Bivariate Poisson with Time Decay and Low-Score Tau Correction",
+        "market_heads": market_specialists.head_versions,
         "hyperparameters": {
             "xi_time_decay": champion_model.xi,
             "half_life_days": round(0.693147 / champion_model.xi, 1),
@@ -252,7 +254,7 @@ def predict(req: PredictRequest):
 
     # Compute score matrix
     matrix, residual_mass, n = compute_score_matrix(lh, la, champion_model.rho)
-    specialist_matrices = market_specialists.predict(matrix)
+    specialist_matrices = market_specialists.predict(matrix, req.home_team, req.away_team)
     outcome_markets = extract_match_markets_from_matrix(specialist_matrices["outcome"])
     goals_markets = extract_match_markets_from_matrix(specialist_matrices["goals"])
     btts_markets = extract_match_markets_from_matrix(specialist_matrices["btts"])
@@ -263,6 +265,8 @@ def predict(req: PredictRequest):
         "btts": btts_markets["btts"],
         "combos": goals_markets["combos"],
         "goal_margin": goals_markets["goal_margin"],
+        "team_totals": goals_markets["team_totals"],
+        "clean_sheet": btts_markets["clean_sheet"],
         "top_scores": exact_markets["top_scores"],
         "other_scores_mass": exact_markets["other_scores_mass"],
     }
@@ -327,7 +331,10 @@ def predict(req: PredictRequest):
         confidence_tier = "low"
         is_abstained = True
         warnings.append("model_not_trained_prediction_abstained")
-    elif req.quality_score < 90.0:
+    # Keep this gate aligned with FootballDataService's `usable` tier.
+    # A 90-point gate made every current fixture abstain even when the
+    # persisted quality tier was already usable (82+).
+    elif req.quality_score < MIN_OFFICIAL_QUALITY_SCORE:
         quality_tier = "insufficient"
         confidence_tier = "low"
         is_abstained = True

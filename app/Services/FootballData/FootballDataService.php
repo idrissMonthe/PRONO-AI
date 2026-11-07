@@ -215,36 +215,50 @@ class FootballDataService
         $missing = [];
 
         if ($match->home_team_id && $match->away_team_id) {
-            $score += 20;
+            $score += 12;
         } else {
             $missing[] = 'teams_unidentified';
         }
 
         if ($match->match_date_utc) {
-            $score += 15;
+            $score += 8;
         } else {
             $missing[] = 'date_missing';
         }
 
         if ($match->league_id) {
-            $score += 10;
+            $score += 5;
         } else {
             $missing[] = 'league_missing';
         }
 
-        if (in_array($match->data_source, ['football-data.org', 'the-odds-api'], true)) {
-            $score += 15;
+        if ($match->external_id && $match->data_source === 'football-data.org') {
+            $score += 10;
+        } elseif (in_array($match->data_source, ['football-data.org', 'the-odds-api'], true)) {
+            $score += 6;
         } else {
             $missing[] = 'source_unverified';
         }
 
         if (in_array($match->status, ['SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED'], true)) {
-            $score += 5;
+            $score += 3;
         } else {
             $missing[] = 'status_uncertain';
         }
 
+        if ($match->last_synced_at) {
+            $syncAgeHours = Carbon::parse($match->last_synced_at)->diffInMinutes(now()->utc()) / 60;
+            $score += $syncAgeHours <= 2 ? 10 : ($syncAgeHours <= 12 ? 7 : ($syncAgeHours <= 48 ? 3 : 0));
+            if ($syncAgeHours > 48) {
+                $missing[] = 'fixture_data_stale';
+            }
+        } else {
+            $missing[] = 'fixture_data_never_synced';
+        }
+
         $marketId = Market::where('code', '1N2')->value('id');
+        $oddsPoints = 0;
+        $oddsFreshnessPoints = 0;
         $odds = $marketId
             ? $match->oddsSnapshots()
                 ->where('market_id', $marketId)
@@ -252,34 +266,83 @@ class FootballDataService
                 ->whereIn('selection', ['HOME', 'DRAW', 'AWAY'])
                 ->get()
             : collect();
-        $latestOdds = $odds->sortByDesc('snapshot_time_utc')->first();
-        $completeMarket = $odds->pluck('selection')->unique()->count() === 3;
 
+        $latestBySelection = $odds
+            ->sortByDesc('snapshot_time_utc')
+            ->groupBy('selection')
+            ->map(fn ($snapshots) => $snapshots->first());
+        $completeMarket = $latestBySelection->count() === 3;
         if ($completeMarket) {
-            $score += 25;
+            $oddsPoints = 15;
+            $score += $oddsPoints;
+            $oldestOdds = $latestBySelection->min(fn ($odd) => $odd->snapshot_time_utc?->timestamp ?? 0);
+            $oddsAgeHours = $oldestOdds ? max(0, now()->utc()->timestamp - $oldestOdds) / 3600 : INF;
+            $oddsFreshnessPoints = $oddsAgeHours <= 2 ? 8 : ($oddsAgeHours <= 12 ? 5 : ($oddsAgeHours <= 48 ? 2 : 0));
+            $score += $oddsFreshnessPoints;
+            if ($oddsAgeHours > 48) {
+                $missing[] = 'market_odds_stale';
+            }
+
+            $inverseSum = $latestBySelection->sum(fn ($odd) => 1 / max(1.01, (float) $odd->decimal_odds));
+            if ($inverseSum >= 1.01 && $inverseSum <= 1.25) {
+                $score += 4;
+            } else {
+                $missing[] = 'market_odds_incoherent';
+            }
+
+            if ($latestBySelection->contains(fn ($odd) => $odd->source === 'the-odds-api')) {
+                $score += 3;
+            }
         } else {
             $missing[] = 'market_odds_incomplete';
         }
 
-        if ($latestOdds?->snapshot_time_utc) {
-            $ageHours = Carbon::parse($latestOdds->snapshot_time_utc)->diffInHours(now()->utc());
-            $score += $ageHours <= 12 ? 10 : ($ageHours <= 48 ? 5 : 0);
-            if ($ageHours > 48) {
-                $missing[] = 'market_odds_stale';
-            }
+        $homeHistory = FootballMatch::where('status', 'FINISHED')
+            ->where('match_date_utc', '<', $match->match_date_utc)
+            ->where(fn ($query) => $query->where('home_team_id', $match->home_team_id)->orWhere('away_team_id', $match->home_team_id))
+            ->count();
+        $awayHistory = FootballMatch::where('status', 'FINISHED')
+            ->where('match_date_utc', '<', $match->match_date_utc)
+            ->where(fn ($query) => $query->where('home_team_id', $match->away_team_id)->orWhere('away_team_id', $match->away_team_id))
+            ->count();
+        $historyCoverage = min(1.0, min($homeHistory, $awayHistory) / 8);
+        $score += (int) round(15 * $historyCoverage);
+        if ($historyCoverage < 1.0) {
+            $missing[] = 'team_history_limited';
+        }
+
+        $availabilityCount = $match->playerAvailabilities()->count();
+        if ($availabilityCount > 0) {
+            $score += min(5, 2 + $availabilityCount);
         } else {
-            $missing[] = 'market_odds_missing';
+            $missing[] = 'availability_not_sourced';
         }
 
         $score = max(0, min(100, $score));
-        $tier = $score >= 80 ? 'usable' : ($score >= 60 ? 'degraded' : 'insufficient');
+        $tier = $score >= 82 ? 'usable' : ($score >= 58 ? 'degraded' : 'insufficient');
+
+        $breakdown = [
+            'teams' => $match->home_team_id && $match->away_team_id ? 12 : 0,
+            'date' => $match->match_date_utc ? 8 : 0,
+            'competition' => $match->league_id ? 5 : 0,
+            'source' => $match->external_id && $match->data_source === 'football-data.org' ? 10 : 0,
+            'status' => in_array($match->status, ['SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED'], true) ? 3 : 0,
+            'fixture_freshness' => $match->last_synced_at ? ($syncAgeHours <= 2 ? 10 : ($syncAgeHours <= 12 ? 7 : ($syncAgeHours <= 48 ? 3 : 0))) : 0,
+            'odds_completeness' => $oddsPoints,
+            'odds_freshness' => $oddsFreshnessPoints,
+            'team_history' => (int) round(15 * $historyCoverage),
+            'availability' => $availabilityCount > 0 ? min(5, 2 + $availabilityCount) : 0,
+            'missing' => $missing,
+            'total' => $score,
+        ];
 
         $match->forceFill([
             'quality_score' => $score,
             'quality_tier' => $tier,
+            'quality_breakdown' => $breakdown,
         ])->saveQuietly();
 
-        return ['score' => $score, 'tier' => $tier, 'missing' => $missing];
+        return ['score' => $score, 'tier' => $tier, 'missing' => $missing, 'breakdown' => $breakdown];
     }
 
     /**
@@ -388,7 +451,11 @@ class FootballDataService
                 }
             }
 
-            return $match;
+            // Le score initial est calculé avant l'écriture des cotes. On le
+            // recalcule donc sur l'état effectivement persisté du match.
+            $this->refreshQualityScore($match->fresh());
+
+            return $match->fresh();
         } catch (Exception $e) {
             Log::error('Match record ingestion exception: '.$e->getMessage());
 

@@ -280,6 +280,111 @@ class GeminiExplanationService
     /**
      * Analyse et évaluation du risque d'un combiné multi-sélections (CDC Section 9 & 28).
      */
+    /**
+     * Révision décisionnelle. Gemini choisit uniquement une candidate
+     * calculée par Python et ne fournit jamais de probabilité.
+     */
+    public function reviewPrediction(array $context): array
+    {
+        $fallback = [
+            'decision' => 'keep',
+            'candidate_key' => $context['initial_candidate']['candidate_key'] ?? null,
+            'reasoning' => 'Révision externe indisponible : la sélection statistique initiale est conservée.',
+            'supporting_factors' => [],
+            'risk_factors' => ['ai_review_unavailable'],
+            'required_recalculation' => false,
+            'confidence_in_revision' => 'low',
+            'provider' => 'deterministic_fallback',
+            'model' => null,
+            'fallback' => true,
+        ];
+
+        if (! $this->isConfigured()) return $fallback;
+
+        $systemInstruction = implode("\n", [
+            "Tu es un réviseur critique de pronostics football.",
+            "Tu ne calcules aucune probabilité et tu n'en inventes jamais.",
+            "Tu peux uniquement choisir une candidate_key présente dans candidates.",
+            "Réponds uniquement avec un objet JSON valide.",
+            "Champs : decision (keep|replace|reject|insufficient_data), candidate_key (clé existante ou null), reasoning, supporting_factors (tableau), risk_factors (tableau), required_recalculation (booléen), confidence_in_revision (low|medium|high).",
+            "Si aucune candidate ne convient, utilise reject ou insufficient_data.",
+        ]);
+        $prompt = "Données réelles du moteur Python :\n".json_encode($context, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)."\n\nExamine la sélection initiale de façon critique et ne choisis qu'une candidate existante.";
+        $contextHash = hash('sha256', json_encode($context));
+        $apiKey = $this->getApiKey();
+        $modelsToTry = array_unique([$this->getModel(), 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+
+        foreach ($modelsToTry as $currentModel) {
+            try {
+                $response = Http::timeout(12)
+                    ->withHeaders(['Content-Type' => 'application/json', 'x-goog-api-key' => $apiKey])
+                    ->post("https://generativelanguage.googleapis.com/v1beta/models/{$currentModel}:generateContent", [
+                        'contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]],
+                        'systemInstruction' => ['parts' => [['text' => $systemInstruction]]],
+                        'generationConfig' => [
+                            'temperature' => 0.1,
+                            'maxOutputTokens' => 600,
+                            'responseMimeType' => 'application/json',
+                            'thinkingConfig' => ['thinkingBudget' => 0],
+                        ],
+                    ]);
+
+                if (! $response->successful()) continue;
+                $parts = $response->json('candidates.0.content.parts', []);
+                $text = trim(implode("\n", array_map(fn ($part) => $part['text'] ?? '', array_filter($parts, fn ($part) => empty($part['thought'])))));
+                $decoded = $this->decodeReviewJson($text);
+                if (! is_array($decoded)) continue;
+                $decision = $decoded['decision'] ?? null;
+                $candidateKey = $decoded['candidate_key'] ?? null;
+                $candidateKeys = collect($context['candidates'] ?? [])->pluck('candidate_key')->filter()->all();
+                if (! in_array($decision, ['keep', 'replace', 'reject', 'insufficient_data'], true)) continue;
+                if ($decision === 'replace' && ! in_array($candidateKey, $candidateKeys, true)) continue;
+
+                $normalized = [
+                    'decision' => $decision,
+                    'candidate_key' => $decision === 'keep' ? ($context['initial_candidate']['candidate_key'] ?? $candidateKey) : $candidateKey,
+                    'reasoning' => is_string($decoded['reasoning'] ?? null) ? substr($decoded['reasoning'], 0, 2000) : '',
+                    'supporting_factors' => array_values(array_filter((array) ($decoded['supporting_factors'] ?? []), 'is_string')),
+                    'risk_factors' => array_values(array_filter((array) ($decoded['risk_factors'] ?? []), 'is_string')),
+                    'required_recalculation' => (bool) ($decoded['required_recalculation'] ?? $decision === 'replace'),
+                    'confidence_in_revision' => in_array(($decoded['confidence_in_revision'] ?? 'low'), ['low', 'medium', 'high'], true) ? $decoded['confidence_in_revision'] : 'low',
+                    'provider' => 'google_gemini',
+                    'model' => $currentModel,
+                    'fallback' => false,
+                ];
+
+                LlmInteraction::create([
+                    'provider' => 'google_gemini',
+                    'model' => $currentModel,
+                    'context_hash' => $contextHash,
+                    'sanitized_prompt' => substr($prompt, 0, 1000),
+                    'response_text' => $text,
+                    'verification_passed' => true,
+                    'verification_details' => ['decision' => $decision, 'candidate_key' => $candidateKey],
+                    'interacted_at_utc' => now()->utc(),
+                ]);
+
+                return $normalized;
+            } catch (Exception $exception) {
+                Log::warning('Gemini prediction review failed.', ['model' => $currentModel, 'exception' => $exception::class]);
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function decodeReviewJson(string $text): ?array
+    {
+        $text = trim(preg_replace('/^```(?:json)?|```$/m', '', $text));
+        $decoded = json_decode($text, true);
+        if (is_array($decoded)) return $decoded;
+        $start = strpos($text, '{');
+        $end = strrpos($text, '}');
+        if ($start === false || $end === false || $end <= $start) return null;
+        $decoded = json_decode(substr($text, $start, $end - $start + 1), true);
+        return is_array($decoded) ? $decoded : null;
+    }
+
     public function explainParlay(array $parlayContext): array
     {
         if (!$this->isConfigured()) {
@@ -296,7 +401,7 @@ class GeminiExplanationService
             . "1. Ne promets JAMAIS de gain ni de 'pari sûr' ou 'garantie'. "
             . "2. Rappelle que le produit des probabilités diminue rapidement la probabilité conjointe. "
             . "3. Identifie clairement la sélection qui présente la plus forte incertitude. "
-            . "4. Mentionne explicitement que les cotes sont issues de relevés réels avec leur source. "
+            . "4. Si pricing_basis indique des cotes justes indicatives du modèle, précise qu'il ne s'agit pas de cotes bookmaker et que l'EV n'est pas calculée ; sinon, mentionne la source réelle des cotes. "
             . "5. Ne cite AUCUN chiffre absent du contexte JSON fourni. "
             . "Reste concis (3 à 4 paragraphes en français professionnel et clair).";
 
@@ -362,11 +467,14 @@ class GeminiExplanationService
         $combProb = round(($context['combined_prob'] ?? 0.35) * 100, 1);
         $riskScore = $context['risk_score'] ?? 6.5;
         $count = count($context['selections'] ?? []);
+        $modelPriced = ($context['pricing_basis'] ?? null) === 'cotes justes indicatives du modèle';
+        $pricingNote = $modelPriced
+            ? 'La cote cumulée est une cote juste théorique déduite des probabilités du modèle, pas une cote bookmaker ; aucune EV n’est calculée.'
+            : 'Les cotes répertoriées proviennent des relevés des bookmakers indiqués.';
 
         return "### Analyse Statistique du Combiné ({$count} sélections)\n\n"
             . "Ce combiné présente une cote totale cumulée de **{$combOdds}** pour une probabilité conjointe estimée à **{$combProb}%** par le modèle Dixon-Coles (indice de risque : **{$riskScore}/10**).\n\n"
             . "**Règle de multiplication des probabilités** : Même si chaque rencontre individuelle possède une probabilité dominante, l'accumulation de plusieurs événements indépendants divise la chance globale de réussite. À titre indicatif, une probabilité conjointe de {$combProb}% signifie que la combinaison échoue dans plus de " . round(100 - $combProb) . "% des cas théoriques.\n\n"
-            . "> **Transparence éthique** : Les cotes répertoriées proviennent des relevés des bookmakers indiqués. Ce combiné est un outil d'observation statistique pédagogique sans garantie de résultat.";
+            . "> **Transparence éthique** : {$pricingNote} Ce combiné est un outil d'observation statistique pédagogique sans garantie de résultat.";
     }
 }
-

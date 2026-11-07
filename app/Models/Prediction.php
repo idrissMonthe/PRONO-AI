@@ -16,6 +16,14 @@ class Prediction extends Model
         'model_version_id',
         'calibration_version',
         'is_official',
+        'prediction_stage',
+        'published_market',
+        'published_selection',
+        'published_line',
+        'published_probability',
+        'review_decision',
+        'review_confidence',
+        'reviewed_at_utc',
         'freeze_time_utc',
         'supersedes_id',
         'content_hash',
@@ -34,11 +42,15 @@ class Prediction extends Model
         'confidence_tier',
         'is_abstained',
         'warnings_json',
+        'market_metrics_json',
         'execution_time_ms',
     ];
 
     protected $casts = [
         'is_official' => 'boolean',
+        'published_line' => 'decimal:2',
+        'published_probability' => 'decimal:4',
+        'reviewed_at_utc' => 'datetime',
         'is_abstained' => 'boolean',
         'freeze_time_utc' => 'datetime',
         'home_lambda' => 'decimal:4',
@@ -52,6 +64,7 @@ class Prediction extends Model
         'derived_markets_json' => 'array',
         'top_scores_json' => 'array',
         'warnings_json' => 'array',
+        'market_metrics_json' => 'array',
         'execution_time_ms' => 'integer',
     ];
 
@@ -78,5 +91,15 @@ class Prediction extends Model
     public function supersedes(): BelongsTo
     {
         return $this->belongsTo(Prediction::class, 'supersedes_id');
+    }
+
+    public function revision(): HasOne
+    {
+        return $this->hasOne(PredictionRevision::class, 'final_prediction_id');
+    }
+
+    public function initialRevision(): HasOne
+    {
+        return $this->hasOne(PredictionRevision::class, 'initial_prediction_id');
     }
 }

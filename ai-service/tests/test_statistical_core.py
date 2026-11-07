@@ -8,6 +8,7 @@ from app.core.dixon_coles import compute_score_matrix, extract_match_markets_fro
 from app.core.metrics import calculate_brier_multiclass, calculate_ece, calculate_log_loss, calculate_rps, diebold_mariano_test
 from app.core.elo import EloEngine
 from app.core.poisson_regressor import DixonColesModel, MatchData
+from app.core.market_specialists import MarketSpecialists
 from app.schemas import PredictRequest
 import app.main as prediction_api
 
@@ -48,6 +49,24 @@ def test_derived_markets_coherence():
     assert margin["home_by_3_plus"] <= margin["home_by_2_plus"] <= margin["home_by_1_plus"]
     assert margin["away_by_3_plus"] <= margin["away_by_2_plus"] <= margin["away_by_1_plus"]
     assert margin["home_by_2_plus"] + margin["away_by_2_plus"] <= 1.0
+
+    team_totals = markets["team_totals"]
+    for team in ("home", "away"):
+        assert team_totals[team]["over_0_5"] + team_totals[team]["under_0_5"] == pytest.approx(1.0)
+        assert team_totals[team]["over_2_5"] <= team_totals[team]["over_1_5"] <= team_totals[team]["over_0_5"]
+    assert markets["clean_sheet"]["home"] == pytest.approx(
+        float(np.sum(matrix[:, 0])), abs=1e-4
+    )
+    assert markets["clean_sheet"]["away"] == pytest.approx(
+        float(np.sum(matrix[0, :])), abs=1e-4
+    )
+
+    assert markets["totals"]["over_0_5"] + markets["totals"]["under_0_5"] == pytest.approx(1.0)
+    assert markets["totals"]["over_5_5"] + markets["totals"]["under_5_5"] == pytest.approx(1.0)
+    assert sum(markets["exact_totals"].values()) <= 1.0
+    assert markets["european_handicap"]["0"]["home"] + markets["european_handicap"]["0"]["draw"] + markets["european_handicap"]["0"]["away"] == pytest.approx(1.0)
+    asian = markets["asian_handicap"]["m0_25"]["home"]
+    assert asian["win"] + asian["push"] + asian["half_win"] + asian["half_loss"] + asian["loss"] == pytest.approx(1.0)
 
 
 def test_devigging_methods():
@@ -127,7 +146,7 @@ def test_training_tracks_per_team_match_counts():
     assert model.team_match_counts["Home A"] == 2
     assert model.team_match_counts["Away A"] == 2
     assert model.team_match_counts["Home C"] == 1
-    assert model.team_indices == {}
+    assert set(model.team_indices) == set(model.team_match_counts)
 
 
 def test_reliable_team_strengths_are_shrunk_toward_league_average():
@@ -189,3 +208,28 @@ def test_sparse_team_prediction_can_use_a_strong_market_snapshot(monkeypatch):
     assert result["abstain"] is False
     assert result["confidence_tier"] == "medium"
     assert "market_backed_prediction_with_limited_team_history" in result["warnings"]
+
+
+def test_market_specialists_are_independent_trained_heads():
+    rows = [
+        MatchData("Home A", "Away A", 3, 0, 1),
+        MatchData("Home A", "Away B", 2, 0, 2),
+        MatchData("Home B", "Away A", 1, 1, 3),
+        MatchData("Away B", "Home A", 0, 2, 4),
+        MatchData("Home A", "Away A", 4, 1, 5),
+        MatchData("Away A", "Home B", 0, 0, 6),
+    ]
+    specialists = MarketSpecialists()
+    specialists.fit(rows)
+    matrix, _, _ = compute_score_matrix(1.4, 1.1, rho=-0.04)
+    outputs = specialists.predict(matrix, "Home A", "Away A")
+
+    assert specialists.is_fitted is True
+    assert specialists.outcome_prior[0] > specialists.outcome_prior[2]
+    assert specialists.btts_rate < 0.5
+    for calibrated in outputs.values():
+        assert calibrated.sum() == pytest.approx(1.0)
+    assert not np.allclose(outputs["outcome"], matrix)
+    assert not np.allclose(outputs["goals"], matrix)
+    assert not np.allclose(outputs["btts"], matrix)
+    assert not np.allclose(outputs["exact_score"], matrix)

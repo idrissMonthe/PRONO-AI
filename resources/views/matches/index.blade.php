@@ -70,6 +70,9 @@
             <a href="{{ route('matches.index', array_merge(request()->except('page'), ['reliable' => 1])) }}"
                class="px-3 py-2 rounded-md border flex items-center gap-2 transition-colors {{ request()->boolean('reliable') ? 'bg-[#88B69A] text-[#101513] font-bold border-[#88B69A]' : 'bg-[#141A17] text-[#A2ACA3] border-[#303A32] hover:border-[#88B69A] hover:text-[#88B69A]' }}">
                 <span>Fiables uniquement</span>
+                <span class="px-1.5 py-0.2 rounded-full text-[10px] {{ request()->boolean('reliable') ? 'bg-[#101513]/20 text-[#101513]' : 'bg-[#222B25] text-[#A2ACA3]' }}">
+                    {{ $reliableCount }}
+                </span>
             </a>
         </div>
 
@@ -250,9 +253,13 @@
                         @empty
                             <tr>
                                 <td colspan="7" class="py-12 text-center text-[#A2ACA3] space-y-2">
-                                    <div class="text-sm font-semibold text-[#F0F0E8]">Aucune rencontre disponible pour ce filtre</div>
+                                    <div class="text-sm font-semibold text-[#F0F0E8]">
+                                        {{ request()->boolean('reliable') ? 'Aucune prédiction finale validée actuellement' : 'Aucune rencontre disponible pour ce filtre' }}
+                                    </div>
                                     <p class="text-xs text-[#A2ACA3]/70 max-w-md mx-auto">
-                                        Oracle Foot affiche exclusivement les données officielles des compétitions configurées sans inventer de calendrier fictif.
+                                        {{ request()->boolean('reliable')
+                                            ? 'Le modèle s’abstient lorsqu’il ne dispose pas d’un signal suffisamment solide. Aucun choix n’est ajouté artificiellement.'
+                                            : 'Oracle Foot affiche exclusivement les données officielles des compétitions configurées sans inventer de calendrier fictif.' }}
                                     </p>
                                 </td>
                             </tr>

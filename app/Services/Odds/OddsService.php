@@ -26,15 +26,24 @@ class OddsService
 
     public function latestComplete1N2Set(Collection $snapshots, int $marketId): ?Collection
     {
+        return $this->latestCompleteMarketSet($snapshots, $marketId, ['HOME', 'DRAW', 'AWAY']);
+    }
+
+    /**
+     * Returns the newest same-bookmaker/same-timestamp set for any normalized
+     * market. This keeps totals and handicap odds compatible with 1N2 odds.
+     */
+    public function latestCompleteMarketSet(Collection $snapshots, int $marketId, array $selections): ?Collection
+    {
         return $snapshots
             ->where('market_id', $marketId)
             ->where('is_closing', false)
             ->groupBy('bookmaker_id')
             ->flatMap(fn (Collection $bookmakerSnapshots) => $bookmakerSnapshots
                 ->groupBy(fn (OddsSnapshot $snapshot): int => $snapshot->snapshot_time_utc->timestamp)
-                ->map(function (Collection $set): ?Collection {
+                ->map(function (Collection $set) use ($selections): ?Collection {
                     $bySelection = $set->keyBy('selection');
-                    if (! collect(['HOME', 'DRAW', 'AWAY'])->every(fn (string $selection): bool => $bySelection->has($selection))) {
+                    if (! collect($selections)->every(fn (string $selection): bool => $bySelection->has($selection))) {
                         return null;
                     }
 
@@ -79,6 +88,32 @@ class OddsService
             'ev_lower_bound_pct' => round($evLowerBound * 100, 2),
             'classification' => $isRobust ? 'robuste' : ($isPositiveEdge ? 'indicatif' : 'defavorable'),
             'has_value' => $isPositiveEdge,
+        ];
+    }
+
+    /**
+     * Asian handicap EV with explicit settlement states. The simple p*odds-1
+     * formula is not valid when a line can push or win/lose by half.
+     */
+    public function evaluateAsianHandicap(array $settlement, float $marketOdds): array
+    {
+        $win = max(0.0, (float) ($settlement['win'] ?? 0));
+        $push = max(0.0, (float) ($settlement['push'] ?? 0));
+        $halfWin = max(0.0, (float) ($settlement['half_win'] ?? 0));
+        $halfLoss = max(0.0, (float) ($settlement['half_loss'] ?? 0));
+        $loss = max(0.0, (float) ($settlement['loss'] ?? 0));
+        $ev = $win * ($marketOdds - 1.0)
+            + $halfWin * (($marketOdds - 1.0) / 2.0)
+            - $halfLoss * 0.5
+            - $loss;
+        $positiveReturnMass = $win + ($halfWin / 2.0);
+        $negativeReturnMass = $loss + ($halfLoss / 2.0);
+
+        return [
+            'ev_pct' => round($ev * 100, 2),
+            'fair_odds' => $positiveReturnMass > 0 ? round(1.0 + $negativeReturnMass / $positiveReturnMass, 3) : 999.0,
+            'has_value' => $ev > 0,
+            'settlement_mass' => round($win + $push + $halfWin + $halfLoss + $loss, 4),
         ];
     }
 

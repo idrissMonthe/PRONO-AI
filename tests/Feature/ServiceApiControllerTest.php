@@ -80,37 +80,21 @@ class ServiceApiControllerTest extends TestCase
         ])->assertUnprocessable()->assertJsonValidationErrors(['items.0']);
     }
 
-    public function test_unavailable_prediction_service_uses_abstaining_poisson_probabilities(): void
+    public function test_unavailable_prediction_service_does_not_substitute_a_local_model(): void
     {
         Http::fake(['*' => Http::response([], 503)]);
         config()->set('services.ai_service.url', 'http://127.0.0.1:8001');
         config()->set('services.ai_service.secret', 'test-service-secret');
         $client = new PredictionClient;
 
-        $homeFavored = $client->predict([
-            'match_id' => 'fallback-home',
-            'home_team' => 'Home FC',
-            'away_team' => 'Away FC',
-            'lambda_home_override' => 3.0,
-            'lambda_away_override' => 0.5,
-        ]);
-        $awayFavored = $client->predict([
-            'match_id' => 'fallback-away',
-            'home_team' => 'Home FC',
-            'away_team' => 'Away FC',
-            'lambda_home_override' => 0.5,
-            'lambda_away_override' => 3.0,
-        ]);
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('AI Service prediction failed with HTTP 503.');
 
-        $this->assertTrue($homeFavored['abstain']);
-        $this->assertSame('UNTRAINED_POISSON_FALLBACK', $homeFavored['model']['version']);
-        $this->assertGreaterThan($homeFavored['probabilities']['away']['p'], $homeFavored['probabilities']['home']['p']);
-        $this->assertEqualsWithDelta(1.0, array_sum(array_column($homeFavored['probabilities'], 'p')), 0.001);
-        $this->assertEqualsWithDelta(
-            $homeFavored['probabilities']['home']['p'],
-            $awayFavored['probabilities']['away']['p'],
-            0.001
-        );
+        $client->predict([
+            'match_id' => 'python-model-required',
+            'home_team' => 'Home FC',
+            'away_team' => 'Away FC',
+        ]);
     }
 
     public function test_odds_value_endpoint_returns_the_service_result(): void

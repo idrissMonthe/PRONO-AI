@@ -7,7 +7,10 @@ use App\Console\Commands\GeneratePredictionsCommand;
 use App\Console\Commands\SyncOddsCommand;
 use App\Console\Commands\SyncLiveScoresCommand;
 use App\Console\Commands\SettlePredictionsCommand;
+use App\Console\Commands\MonitorOracleCommand;
+use App\Console\Commands\EvaluatePredictionPerformanceCommand;
 use App\Console\Commands\UpdateOddsMovementCommand;
+use App\Console\Commands\RecalculateQualityCommand;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Schedule;
@@ -44,6 +47,14 @@ Schedule::command(UpdateOddsMovementCommand::class)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-odds-movement.log'));
 
+// Fait décroître la qualité lorsque les sources ou les cotes deviennent anciennes.
+Schedule::command(RecalculateQualityCommand::class)
+    ->hourly()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-quality.log'));
+
 // Scores et statuts live : un appel par minute, côté serveur.
 Schedule::command(SyncLiveScoresCommand::class)
     ->everyMinute()
@@ -59,6 +70,13 @@ Schedule::command(SettlePredictionsCommand::class)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-settlement.log'));
 
+Schedule::command(MonitorOracleCommand::class)
+    ->everyTenMinutes()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-monitor.log'));
+
 // Entraîne chaque composante Python (Dixon-Coles, Elo et spécialistes) sur l'historique actualisé.
 Schedule::command(TrainPredictionModelCommand::class)
     ->dailyAt('23:55')
@@ -66,6 +84,13 @@ Schedule::command(TrainPredictionModelCommand::class)
     ->withoutOverlapping()
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-training.log'));
+
+Schedule::command(EvaluatePredictionPerformanceCommand::class)
+    ->dailyAt('00:10')
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-performance.log'));
 
 Schedule::command(GeneratePredictionsCommand::class)
     ->everyFifteenMinutes()

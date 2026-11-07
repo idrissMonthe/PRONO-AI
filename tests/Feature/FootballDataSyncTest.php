@@ -58,6 +58,43 @@ class FootballDataSyncTest extends TestCase
             && $request['competitions'] === 'PL');
     }
 
+    public function test_sync_imports_champions_league_matches(): void
+    {
+        config()->set('services.football_data.competitions', ['CL']);
+        Http::fake([
+            'api.football-data.org/v4/matches*' => Http::response([
+                'matches' => [[
+                    'utcDate' => '2026-11-04T20:00:00Z',
+                    'status' => 'SCHEDULED',
+                    'matchday' => 4,
+                    'homeTeam' => ['name' => 'Paris Saint-Germain'],
+                    'awayTeam' => ['name' => 'FC Bayern München'],
+                    'score' => ['fullTime' => ['home' => null, 'away' => null]],
+                    'competition' => [
+                        'code' => 'CL',
+                        'name' => 'UEFA Champions League',
+                        'area' => ['name' => 'Europe'],
+                    ],
+                    'season' => [
+                        'startDate' => '2026-09-01',
+                        'endDate' => '2027-05-31',
+                    ],
+                ]],
+            ]),
+        ]);
+
+        $result = app(\App\Services\FootballData\FootballDataService::class)
+            ->syncFromFootballDataOrg('2026-11-04', '2026-11-04');
+
+        $this->assertSame(1, $result['imported']);
+        $this->assertDatabaseHas('leagues', ['code' => 'CL']);
+        $this->assertDatabaseHas('matches', [
+            'data_source' => 'football-data.org',
+            'status' => 'SCHEDULED',
+        ]);
+        Http::assertSent(fn ($request) => $request['competitions'] === 'CL');
+    }
+
     public function test_sync_reports_a_provider_error_without_exposing_credentials(): void
     {
         Http::fake([

@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Services\FootballData\FootballDataService;
+use App\Models\SystemAlert;
 use App\Services\Prediction\PredictionSettlementService;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -83,6 +84,7 @@ class SyncMatchesCommand extends Command
             );
 
             Log::info('oracle:sync-matches completed', $result);
+            SystemAlert::resolve('provider.football-data.org.unavailable');
 
             if ($result['rejected'] > 0) {
                 $this->warn("⚠️  {$result['rejected']} match(s) rejeté(s) → voir la table data_quarantine.");
@@ -93,6 +95,7 @@ class SyncMatchesCommand extends Command
             return self::SUCCESS;
 
         } catch (RuntimeException $e) {
+            SystemAlert::raise('provider.football-data.org.unavailable', 'football-data.org est indisponible : '.$e->getMessage(), 'critical', 'football-data.org');
             $this->error('❌ Erreur lors de la synchronisation : ' . $e->getMessage());
             $this->warn('Les données existantes en base sont conservées telles quelles.');
             Log::error('oracle:sync-matches failed', [
@@ -102,6 +105,7 @@ class SyncMatchesCommand extends Command
             ]);
             return self::FAILURE;
         } catch (Throwable $e) {
+            SystemAlert::raise('provider.football-data.org.unavailable', 'Erreur football-data.org : '.$e->getMessage(), 'critical', 'football-data.org');
             $this->error('❌ Erreur inattendue : ' . $e->getMessage());
             Log::error('oracle:sync-matches unexpected error', [
                 'exception' => $e::class,

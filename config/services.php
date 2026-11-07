@@ -45,7 +45,7 @@ return [
         'base_url' => env('FOOTBALL_DATA_BASE_URL', 'https://api.football-data.org/v4'),
         'competitions' => array_values(array_filter(array_map(
             'trim',
-            explode(',', env('FOOTBALL_DATA_COMPETITIONS', 'PL,PD,BL1,SA,FL1'))
+            explode(',', env('FOOTBALL_DATA_COMPETITIONS', 'PL,PD,BL1,SA,FL1,CL'))
         ))),
     ],
 
@@ -53,6 +53,10 @@ return [
         'api_key' => env('THE_ODDS_API_KEY'),
         'base_url' => env('THE_ODDS_API_BASE_URL', 'https://api.the-odds-api.com/v4'),
         'regions' => env('THE_ODDS_API_REGIONS', 'eu'),
+        'markets' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', env('THE_ODDS_API_MARKETS', 'h2h,totals,spreads'))
+        ))),
         'bookmakers' => array_values(array_filter(array_map(
             'trim',
             explode(',', env('THE_ODDS_API_BOOKMAKERS', 'pinnacle,bet365,unibet'))
@@ -63,6 +67,7 @@ return [
             'BL1' => 'soccer_germany_bundesliga',
             'SA' => 'soccer_italy_serie_a',
             'FL1' => 'soccer_france_ligue_one',
+            'CL' => 'soccer_uefa_champs_league',
         ],
     ],
 

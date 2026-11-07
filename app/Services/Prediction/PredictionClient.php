@@ -44,7 +44,7 @@ class PredictionClient
     public function predict(array $payload): array
     {
         if (empty($this->secret)) {
-            return $this->deterministicFallbackPredict($payload);
+            throw new RuntimeException('AI_SERVICE_SECRET is not configured; Python model prediction cannot run.');
         }
 
         try {
@@ -53,15 +53,26 @@ class PredictionClient
                 ->post("{$this->baseUrl}/v1/predict", $payload);
 
             if ($response->successful()) {
-                return $response->json();
+                $result = $response->json();
+                if (is_array($result)) {
+                    return $result;
+                }
+
+                throw new RuntimeException('AI Service returned an invalid prediction payload.');
             }
 
             Log::warning('AI Service predict non-200 response', ['status' => $response->status(), 'body' => $response->body()]);
         } catch (Exception $e) {
-            Log::warning('AI Service connection error, applying deterministic fallback: ' . $e->getMessage());
+            Log::warning('AI Service prediction failed: '.$e->getMessage());
+
+            if ($e instanceof RuntimeException) {
+                throw $e;
+            }
+
+            throw new RuntimeException('AI Service unavailable; Python model prediction could not run.', 0, $e);
         }
 
-        return $this->deterministicFallbackPredict($payload);
+        throw new RuntimeException('AI Service prediction failed with HTTP '.$response->status().'.');
     }
 
     public function devig(array $odds, string $method = 'shin'): array
@@ -205,7 +216,7 @@ class PredictionClient
             array_slice($scoreRows, 0, 10)
         );
         $totals = [];
-        foreach ([0.5, 1.5, 2.5, 3.5, 4.5] as $threshold) {
+        foreach ([0.5, 1.5, 2.5, 3.5, 4.5, 5.5] as $threshold) {
             $over = 0.0;
             foreach ($totalGoalsMass as $goals => $probability) {
                 if ($goals > $threshold) {
@@ -218,6 +229,21 @@ class PredictionClient
         }
 
         $goalMargin = [];
+        $teamTotals = ['home' => [], 'away' => []];
+        foreach (['home' => $homeScores, 'away' => $awayScores] as $team => $scoreProbabilities) {
+            foreach ([0.5, 1.5, 2.5, 3.5] as $threshold) {
+                $over = 0.0;
+                foreach ($scoreProbabilities as $goals => $probability) {
+                    if ($goals > $threshold) {
+                        $over += $probability / $matrixMass;
+                    }
+                }
+                $key = str_replace('.', '_', (string) $threshold);
+                $teamTotals[$team]['over_'.$key] = round($over, 4);
+                $teamTotals[$team]['under_'.$key] = round(1.0 - $over, 4);
+            }
+        }
+
         foreach ([1, 2, 3] as $margin) {
             $homeByMargin = 0.0;
             $awayByMargin = 0.0;
@@ -300,6 +326,7 @@ class PredictionClient
                 'totals' => $totals,
                 'combos' => $combos,
                 'goal_margin' => $goalMargin,
+                'team_totals' => $teamTotals,
                 'btts' => [
                     'yes' => round($bttsMass / $matrixMass, 4),
                     'no' => round(1.0 - $bttsMass / $matrixMass, 4),

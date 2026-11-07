@@ -13,6 +13,10 @@ from app.core.dixon_coles import compute_score_matrix, extract_match_markets_fro
 
 TEAM_STRENGTH_PRIOR_MATCHES = 5.0
 MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS = 5
+# Teams with fewer observations are still fitted, but their attack/defence
+# parameters are strongly shrunk toward the league mean. Excluding them from
+# the optimization made every sparse fixture share the exact same lambdas.
+MIN_TEAM_MATCHES_FOR_MODELING = 1
 
 
 class MatchData:
@@ -70,7 +74,7 @@ class DixonColesModel:
             self.team_match_counts[match.away_team] += 1
         modeled_teams = [
             team for team in all_teams
-            if self.team_match_counts[team] >= MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS
+            if self.team_match_counts[team] >= MIN_TEAM_MATCHES_FOR_MODELING
         ]
         if len(modeled_teams) < 2:
             modeled_teams = []
@@ -166,13 +170,11 @@ class DixonColesModel:
         # Check for unknown teams
         if home_team in self.team_indices:
             appearances = self.team_match_counts.get(home_team, 0)
+            reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
+            att_h = self.attack_strengths[self.team_indices[home_team]] * reliability
+            def_h = self.defense_strengths[self.team_indices[home_team]] * reliability
             if appearances < MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS:
-                att_h, def_h = 0.0, 0.0
                 warnings.append(f"low_sample_team:{home_team}:{appearances}")
-            else:
-                reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
-                att_h = self.attack_strengths[self.team_indices[home_team]] * reliability
-                def_h = self.defense_strengths[self.team_indices[home_team]] * reliability
         elif home_team in self.team_match_counts:
             att_h, def_h = 0.0, 0.0
             warnings.append(f"low_sample_team:{home_team}:{self.team_match_counts[home_team]}")
@@ -182,13 +184,11 @@ class DixonColesModel:
 
         if away_team in self.team_indices:
             appearances = self.team_match_counts.get(away_team, 0)
+            reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
+            att_a = self.attack_strengths[self.team_indices[away_team]] * reliability
+            def_a = self.defense_strengths[self.team_indices[away_team]] * reliability
             if appearances < MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS:
-                att_a, def_a = 0.0, 0.0
                 warnings.append(f"low_sample_team:{away_team}:{appearances}")
-            else:
-                reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
-                att_a = self.attack_strengths[self.team_indices[away_team]] * reliability
-                def_a = self.defense_strengths[self.team_indices[away_team]] * reliability
         elif away_team in self.team_match_counts:
             att_a, def_a = 0.0, 0.0
             warnings.append(f"low_sample_team:{away_team}:{self.team_match_counts[away_team]}")

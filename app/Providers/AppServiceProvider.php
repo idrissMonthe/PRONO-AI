@@ -8,6 +8,7 @@ use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
+use App\Services\Prediction\PredictionRevisionService;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -37,7 +38,10 @@ class AppServiceProvider extends ServiceProvider
 
         // Combinés & parlays probabilistes
         $this->app->singleton(ParlayService::class, function ($app) {
-            return new ParlayService($app->make(GeminiExplanationService::class));
+            return new ParlayService(
+                $app->make(GeminiExplanationService::class),
+                $app->make(PredictionRevisionService::class)
+            );
         });
 
         // SHA-256 hash-chain integrity service

@@ -32,6 +32,7 @@ class FootballMatch extends Model
         'round',
         'quality_score',
         'quality_tier',
+        'quality_breakdown',
     ];
 
     protected $casts = [
@@ -39,6 +40,7 @@ class FootballMatch extends Model
         'last_synced_at' => 'datetime',
         'is_neutral_ground' => 'boolean',
         'quality_score' => 'decimal:2',
+        'quality_breakdown' => 'array',
         'home_score' => 'integer',
         'away_score' => 'integer',
         'ht_home_score' => 'integer',

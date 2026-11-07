@@ -3,12 +3,16 @@
 namespace App\Console\Commands;
 
 use App\Models\FootballMatch;
+use App\Models\FeatureSnapshot;
 use App\Models\Market;
 use App\Models\ModelVersion;
 use App\Models\Prediction;
 use App\Services\Integrity\HashChainService;
+use App\Services\FootballData\FootballDataService;
 use App\Services\Odds\OddsService;
 use App\Services\Prediction\PredictionClient;
+use App\Services\Prediction\PredictionRevisionService;
+use App\Models\PredictionRevision;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -19,10 +23,10 @@ class GeneratePredictionsCommand extends Command
     protected $signature = 'oracle:generate-predictions {--limit=100 : Nombre maximal de matchs à analyser}';
     protected $description = 'Génère les prédictions officielles des prochains matchs.';
 
-    public function handle(PredictionClient $client, HashChainService $chain, OddsService $oddsService): int
+    public function handle(PredictionClient $client, HashChainService $chain, OddsService $oddsService, FootballDataService $footballDataService, PredictionRevisionService $revisionService): int
     {
         $model = ModelVersion::firstOrCreate(
-            ['version_name' => 'M3_MARKET_SPECIALISTS_v3'],
+            ['version_name' => 'M3_MARKET_SPECIALISTS_v6'],
             ['family' => 'hybrid', 'algorithm' => 'Dixon-Coles + marché calibré', 'status' => 'champion']
         );
 
@@ -33,15 +37,11 @@ class GeneratePredictionsCommand extends Command
             return self::FAILURE;
         }
 
-        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots', 'playerAvailabilities'])
+        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
             ->whereNotNull('external_id')
             ->where('data_source', 'football-data.org')
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
-            ->whereDoesntHave('predictions', fn ($q) => $q
-                ->where('is_official', true)
-                ->where('model_version_id', $model->id)
-                ->whereNotNull('derived_markets_json->goal_margin'))
             ->orderBy('match_date_utc')
             ->limit(max(1, min(5000, (int) $this->option('limit'))))
             ->get();
@@ -50,6 +50,9 @@ class GeneratePredictionsCommand extends Command
         $generated = 0;
         foreach ($matches as $match) {
             try {
+                // La qualité doit refléter la fraîcheur des cotes et des
+                // données à l'instant de la prédiction, jamais une valeur figée.
+                $quality = $footballDataService->refreshQualityScore($match->fresh());
                 $latestOddsSet = $marketId
                     ? $oddsService->latestComplete1N2Set($match->oddsSnapshots, (int) $marketId)
                     : null;
@@ -60,11 +63,6 @@ class GeneratePredictionsCommand extends Command
                             ->map(fn ($selection) => (float) $latestOddsSet[$selection]->decimal_odds)
                             ->all()
                     );
-                }
-
-                if ($marketProbabilities === null && (float) ($match->quality_score ?? 0) < 90.0) {
-                    $this->line("… {$match->homeTeam->short_name} – {$match->awayTeam->short_name} : en attente d’un marché complet ou de données fiables.");
-                    continue;
                 }
 
                 $absencePenalty = ['home' => 0.0, 'away' => 0.0];
@@ -89,27 +87,76 @@ class GeneratePredictionsCommand extends Command
                     return $lastMatch ? max(0.0, Carbon::parse($lastMatch)->diffInHours($match->match_date_utc) / 24) : 7.0;
                 };
 
+                $homeRestDays = $restDays($match->home_team_id);
+                $awayRestDays = $restDays($match->away_team_id);
+
                 $result = $client->predict([
                     'match_id' => (string) $match->id,
                     'home_team' => $match->homeTeam->name,
                     'away_team' => $match->awayTeam->name,
                     'is_neutral_ground' => (bool) $match->is_neutral_ground,
-                    'quality_score' => $marketProbabilities !== null ? max(95.0, (float) ($match->quality_score ?? 0)) : (float) ($match->quality_score ?? 0),
+                    'quality_score' => (float) $quality['score'],
                     'market_probabilities' => $marketProbabilities,
                     'absence_penalty_home' => $absencePenalty['home'],
                     'absence_penalty_away' => $absencePenalty['away'],
-                    'rest_days_home' => $restDays($match->home_team_id),
-                    'rest_days_away' => $restDays($match->away_team_id),
+                    'rest_days_home' => $homeRestDays,
+                    'rest_days_away' => $awayRestDays,
                 ]);
 
-                $prediction = DB::transaction(function () use ($match, $model, $result, $chain) {
+                $probabilities = $result['probabilities'];
+                $review = $revisionService->review($result, [
+                    'home_team' => $match->homeTeam->name,
+                    'away_team' => $match->awayTeam->name,
+                    'quality_score' => (float) $quality['score'],
+                    'quality_breakdown' => $quality['breakdown'] ?? [],
+                    'market_probabilities' => $marketProbabilities,
+                    'absence_penalty' => $absencePenalty,
+                    'rest_days' => ['home' => $homeRestDays, 'away' => $awayRestDays],
+                    'odds_snapshot' => $latestOddsSet ? $latestOddsSet->map(fn ($odd) => [
+                        'selection' => $odd->selection,
+                        'decimal_odds' => (float) $odd->decimal_odds,
+                        'source' => $odd->source,
+                        'snapshot_time_utc' => $odd->snapshot_time_utc?->toIso8601String(),
+                    ])->values()->all() : [],
+                    'initial_candidate' => null,
+                    'candidates' => $revisionService->candidatesFromResult($result),
+                ]);
+                $review['initial_candidate'] = $review['initial_candidate'] ?? $review['final_candidate'];
+                $snapshotVariables = [
+                    'as_of_utc' => now()->utc()->toIso8601String(),
+                    'quality' => $quality,
+                    'market_probabilities' => $marketProbabilities,
+                    'model_probabilities' => [
+                        'home' => $probabilities['home']['p'],
+                        'draw' => $probabilities['draw']['p'],
+                        'away' => $probabilities['away']['p'],
+                    ],
+                    'expected_goals' => $result['expected_goals'] ?? [],
+                    'absence_penalty' => $absencePenalty,
+                    'rest_days' => ['home' => $homeRestDays, 'away' => $awayRestDays],
+                    'warnings' => $result['warnings'] ?? [],
+                    'revision_policy' => PredictionRevisionService::POLICY_VERSION,
+                ];
+                $fingerprintVariables = $snapshotVariables;
+                unset($fingerprintVariables['as_of_utc']);
+                $snapshotHash = hash('sha256', json_encode($fingerprintVariables, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+                if ($match->officialPrediction?->featureSnapshot?->snapshot_hash === $snapshotHash) {
+                    continue;
+                }
+
+                $latestPredictionId = $match->officialPrediction?->id;
+                $orderedProbabilities = collect($snapshotVariables['model_probabilities'])->sortDesc()->values();
+                $probabilityMargin = (float) $orderedProbabilities->get(0, 0) - (float) $orderedProbabilities->get(1, 0);
+                $prediction = DB::transaction(function () use ($match, $model, $result, $review, $chain, $quality, $marketProbabilities, $snapshotVariables, $snapshotHash, $latestPredictionId, $probabilityMargin) {
                     $probabilities = $result['probabilities'];
-                    $prediction = Prediction::create([
+                    $initialPrediction = Prediction::create([
                         'match_id' => $match->id,
                         'model_version_id' => $model->id,
                         'calibration_version' => $result['model']['calibration_version'] ?? null,
-                        'is_official' => true,
+                        'is_official' => false,
+                        'prediction_stage' => 'initial',
                         'freeze_time_utc' => now()->utc(),
+                        'supersedes_id' => $latestPredictionId,
                         'content_hash' => str_repeat('0', 64),
                         'home_lambda' => $result['expected_goals']['home'],
                         'away_lambda' => $result['expected_goals']['away'],
@@ -128,10 +175,73 @@ class GeneratePredictionsCommand extends Command
                         'confidence_tier' => $result['confidence_tier'] ?? 'low',
                         'is_abstained' => (bool) ($result['abstain'] ?? true),
                         'warnings_json' => $result['warnings'] ?? [],
+                        'market_metrics_json' => [
+                            'market_probabilities' => $marketProbabilities,
+                            'model_probabilities' => $snapshotVariables['model_probabilities'],
+                            'max_probability' => max($snapshotVariables['model_probabilities']),
+                            'probability_margin' => $probabilityMargin,
+                        ],
                         'execution_time_ms' => $result['duration_ms'] ?? null,
                     ]);
-                    $chain->chainPrediction($prediction);
-                    return $prediction;
+                    FeatureSnapshot::create([
+                        'prediction_id' => $initialPrediction->id,
+                        'as_of' => now()->utc(),
+                        'variables' => $snapshotVariables,
+                        'snapshot_hash' => $snapshotHash,
+                        'missing_indicators' => $quality['missing'] ?? [],
+                    ]);
+                    $finalCandidate = $review['final_candidate'] ?? null;
+                    $decision = $review['decision'] ?? 'insufficient_data';
+                    $finalIsAbstained = (bool) ($result['abstain'] ?? true)
+                        || in_array($decision, ['reject', 'insufficient_data'], true)
+                        || ! is_array($finalCandidate);
+                    $finalPrediction = $initialPrediction->replicate();
+                    $finalPrediction->fill([
+                        'is_official' => true,
+                        'prediction_stage' => 'final',
+                        'supersedes_id' => $initialPrediction->id,
+                        'content_hash' => str_repeat('0', 64),
+                        'prev_hash' => null,
+                        'published_market' => $finalCandidate['market'] ?? null,
+                        'published_selection' => $finalCandidate['selection'] ?? null,
+                        'published_line' => $finalCandidate['line'] ?? null,
+                        'published_probability' => $finalCandidate['probability'] ?? null,
+                        'review_decision' => $decision,
+                        'review_confidence' => $review['confidence_in_revision'] ?? 'low',
+                        'reviewed_at_utc' => now()->utc(),
+                        'is_abstained' => $finalIsAbstained,
+                        'warnings_json' => array_values(array_unique(array_merge($result['warnings'] ?? [], ['revision_'.$decision]))),
+                        'market_metrics_json' => array_merge($initialPrediction->market_metrics_json ?? [], [
+                            'revision' => ['decision' => $decision, 'provider' => $review['provider'] ?? 'local_revision_rules'],
+                        ]),
+                    ]);
+                    $finalPrediction->save();
+                    FeatureSnapshot::create([
+                        'prediction_id' => $finalPrediction->id,
+                        'as_of' => now()->utc(),
+                        'variables' => array_merge($snapshotVariables, ['revision' => $review]),
+                        'snapshot_hash' => $snapshotHash,
+                        'missing_indicators' => $quality['missing'] ?? [],
+                    ]);
+                    $chain->chainPrediction($initialPrediction);
+                    $chain->chainPrediction($finalPrediction);
+                    PredictionRevision::create([
+                        'initial_prediction_id' => $initialPrediction->id,
+                        'final_prediction_id' => $finalPrediction->id,
+                        'decision' => $decision,
+                        'provider' => $review['provider'] ?? 'local_revision_rules',
+                        'ai_model' => $review['model'] ?? PredictionRevisionService::POLICY_VERSION,
+                        'initial_candidate' => $review['initial_candidate'] ?? null,
+                        'ai_recommendation' => $review['ai_response'] ?? $review['final_candidate'] ?? null,
+                        'recalculated_candidate' => $review['final_candidate'] ?? null,
+                        'final_candidate' => $finalCandidate,
+                        'reasoning' => $review['reasoning'] ?? null,
+                        'supporting_factors' => $review['supporting_factors'] ?? [],
+                        'risk_factors' => $review['risk_factors'] ?? [],
+                        'validation' => ['accepted' => ! $finalIsAbstained, 'policy' => PredictionRevisionService::POLICY_VERSION],
+                        'reviewed_at_utc' => now()->utc(),
+                    ]);
+                    return $finalPrediction;
                 });
                 $generated++;
                 $this->line("✓ {$match->homeTeam->short_name} – {$match->awayTeam->short_name} ({$prediction->confidence_tier})");

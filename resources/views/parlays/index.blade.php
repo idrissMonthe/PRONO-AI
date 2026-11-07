@@ -10,7 +10,7 @@
                 </span>
             </div>
             <p class="text-xs text-[#A2ACA3] mt-1">
-                Génération automatique multicritères basée sur les prédictions Dixon-Coles et les cotes réelles dévigées.
+                Coupons 1N2 évalués avec les cotes réelles ; scénarios de buts, BTTS, clean sheet et marges issus de la matrice Dixon-Coles.
             </p>
         </div>
 
@@ -38,7 +38,7 @@
         <div class="flex items-center gap-2">
             <span class="w-2 h-2 rounded-full bg-[#88B69A] shrink-0"></span>
             <span>
-                Les probabilités conjointes sont obtenues par le produit des estimations indépendantes. Aucune issue n’est garantie.
+                Les scénarios de marchés alternatifs utilisent les probabilités de la matrice de scores ; leurs cotes sont théoriques, sans EV bookmaker. Aucune issue n’est garantie.
             </span>
         </div>
         <div class="mono text-[11px] text-[#C3A16A]">
@@ -49,6 +49,14 @@
     <!-- Grille des Combinés Générés -->
     <div id="parlays-container" class="space-y-6">
         @forelse($parlays as $parlay)
+            @php
+                $modelPriced = collect($parlay->selections_json)->every(
+                    fn (array $selection) => ($selection['price_basis'] ?? 'bookmaker') === 'model_fair'
+                );
+                $limitedHistory = collect($parlay->selections_json)->contains(
+                    fn (array $selection) => (bool) ($selection['limited_team_history'] ?? false)
+                );
+            @endphp
             <div class="p-5 rounded-lg bg-[#141A17] border border-[#303A32] hover:border-[#3a473d] transition-all space-y-4">
                 <!-- En-tête de la carte Combiné -->
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#303A32]/60">
@@ -77,7 +85,7 @@
                     <!-- Métriques Globales du Combiné -->
                     <div class="flex items-center gap-3">
                         <div class="text-right">
-                            <div class="text-[10px] text-[#A2ACA3]">Cote Totale</div>
+                            <div class="text-[10px] text-[#A2ACA3]">{{ $modelPriced ? 'Cote juste indicative' : 'Cote totale marché' }}</div>
                             <div class="text-lg font-extrabold mono text-[#F0F0E8]">{{ number_format($parlay->combined_odds, 2) }}</div>
                         </div>
                         <div class="text-right border-l border-[#303A32] pl-3">
@@ -90,6 +98,15 @@
                         </div>
                     </div>
                 </div>
+
+                @if($modelPriced)
+                    <p class="text-[11px] text-[#C3A16A]">
+                        Scénario calculé depuis les probabilités du modèle : cette cote n’est pas une cote proposée par un bookmaker et l’espérance de valeur n’est pas calculée.
+                        @if($limitedHistory)
+                            Seuils renforcés en raison d’un historique limité pour une ou plusieurs équipes.
+                        @endif
+                    </p>
+                @endif
 
                 <!-- Liste des Sélections Détaillées -->
                 <div class="space-y-2">
@@ -120,12 +137,16 @@
                                         <div class="font-semibold text-[#F0F0E8]">{{ $sel['model_prob_pct'] }}%</div>
                                     </div>
                                     <div class="mono">
-                                        <div class="text-[10px] text-[#A2ACA3]">Cote Marché</div>
+                                        <div class="text-[10px] text-[#A2ACA3]">{{ ($sel['price_basis'] ?? 'bookmaker') === 'model_fair' ? 'Cote juste modèle' : 'Cote Marché' }}</div>
                                         <div class="font-bold text-[#F0F0E8]">{{ number_format($sel['odds'], 2) }}</div>
                                     </div>
                                     <div class="mono text-[10px] text-[#A2ACA3] hidden sm:block">
                                         <div>Source : <span class="text-[#F0F0E8]">{{ $sel['odds_source'] ?? 'Pinnacle' }}</span></div>
-                                        <div>EV : <span class="{{ $sel['ev_pct'] >= 0 ? 'text-[#88B69A]' : 'text-[#A2ACA3]' }}">{{ $sel['ev_pct'] > 0 ? '+' : '' }}{{ $sel['ev_pct'] }}%</span></div>
+                                        @if(($sel['ev_pct'] ?? null) !== null)
+                                            <div>EV : <span class="{{ $sel['ev_pct'] >= 0 ? 'text-[#88B69A]' : 'text-[#A2ACA3]' }}">{{ $sel['ev_pct'] > 0 ? '+' : '' }}{{ $sel['ev_pct'] }}%</span></div>
+                                        @else
+                                            <div>EV : non calculée</div>
+                                        @endif
                                     </div>
                                     <div>
                                         <button type="button" onclick="openMatchModal({{ $sel['match_id'] }})" class="p-1.5 rounded hover:bg-[#222B25] text-[#A2ACA3] hover:text-[#C3A16A] transition-colors cursor-pointer" title="Consulter l'analyse complète">
@@ -160,7 +181,7 @@
             <div class="p-12 text-center rounded-lg bg-[#141A17] border border-[#303A32] space-y-3">
                 <div class="text-sm font-semibold text-[#F0F0E8]">Aucun combiné disponible pour cette date</div>
                 <p class="text-xs text-[#A2ACA3] max-w-md mx-auto">
-                    Le moteur nécessite au moins 2 rencontres à venir avec prédictions officielles non-abstentionnistes et cotes réelles relevées pour calculer un combiné probabiliste.
+                    Les combinés marché nécessitent des cotes réelles. Les scénarios de marchés alternatifs sont proposés uniquement si le modèle fournit des probabilités suffisamment fiables.
                 </p>
                 <button type="button" onclick="document.getElementById('regenerate-parlay-form').requestSubmit()" class="mt-2 px-4 py-2 rounded bg-[#C3A16A] text-[#101513] font-bold text-xs hover:bg-[#b08e58] transition-colors mono cursor-pointer">
                     Lancer l’évaluation des combinés

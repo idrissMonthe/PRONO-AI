@@ -9,12 +9,14 @@ class PredictionEvaluation extends Model
 {
     protected $fillable = [
         'prediction_id', 'match_id', 'market_group', 'market_key',
-        'predicted_label', 'predicted_probability', 'actual_label',
+        'predicted_label', 'predicted_probability', 'brier_score', 'log_loss', 'probability_bucket', 'actual_label',
         'status', 'evaluated_at_utc',
     ];
 
     protected $casts = [
         'predicted_probability' => 'decimal:4',
+        'brier_score' => 'decimal:6',
+        'log_loss' => 'decimal:6',
         'evaluated_at_utc' => 'datetime',
     ];
 
