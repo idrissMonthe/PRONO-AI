@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\PredictionEvaluation;
 use App\Models\ModelVersion;
+use App\Models\FootballMatch;
+use App\Models\Prediction;
 use Illuminate\Http\Request;
 
 class PredictionPerformanceController extends Controller
@@ -59,6 +61,29 @@ class PredictionPerformanceController extends Controller
                 ])->all();
             })->values();
 
-        return view('performance.index', compact('evaluations', 'total', 'won', 'lost', 'rate', 'marketStats', 'calibrationStats'));
+        $coverageStats = FootballMatch::query()
+            ->selectRaw('analysis_status, COUNT(*) as total')
+            ->whereNotNull('analysis_status')
+            ->groupBy('analysis_status')
+            ->pluck('total', 'analysis_status');
+
+        $originStats = Prediction::query()
+            ->selectRaw('prediction_origin, COUNT(*) as total')
+            ->where('is_official', true)
+            ->groupBy('prediction_origin')
+            ->pluck('total', 'prediction_origin');
+
+        $hybridCoverage = [
+            'matches' => FootballMatch::count(),
+            'python_ready' => (int) ($coverageStats['PYTHON_READY'] ?? 0),
+            'ai_assisted' => (int) ($coverageStats['AI_ASSISTED'] ?? 0),
+            'hybrid_ready' => (int) ($coverageStats['HYBRID_READY'] ?? 0),
+            'limited_data' => (int) ($coverageStats['LIMITED_DATA'] ?? 0),
+            'no_analysis' => (int) ($coverageStats['NO_ANALYSIS'] ?? 0),
+            'python_predictions' => (int) ($originStats['PYTHON_ESTIMATE'] ?? 0),
+            'ai_predictions' => (int) ($originStats['AI_ESTIMATE'] ?? 0),
+        ];
+
+        return view('performance.index', compact('evaluations', 'total', 'won', 'lost', 'rate', 'marketStats', 'calibrationStats', 'hybridCoverage'));
     }
 }

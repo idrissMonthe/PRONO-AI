@@ -33,6 +33,11 @@ class FootballMatch extends Model
         'quality_score',
         'quality_tier',
         'quality_breakdown',
+        'analysis_status',
+        'analysis_source',
+        'analysis_reason',
+        'analysis_missing_json',
+        'analysis_updated_at',
     ];
 
     protected $casts = [
@@ -41,6 +46,8 @@ class FootballMatch extends Model
         'is_neutral_ground' => 'boolean',
         'quality_score' => 'decimal:2',
         'quality_breakdown' => 'array',
+        'analysis_missing_json' => 'array',
+        'analysis_updated_at' => 'datetime',
         'home_score' => 'integer',
         'away_score' => 'integer',
         'ht_home_score' => 'integer',

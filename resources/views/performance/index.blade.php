@@ -18,6 +18,18 @@
         @endforelse
     </div>
 
+    <section class="section-block">
+        <div class="section-heading"><div><span class="eyebrow">APPRENTISSAGE HYBRIDE</span><h2>Couverture des analyses</h2><p>Les matchs restent comptés même lorsque Python ou l’IA ne peuvent pas publier de sélection.</p></div></div>
+        <div class="performance-market-grid">
+            <div class="performance-market-card"><span>Matchs suivis</span><strong>{{ $hybridCoverage['matches'] }}</strong><small>calendrier total</small></div>
+            <div class="performance-market-card"><span>Python prêt</span><strong>{{ $hybridCoverage['python_ready'] }}</strong><small>analyse statistique</small></div>
+            <div class="performance-market-card"><span>IA assistée</span><strong>{{ $hybridCoverage['ai_assisted'] }}</strong><small>Python sous-couvert</small></div>
+            <div class="performance-market-card"><span>Hybrides</span><strong>{{ $hybridCoverage['hybrid_ready'] }}</strong><small>Python + IA</small></div>
+            <div class="performance-market-card"><span>Données limitées</span><strong>{{ $hybridCoverage['limited_data'] }}</strong><small>sans publication fiable</small></div>
+            <div class="performance-market-card"><span>Origine IA</span><strong>{{ $hybridCoverage['ai_predictions'] }}</strong><small>estimations non calibrées</small></div>
+        </div>
+    </section>
+
     @if($calibrationStats->isNotEmpty())
         <div class="performance-market-grid">
             @foreach($calibrationStats->take(8) as $stat)

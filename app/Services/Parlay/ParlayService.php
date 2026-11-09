@@ -275,9 +275,12 @@ class ParlayService
      */
     private function buildModelMarketCandidates(FootballMatch $match, Prediction $prediction): array
     {
+        $isAiEstimate = $prediction->prediction_origin === 'AI_ESTIMATE';
         if ($prediction->is_abstained
-            || ! in_array($prediction->confidence_tier, ['medium', 'high'], true)
-            || (float) $prediction->quality_score < 70
+            || ($isAiEstimate && ! (bool) config('services.hybrid_prediction.allow_ai_in_parlays', true))
+            || (! $isAiEstimate && ! in_array($prediction->confidence_tier, ['medium', 'high'], true))
+            || (! $isAiEstimate && (float) $prediction->quality_score < 70)
+            || ($isAiEstimate && ! $prediction->published_market)
             || (float) $prediction->home_lambda <= 0
             || (float) $prediction->away_lambda <= 0
             || (float) $prediction->truncated_residual_mass > 0.01) {
@@ -335,6 +338,8 @@ class ParlayService
                 'ev_pct' => null,
                 'price_basis' => 'model_fair',
                 'confidence_tier' => $prediction->confidence_tier,
+                'source' => $prediction->prediction_origin,
+                'is_ai_estimate' => $isAiEstimate,
                 'limited_team_history' => $limitedTeamHistory,
             ];
         };

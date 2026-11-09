@@ -196,6 +196,12 @@
                                         <div class="text-[10px] text-[#A2ACA3] mono mt-0.5">
                                             Buts attendus : <span class="text-[#88B69A]">{{ $p->home_lambda }}</span> - <span class="text-[#D68D86]">{{ $p->away_lambda }}</span>
                                         </div>
+                                        <div class="text-[10px] mt-1">
+                                            @php($originLabel = $p->is_abstained ? 'Données limitées' : ($p->prediction_origin === 'AI_ESTIMATE' ? 'Analyse IA' : ($p->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Hybride' : 'Statistiques Python')))
+                                            <span class="text-[#A2ACA3]">{{ $originLabel }}</span>
+                                        </div>
+                                    @elseif($m->analysis_status)
+                                        <div class="text-[10px] text-[#C3A16A] mt-1">{{ str_replace('_', ' ', $m->analysis_status) }}</div>
                                     @endif
                                 </td>
                                 <td data-live-score class="py-3.5 px-4 text-center">

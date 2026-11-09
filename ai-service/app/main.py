@@ -382,6 +382,12 @@ def predict(req: PredictRequest):
 
     return {
         "match_id": req.match_id or "match-sim",
+        "status": "insufficient_data" if is_abstained else "ok",
+        "availability_status": "LIMITED_DATA" if is_abstained else "PYTHON_READY",
+        "data_quality": req.quality_score,
+        "available_markets": list(markets.keys()) if not is_abstained else [],
+        "missing_data": [warning for warning in warnings if any(token in warning for token in ("unknown", "low_sample", "insufficient", "abstain", "untrained"))],
+        "uncertainty": {"low": "high", "medium": "medium", "high": "low"}.get(confidence_tier, "high"),
         "model": {
             "version": MODEL_VERSION if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
             "family": "pure",

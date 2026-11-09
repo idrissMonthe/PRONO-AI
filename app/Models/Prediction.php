@@ -17,6 +17,11 @@ class Prediction extends Model
         'calibration_version',
         'is_official',
         'prediction_stage',
+        'prediction_origin',
+        'source_model',
+        'ai_estimate_json',
+        'missing_data_json',
+        'uncertainty_tier',
         'published_market',
         'published_selection',
         'published_line',
@@ -65,6 +70,8 @@ class Prediction extends Model
         'top_scores_json' => 'array',
         'warnings_json' => 'array',
         'market_metrics_json' => 'array',
+        'ai_estimate_json' => 'array',
+        'missing_data_json' => 'array',
         'execution_time_ms' => 'integer',
     ];
 

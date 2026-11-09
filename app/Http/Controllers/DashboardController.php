@@ -234,13 +234,19 @@ class DashboardController extends Controller
                 $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
                 $groups[$risk][] = array_merge($published, [
                     'match' => $match,
-                    'source' => 'Révision validée',
+                    'source' => $prediction->prediction_origin === 'AI_ESTIMATE'
+                        ? 'Estimation IA'
+                        : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Hybride' : 'Révision Python'),
                 ]);
                 continue;
             }
 
             $source = 'Modèle';
-            $sourceLabel = $prediction->is_abstained ? 'Modèle · fiabilité limitée' : 'Modèle';
+            $sourceLabel = $prediction->is_abstained
+                ? 'Données limitées'
+                : ($prediction->prediction_origin === 'AI_ESTIMATE'
+                    ? 'Estimation IA'
+                    : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Hybride' : 'Statistiques Python'));
             $markets = $prediction->derived_markets_json ?? [];
             $supportsScoreMarkets = $this->supportsScoreMarketPicks($prediction);
             if (! $supportsScoreMarkets) {

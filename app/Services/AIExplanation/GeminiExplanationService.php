@@ -34,6 +34,142 @@ class GeminiExplanationService
         return !empty($key) && $key !== 'your-gemini-api-key';
     }
 
+    /**
+     * Analyse complémentaire pour les matchs que Python ne couvre pas encore.
+     * Gemini peut proposer une estimation, mais elle reste explicitement
+     * AI_ESTIMATE et ne reçoit jamais le statut d'une probabilité calibrée.
+     */
+    public function analyzeSparseMatch(array $context): array
+    {
+        $fallback = [
+            'decision' => 'no_prediction',
+            'candidate' => null,
+            'reasoning' => 'Aucune analyse IA exploitable n’est disponible.',
+            'supporting_factors' => [],
+            'risk_factors' => ['ai_unavailable_or_insufficient_context'],
+            'missing_data' => $context['missing_data'] ?? [],
+            'confidence' => 'low',
+            'provider' => 'deterministic_fallback',
+            'model' => null,
+            'fallback' => true,
+        ];
+
+        if (! $this->isConfigured()) {
+            return $fallback;
+        }
+
+        $allowedMarkets = [
+            '1N2' => ['home', 'draw', 'away'],
+            'double_chance' => ['1X', 'X2', '12'],
+            'btts' => ['yes', 'no'],
+            'totals' => ['over_1_5', 'under_1_5', 'over_2_5', 'under_2_5', 'over_3_5', 'under_3_5'],
+        ];
+        $systemInstruction = implode("\n", [
+            'Tu es un analyste football complémentaire, pas un bookmaker.',
+            'Tu utilises uniquement les faits présents dans le JSON fourni.',
+            'Tu ne dois jamais inventer une statistique, une blessure, une cote, une composition ou un résultat.',
+            'Si les informations sont insuffisantes, réponds avec decision=no_prediction et candidate=null.',
+            'Une probabilité proposée doit être une estimation IA non calibrée, jamais une probabilité Python.',
+            'Tu ne peux choisir qu’un marché et une sélection dans allowed_markets.',
+            'Réponds uniquement avec un objet JSON valide.',
+        ]);
+        $prompt = "JSON de référence :\n".json_encode([
+            'match' => $context,
+            'allowed_markets' => $allowedMarkets,
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+        $contextHash = hash('sha256', json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $modelsToTry = array_unique([$this->getModel(), 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+
+        foreach ($modelsToTry as $currentModel) {
+            try {
+                $response = Http::timeout(12)
+                    ->withHeaders(['Content-Type' => 'application/json', 'x-goog-api-key' => $this->getApiKey()])
+                    ->post("https://generativelanguage.googleapis.com/v1beta/models/{$currentModel}:generateContent", [
+                        'contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]],
+                        'systemInstruction' => ['parts' => [['text' => $systemInstruction]]],
+                        'generationConfig' => [
+                            'temperature' => 0.1,
+                            'maxOutputTokens' => 700,
+                            'responseMimeType' => 'application/json',
+                            'thinkingConfig' => ['thinkingBudget' => 0],
+                        ],
+                    ]);
+
+                if (! $response->successful()) {
+                    Log::warning('Gemini sparse analysis request failed.', ['model' => $currentModel, 'status' => $response->status()]);
+                    continue;
+                }
+
+                $parts = $response->json('candidates.0.content.parts', []);
+                $text = collect($parts)->filter(fn ($part) => isset($part['text']) && empty($part['thought']))
+                    ->pluck('text')->implode('');
+                $decoded = json_decode(trim(str_replace(['```json', '```'], '', $text)), true);
+                $validated = $this->validateSparseAnalysis($decoded, $allowedMarkets, $fallback);
+
+                LlmInteraction::create([
+                    'provider' => 'google_gemini',
+                    'model' => $currentModel,
+                    'context_hash' => $contextHash,
+                    'sanitized_prompt' => substr($prompt, 0, 500).'...',
+                    'response_text' => json_encode($validated, JSON_UNESCAPED_UNICODE),
+                    'verification_passed' => ! ($validated['fallback'] ?? true),
+                    'verification_details' => ['type' => 'sparse_analysis_contract'],
+                    'interacted_at_utc' => now()->utc(),
+                ]);
+
+                $validated['provider'] = 'google_gemini';
+                $validated['model'] = $currentModel;
+                $validated['fallback'] = false;
+                return $validated;
+            } catch (Exception $e) {
+                Log::warning('Gemini sparse analysis connection failed.', ['model' => $currentModel, 'exception' => $e::class]);
+            }
+        }
+
+        return $fallback;
+    }
+
+    private function validateSparseAnalysis(mixed $decoded, array $allowedMarkets, array $fallback): array
+    {
+        if (! is_array($decoded)) return $fallback;
+        $decision = $decoded['decision'] ?? 'no_prediction';
+        if (! in_array($decision, ['propose', 'no_prediction'], true)) return $fallback;
+        $candidate = $decoded['candidate'] ?? null;
+        if ($decision === 'no_prediction' || ! is_array($candidate)) {
+            return array_merge($fallback, [
+                'reasoning' => (string) ($decoded['reasoning'] ?? $fallback['reasoning']),
+                'missing_data' => is_array($decoded['missing_data'] ?? null) ? $decoded['missing_data'] : $fallback['missing_data'],
+                'risk_factors' => is_array($decoded['risk_factors'] ?? null) ? $decoded['risk_factors'] : $fallback['risk_factors'],
+            ]);
+        }
+
+        $market = (string) ($candidate['market'] ?? '');
+        $selection = (string) ($candidate['selection'] ?? '');
+        $probability = $candidate['probability'] ?? null;
+        if (! isset($allowedMarkets[$market]) || ! in_array($selection, $allowedMarkets[$market], true)
+            || ! is_numeric($probability) || (float) $probability < 0.05 || (float) $probability > 0.95) {
+            return $fallback;
+        }
+
+        return [
+            'decision' => 'propose',
+            'candidate' => [
+                'candidate_key' => $market.':'.$selection,
+                'market' => $market,
+                'selection' => $selection,
+                'label' => (string) ($candidate['label'] ?? $selection),
+                'line' => isset($candidate['line']) && is_numeric($candidate['line']) ? (float) $candidate['line'] : null,
+                'probability' => round((float) $probability, 4),
+                'origin' => 'AI_ESTIMATE',
+            ],
+            'reasoning' => (string) ($decoded['reasoning'] ?? ''),
+            'supporting_factors' => is_array($decoded['supporting_factors'] ?? null) ? $decoded['supporting_factors'] : [],
+            'risk_factors' => is_array($decoded['risk_factors'] ?? null) ? $decoded['risk_factors'] : [],
+            'missing_data' => is_array($decoded['missing_data'] ?? null) ? $decoded['missing_data'] : [],
+            'confidence' => in_array($decoded['confidence'] ?? null, ['low', 'medium', 'high'], true) ? $decoded['confidence'] : 'low',
+        ];
+    }
+
     public function explainMatch(
         array $predictionContext,
         string $mode = 'beginner', // 'beginner' (vulgarisation) or 'expert' (math & métriques)

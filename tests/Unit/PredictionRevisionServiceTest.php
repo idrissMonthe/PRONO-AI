@@ -12,6 +12,7 @@ class PredictionRevisionServiceTest extends TestCase
     {
         $gemini = $this->createMock(GeminiExplanationService::class);
         $gemini->method('reviewPrediction')->willReturn(['fallback' => true]);
+        $gemini->method('analyzeSparseMatch')->willReturn(['decision' => 'no_prediction']);
         return new PredictionRevisionService($gemini);
     }
 
@@ -67,5 +68,39 @@ class PredictionRevisionServiceTest extends TestCase
         $this->assertSame('replace', $review['decision']);
         $this->assertSame(0.78, $review['final_candidate']['probability']);
         $this->assertSame('google_gemini', $review['provider']);
+    }
+
+    public function test_ai_can_take_over_a_python_abstention_with_explicit_origin(): void
+    {
+        $gemini = $this->createMock(GeminiExplanationService::class);
+        $gemini->method('analyzeSparseMatch')->willReturn([
+            'decision' => 'propose',
+            'candidate' => [
+                'candidate_key' => 'btts:yes',
+                'market' => 'btts',
+                'selection' => 'yes',
+                'label' => 'Les deux équipes marquent',
+                'line' => null,
+                'probability' => 0.61,
+                'origin' => 'AI_ESTIMATE',
+            ],
+            'reasoning' => 'Les informations disponibles permettent une estimation prudente.',
+            'supporting_factors' => ['recent_form_available'],
+            'risk_factors' => ['python_history_limited'],
+            'missing_data' => ['complete_team_history'],
+            'confidence' => 'low',
+            'provider' => 'google_gemini',
+            'model' => 'test-model',
+            'fallback' => false,
+        ]);
+        $review = (new PredictionRevisionService($gemini))->review([
+            'abstain' => true,
+            'markets' => ['1N2' => ['home' => 0.45, 'draw' => 0.28, 'away' => 0.27]],
+            'top_scores' => [],
+        ], ['quality_score' => 45, 'missing_data' => ['complete_team_history']]);
+
+        $this->assertSame('AI_ESTIMATE', $review['prediction_origin']);
+        $this->assertSame('btts', $review['final_candidate']['market']);
+        $this->assertSame(0.61, $review['final_candidate']['probability']);
     }
 }

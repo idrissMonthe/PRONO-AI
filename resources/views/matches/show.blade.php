@@ -11,6 +11,19 @@
             </div>
 
             <div class="flex items-center gap-3">
+                @php
+                    $analysisLabels = [
+                        'PYTHON_READY' => 'Analyse statistique',
+                        'AI_ASSISTED' => 'Analyse assistée par IA',
+                        'HYBRID_READY' => 'Analyse hybride',
+                        'LIMITED_DATA' => 'Données limitées',
+                        'NO_ANALYSIS' => 'Pronostic non disponible',
+                    ];
+                    $analysisStatus = $match->analysis_status ?? 'NO_ANALYSIS';
+                @endphp
+                <span class="px-2.5 py-1 rounded text-[11px] font-bold border border-[#303A32] text-[#A2ACA3]">
+                    {{ $analysisLabels[$analysisStatus] ?? $analysisStatus }}
+                </span>
                 <!-- Badge Qualité Données -->
                 <span class="px-2.5 py-1 rounded text-[11px] font-bold mono {{ $match->quality_score >= 80 ? 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/30' : 'bg-[#C3A16A]/20 text-[#C3A16A] border border-[#C3A16A]/30' }}">
                     Qualité Données : {{ round($match->quality_score) }}/100 ({{ $match->quality_tier }})
@@ -72,6 +85,9 @@
 
         @if(!empty($predData['abstain']))
             <p class="text-xs text-[#D68D86]" role="status">Analyse non recommandée : le moteur est en mode abstention. Les valeurs brutes ne constituent pas une prédiction validée.</p>
+        @endif
+        @if(($predData['prediction_origin'] ?? null) === 'AI_ESTIMATE')
+            <p class="text-xs text-[#C3A16A]" role="status">Cette estimation provient de l’IA complémentaire. Elle n’est pas une probabilité statistique Python calibrée.</p>
         @endif
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">

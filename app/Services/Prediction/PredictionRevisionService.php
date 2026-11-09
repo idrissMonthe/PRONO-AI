@@ -10,7 +10,7 @@ use App\Services\AIExplanation\GeminiExplanationService;
  */
 class PredictionRevisionService
 {
-    public const POLICY_VERSION = 'local_revision_v1';
+    public const POLICY_VERSION = 'hybrid_revision_v2';
 
     public function __construct(private readonly GeminiExplanationService $geminiService) {}
 
@@ -19,6 +19,29 @@ class PredictionRevisionService
         $candidates = $this->candidatesFromResult($result);
         $initial = $this->initialCandidate($candidates);
         $quality = (float) ($context['quality_score'] ?? 0);
+        $hybridMode = strtoupper((string) config('services.hybrid_prediction.mode', 'ASSISTED'));
+
+        // En mode ASSISTED/ACTIVE, l’IA peut prendre le relais quand Python
+        // s’abstient. La proposition reste marquée AI_ESTIMATE et n’est pas
+        // transformée en probabilité statistique Python.
+        if (($result['abstain'] ?? true) && in_array($hybridMode, ['ASSISTED', 'ACTIVE'], true)) {
+            $aiAnalysis = $this->geminiService->analyzeSparseMatch(array_merge($context, [
+                'python_status' => 'insufficient_data',
+                'python_abstained' => true,
+                'python_result' => [
+                    'quality' => $result['quality'] ?? [],
+                    'warnings' => $result['warnings'] ?? [],
+                    'available_markets' => $candidates,
+                ],
+                'missing_data' => array_values(array_unique(array_merge(
+                    $context['missing_data'] ?? [],
+                    $result['warnings'] ?? []
+                ))),
+            ]));
+            if (($aiAnalysis['decision'] ?? null) === 'propose' && is_array($aiAnalysis['candidate'] ?? null)) {
+                return $this->aiEstimateDecision($aiAnalysis, $initial, $candidates);
+            }
+        }
 
         if (! $initial || count($candidates) === 0) {
             return $this->decision('insufficient_data', $initial, null, 'Aucun marché calculable n’est disponible.', ['no_calculable_market'], $candidates);
@@ -145,19 +168,44 @@ class PredictionRevisionService
 
     private function aiDecision(array $review, array $initial, ?array $final, array $candidates): array
     {
+        $provider = $review['provider'] ?? 'google_gemini';
         return [
             'decision' => $review['decision'],
             'initial_candidate' => $initial,
             'final_candidate' => $final,
+            'prediction_origin' => $provider === 'google_gemini' ? 'AI_ASSISTED_PYTHON' : 'PYTHON_ESTIMATE',
+            'source_model' => $review['model'] ?? 'python',
             'reasoning' => $review['reasoning'] ?? '',
             'supporting_factors' => $review['supporting_factors'] ?? [],
             'risk_factors' => $review['risk_factors'] ?? [],
             'confidence_in_revision' => $review['confidence_in_revision'] ?? 'low',
             'required_recalculation' => (bool) ($review['required_recalculation'] ?? false),
             'candidates' => $candidates,
-            'provider' => $review['provider'] ?? 'google_gemini',
+            'provider' => $provider,
             'model' => $review['model'] ?? null,
             'ai_response' => $review,
+        ];
+    }
+
+    private function aiEstimateDecision(array $analysis, ?array $initial, array $candidates): array
+    {
+        return [
+            'decision' => 'keep',
+            'initial_candidate' => $initial,
+            'final_candidate' => $analysis['candidate'],
+            'prediction_origin' => 'AI_ESTIMATE',
+            'source_model' => $analysis['model'] ?? 'gemini',
+            'ai_estimate' => $analysis,
+            'reasoning' => $analysis['reasoning'] ?? '',
+            'supporting_factors' => $analysis['supporting_factors'] ?? [],
+            'risk_factors' => $analysis['risk_factors'] ?? [],
+            'missing_data' => $analysis['missing_data'] ?? [],
+            'confidence_in_revision' => $analysis['confidence'] ?? 'low',
+            'required_recalculation' => false,
+            'candidates' => $candidates,
+            'provider' => $analysis['provider'] ?? 'google_gemini',
+            'model' => $analysis['model'] ?? null,
+            'ai_response' => $analysis,
         ];
     }
 }

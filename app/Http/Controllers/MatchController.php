@@ -317,6 +317,12 @@ class MatchController extends Controller
                 'quality'         => ['score' => (float) $prediction->quality_score, 'tier' => $prediction->quality_tier],
                 'confidence_tier' => $prediction->confidence_tier,
                 'abstain'         => (bool) $prediction->is_abstained,
+                'status'          => $prediction->is_abstained ? 'insufficient_data' : 'ok',
+                'availability_status' => $match->analysis_status ?? 'LIMITED_DATA',
+                'prediction_origin' => $prediction->prediction_origin ?? 'PYTHON_ESTIMATE',
+                'source_model' => $prediction->source_model,
+                'missing_data' => $prediction->missing_data_json ?? [],
+                'uncertainty' => $prediction->uncertainty_tier ?? 'low',
                 'model'           => [
                     'version'             => $prediction->modelVersion?->version_name ?? 'M3_DIXON_COLES',
                     'calibration_version' => $prediction->calibration_version ?? 'calib_v2',

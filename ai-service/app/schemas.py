@@ -78,6 +78,12 @@ class PredictRequest(BaseModel):
 
 class PredictResponse(BaseModel):
     match_id: str
+    status: Literal["ok", "insufficient_data"] = "ok"
+    availability_status: Literal["PYTHON_READY", "LIMITED_DATA", "NO_ANALYSIS"] = "PYTHON_READY"
+    data_quality: float = 0.0
+    available_markets: List[str] = Field(default_factory=list)
+    missing_data: List[str] = Field(default_factory=list)
+    uncertainty: Literal["low", "medium", "high"] = "low"
     model: Dict[str, str]
     computed_at: str
     data_snapshot_hash: str

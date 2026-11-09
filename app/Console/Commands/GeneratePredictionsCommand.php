@@ -30,13 +30,6 @@ class GeneratePredictionsCommand extends Command
             ['family' => 'hybrid', 'algorithm' => 'Dixon-Coles + marché calibré', 'status' => 'champion']
         );
 
-        $readiness = $client->modelReadiness();
-        if (! ($readiness['model_loaded'] ?? false)) {
-            $this->error('Le modèle IA n’est pas entraîné ; aucune prédiction ne sera générée.');
-
-            return self::FAILURE;
-        }
-
         $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
             ->whereNotNull('external_id')
             ->where('data_source', 'football-data.org')
@@ -90,6 +83,25 @@ class GeneratePredictionsCommand extends Command
                 $homeRestDays = $restDays($match->home_team_id);
                 $awayRestDays = $restDays($match->away_team_id);
 
+                $recentForm = FootballMatch::with(['homeTeam:id,name', 'awayTeam:id,name'])
+                    ->where('status', 'FINISHED')
+                    ->where('match_date_utc', '<', $match->match_date_utc)
+                    ->where(function ($query) use ($match) {
+                        $query->where('home_team_id', $match->home_team_id)
+                            ->orWhere('away_team_id', $match->home_team_id)
+                            ->orWhere('home_team_id', $match->away_team_id)
+                            ->orWhere('away_team_id', $match->away_team_id);
+                    })
+                    ->orderByDesc('match_date_utc')
+                    ->take(10)
+                    ->get()
+                    ->map(fn (FootballMatch $recent): array => [
+                        'date_utc' => $recent->match_date_utc?->toIso8601String(),
+                        'home_team' => $recent->homeTeam?->name,
+                        'away_team' => $recent->awayTeam?->name,
+                        'score' => [$recent->home_score, $recent->away_score],
+                    ])->values()->all();
+
                 $result = $client->predict([
                     'match_id' => (string) $match->id,
                     'home_team' => $match->homeTeam->name,
@@ -103,7 +115,7 @@ class GeneratePredictionsCommand extends Command
                     'rest_days_away' => $awayRestDays,
                 ]);
 
-                $probabilities = $result['probabilities'];
+                $probabilities = $result['probabilities'] ?? null;
                 $review = $revisionService->review($result, [
                     'home_team' => $match->homeTeam->name,
                     'away_team' => $match->awayTeam->name,
@@ -112,6 +124,8 @@ class GeneratePredictionsCommand extends Command
                     'market_probabilities' => $marketProbabilities,
                     'absence_penalty' => $absencePenalty,
                     'rest_days' => ['home' => $homeRestDays, 'away' => $awayRestDays],
+                    'missing_data' => $quality['missing'] ?? [],
+                    'recent_form' => $recentForm,
                     'odds_snapshot' => $latestOddsSet ? $latestOddsSet->map(fn ($odd) => [
                         'selection' => $odd->selection,
                         'decimal_odds' => (float) $odd->decimal_odds,
@@ -126,14 +140,15 @@ class GeneratePredictionsCommand extends Command
                     'as_of_utc' => now()->utc()->toIso8601String(),
                     'quality' => $quality,
                     'market_probabilities' => $marketProbabilities,
-                    'model_probabilities' => [
+                    'model_probabilities' => is_array($probabilities) ? [
                         'home' => $probabilities['home']['p'],
                         'draw' => $probabilities['draw']['p'],
                         'away' => $probabilities['away']['p'],
-                    ],
+                    ] : null,
                     'expected_goals' => $result['expected_goals'] ?? [],
                     'absence_penalty' => $absencePenalty,
                     'rest_days' => ['home' => $homeRestDays, 'away' => $awayRestDays],
+                    'recent_form' => $recentForm,
                     'warnings' => $result['warnings'] ?? [],
                     'revision_policy' => PredictionRevisionService::POLICY_VERSION,
                 ];
@@ -145,8 +160,19 @@ class GeneratePredictionsCommand extends Command
                 }
 
                 $latestPredictionId = $match->officialPrediction?->id;
-                $orderedProbabilities = collect($snapshotVariables['model_probabilities'])->sortDesc()->values();
+                $orderedProbabilities = collect($snapshotVariables['model_probabilities'] ?? [])->sortDesc()->values();
                 $probabilityMargin = (float) $orderedProbabilities->get(0, 0) - (float) $orderedProbabilities->get(1, 0);
+                if (! is_array($probabilities) || ! isset($probabilities['home']['p'], $probabilities['draw']['p'], $probabilities['away']['p'])) {
+                    $match->forceFill([
+                        'analysis_status' => 'LIMITED_DATA',
+                        'analysis_source' => $review['provider'] ?? 'python_unavailable',
+                        'analysis_reason' => $review['reasoning'] ?? 'Le modèle Python ne peut pas calculer ce match.',
+                        'analysis_missing_json' => array_values(array_unique(array_merge($quality['missing'] ?? [], $review['missing_data'] ?? [], $result['warnings'] ?? []))),
+                        'analysis_updated_at' => now()->utc(),
+                    ])->saveQuietly();
+                    continue;
+                }
+
                 $prediction = DB::transaction(function () use ($match, $model, $result, $review, $chain, $quality, $marketProbabilities, $snapshotVariables, $snapshotHash, $latestPredictionId, $probabilityMargin) {
                     $probabilities = $result['probabilities'];
                     $initialPrediction = Prediction::create([
@@ -155,6 +181,10 @@ class GeneratePredictionsCommand extends Command
                         'calibration_version' => $result['model']['calibration_version'] ?? null,
                         'is_official' => false,
                         'prediction_stage' => 'initial',
+                        'prediction_origin' => 'PYTHON_ESTIMATE',
+                        'source_model' => $result['model']['version'] ?? 'python',
+                        'missing_data_json' => $quality['missing'] ?? [],
+                        'uncertainty_tier' => $result['confidence_tier'] ?? 'low',
                         'freeze_time_utc' => now()->utc(),
                         'supersedes_id' => $latestPredictionId,
                         'content_hash' => str_repeat('0', 64),
@@ -192,13 +222,21 @@ class GeneratePredictionsCommand extends Command
                     ]);
                     $finalCandidate = $review['final_candidate'] ?? null;
                     $decision = $review['decision'] ?? 'insufficient_data';
-                    $finalIsAbstained = (bool) ($result['abstain'] ?? true)
+                    $finalOrigin = $review['prediction_origin'] ?? 'PYTHON_ESTIMATE';
+                    $aiAccepted = $finalOrigin === 'AI_ESTIMATE'
+                        && in_array(strtoupper((string) config('services.hybrid_prediction.mode', 'ASSISTED')), ['ASSISTED', 'ACTIVE'], true);
+                    $finalIsAbstained = ((bool) ($result['abstain'] ?? true) && ! $aiAccepted)
                         || in_array($decision, ['reject', 'insufficient_data'], true)
                         || ! is_array($finalCandidate);
                     $finalPrediction = $initialPrediction->replicate();
                     $finalPrediction->fill([
                         'is_official' => true,
                         'prediction_stage' => 'final',
+                        'prediction_origin' => $finalOrigin,
+                        'source_model' => $review['source_model'] ?? $result['model']['version'] ?? 'python',
+                        'ai_estimate_json' => $review['ai_estimate'] ?? null,
+                        'missing_data_json' => array_values(array_unique(array_merge($quality['missing'] ?? [], $review['missing_data'] ?? []))),
+                        'uncertainty_tier' => $review['confidence_in_revision'] ?? ($result['confidence_tier'] ?? 'low'),
                         'supersedes_id' => $initialPrediction->id,
                         'content_hash' => str_repeat('0', 64),
                         'prev_hash' => null,
@@ -243,9 +281,28 @@ class GeneratePredictionsCommand extends Command
                     ]);
                     return $finalPrediction;
                 });
+                $analysisStatus = $prediction->is_abstained
+                    ? 'LIMITED_DATA'
+                    : ($prediction->prediction_origin === 'AI_ESTIMATE'
+                        ? 'AI_ASSISTED'
+                        : (($review['provider'] ?? '') === 'google_gemini' ? 'HYBRID_READY' : 'PYTHON_READY'));
+                $match->forceFill([
+                    'analysis_status' => $analysisStatus,
+                    'analysis_source' => $prediction->prediction_origin,
+                    'analysis_reason' => $review['reasoning'] ?? null,
+                    'analysis_missing_json' => $prediction->missing_data_json ?? [],
+                    'analysis_updated_at' => now()->utc(),
+                ])->saveQuietly();
                 $generated++;
                 $this->line("✓ {$match->homeTeam->short_name} – {$match->awayTeam->short_name} ({$prediction->confidence_tier})");
             } catch (Throwable $e) {
+                $match->forceFill([
+                    'analysis_status' => 'NO_ANALYSIS',
+                    'analysis_source' => 'system_error',
+                    'analysis_reason' => 'Analyse indisponible temporairement : '.$e->getMessage(),
+                    'analysis_missing_json' => ['analysis_exception'],
+                    'analysis_updated_at' => now()->utc(),
+                ])->saveQuietly();
                 $this->warn("Échec match #{$match->id} : {$e->getMessage()}");
             }
         }

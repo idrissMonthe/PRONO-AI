@@ -40,6 +40,11 @@ return [
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
     ],
 
+    'hybrid_prediction' => [
+        'mode' => env('PREDICTION_HYBRID_MODE', 'ASSISTED'),
+        'allow_ai_in_parlays' => env('PREDICTION_ALLOW_AI_IN_PARLAYS', true),
+    ],
+
     'football_data' => [
         'api_key' => env('FOOTBALL_DATA_API_KEY'),
         'base_url' => env('FOOTBALL_DATA_BASE_URL', 'https://api.football-data.org/v4'),
