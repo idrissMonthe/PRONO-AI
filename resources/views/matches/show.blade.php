@@ -20,6 +20,11 @@
                         'NO_ANALYSIS' => 'Pronostic non disponible',
                     ];
                     $analysisStatus = $match->analysis_status ?? 'NO_ANALYSIS';
+                    $formatInterval = static function ($interval): string {
+                        return is_array($interval) && count($interval) === 2
+                            ? round($interval[0] * 100).' % — '.round($interval[1] * 100).' %'
+                            : 'Non estimable';
+                    };
                 @endphp
                 <span class="px-2.5 py-1 rounded text-[11px] font-bold border border-[#303A32] text-[#A2ACA3]">
                     {{ $analysisLabels[$analysisStatus] ?? $analysisStatus }}
@@ -111,11 +116,11 @@
                     <div class="pt-2 space-y-1">
                     <div class="flex justify-between">
                         <span>Fourchette la plus probable :</span>
-                        <strong class="text-[#F0F0E8]">{{ round(($predData['probabilities']['home']['ci80'][0] ?? 0.4) * 100) }}% — {{ round(($predData['probabilities']['home']['ci80'][1] ?? 0.6) * 100) }}%</strong>
+                        <strong class="text-[#F0F0E8]">{{ $formatInterval($predData['probabilities']['home']['ci80'] ?? null) }}</strong>
                     </div>
                     <div class="flex justify-between">
                         <span>Fourchette large :</span>
-                        <span class="text-[#A2ACA3]">{{ round(($predData['probabilities']['home']['ci95'][0] ?? 0.35) * 100) }}% — {{ round(($predData['probabilities']['home']['ci95'][1] ?? 0.65) * 100) }}%</span>
+                        <span class="text-[#A2ACA3]">{{ $formatInterval($predData['probabilities']['home']['ci95'] ?? null) }}</span>
                     </div>
                     </div>
                 </details>
@@ -140,11 +145,11 @@
                     <div class="pt-2 space-y-1">
                     <div class="flex justify-between">
                         <span>Fourchette la plus probable :</span>
-                        <strong class="text-[#F0F0E8]">{{ round(($predData['probabilities']['draw']['ci80'][0] ?? 0.22) * 100) }}% — {{ round(($predData['probabilities']['draw']['ci80'][1] ?? 0.30) * 100) }}%</strong>
+                        <strong class="text-[#F0F0E8]">{{ $formatInterval($predData['probabilities']['draw']['ci80'] ?? null) }}</strong>
                     </div>
                     <div class="flex justify-between">
                         <span>Fourchette large :</span>
-                        <span class="text-[#A2ACA3]">{{ round(($predData['probabilities']['draw']['ci95'][0] ?? 0.20) * 100) }}% — {{ round(($predData['probabilities']['draw']['ci95'][1] ?? 0.33) * 100) }}%</span>
+                        <span class="text-[#A2ACA3]">{{ $formatInterval($predData['probabilities']['draw']['ci95'] ?? null) }}</span>
                     </div>
                     </div>
                 </details>
@@ -169,11 +174,11 @@
                     <div class="pt-2 space-y-1">
                     <div class="flex justify-between">
                         <span>Fourchette la plus probable :</span>
-                        <strong class="text-[#F0F0E8]">{{ round(($predData['probabilities']['away']['ci80'][0] ?? 0.22) * 100) }}% — {{ round(($predData['probabilities']['away']['ci80'][1] ?? 0.32) * 100) }}%</strong>
+                        <strong class="text-[#F0F0E8]">{{ $formatInterval($predData['probabilities']['away']['ci80'] ?? null) }}</strong>
                     </div>
                     <div class="flex justify-between">
                         <span>Fourchette large :</span>
-                        <span class="text-[#A2ACA3]">{{ round(($predData['probabilities']['away']['ci95'][0] ?? 0.18) * 100) }}% — {{ round(($predData['probabilities']['away']['ci95'][1] ?? 0.35) * 100) }}%</span>
+                        <span class="text-[#A2ACA3]">{{ $formatInterval($predData['probabilities']['away']['ci95'] ?? null) }}</span>
                     </div>
                     </div>
                 </details>

@@ -20,7 +20,7 @@ use Throwable;
 
 class GeneratePredictionsCommand extends Command
 {
-    protected $signature = 'oracle:generate-predictions {--limit=100 : Nombre maximal de matchs à analyser}';
+    protected $signature = 'oracle:generate-predictions {--limit=250 : Nombre maximal de matchs à analyser}';
     protected $description = 'Génère les prédictions officielles des prochains matchs.';
 
     public function handle(PredictionClient $client, HashChainService $chain, OddsService $oddsService, FootballDataService $footballDataService, PredictionRevisionService $revisionService): int
@@ -30,9 +30,11 @@ class GeneratePredictionsCommand extends Command
             ['family' => 'hybrid', 'algorithm' => 'Dixon-Coles + marché calibré', 'status' => 'champion']
         );
 
+        // Les deux fournisseurs alimentent le même pipeline : une rencontre
+        // découverte via API-Football doit être prédite comme les autres.
         $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
             ->whereNotNull('external_id')
-            ->where('data_source', 'football-data.org')
+            ->whereIn('data_source', ['football-data.org', 'api-football'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
             ->orderBy('match_date_utc')
@@ -197,6 +199,8 @@ class GeneratePredictionsCommand extends Command
                         'intervals_json' => [
                             'ci80' => ['home' => $probabilities['home']['ci80'], 'draw' => $probabilities['draw']['ci80'], 'away' => $probabilities['away']['ci80']],
                             'ci95' => ['home' => $probabilities['home']['ci95'], 'draw' => $probabilities['draw']['ci95'], 'away' => $probabilities['away']['ci95']],
+                            'method' => $result['uncertainty_method'] ?? 'unavailable',
+                            'valid_replicates' => (int) ($result['uncertainty_replicates'] ?? 0),
                         ],
                         'derived_markets_json' => $result['markets'] ?? [],
                         'top_scores_json' => $result['top_scores'] ?? [],
@@ -228,6 +232,13 @@ class GeneratePredictionsCommand extends Command
                     $finalIsAbstained = ((bool) ($result['abstain'] ?? true) && ! $aiAccepted)
                         || in_array($decision, ['reject', 'insufficient_data'], true)
                         || ! is_array($finalCandidate);
+                    // Une seule prédiction officielle par rencontre : les
+                    // précédentes restent en base comme historique, mais sont
+                    // démises avant l'enregistrement de la nouvelle.
+                    Prediction::where('match_id', $match->id)
+                        ->where('is_official', true)
+                        ->update(['is_official' => false]);
+
                     $finalPrediction = $initialPrediction->replicate();
                     $finalPrediction->fill([
                         'is_official' => true,
@@ -251,6 +262,12 @@ class GeneratePredictionsCommand extends Command
                         'warnings_json' => array_values(array_unique(array_merge($result['warnings'] ?? [], ['revision_'.$decision]))),
                         'market_metrics_json' => array_merge($initialPrediction->market_metrics_json ?? [], [
                             'revision' => ['decision' => $decision, 'provider' => $review['provider'] ?? 'local_revision_rules'],
+                            // Traçabilité du mode données limitées, sans nouvelle migration.
+                            'limited_data' => [
+                                'mode' => (bool) ($result['limited_data_mode'] ?? false),
+                                'abstain_reason' => $result['abstain_reason'] ?? null,
+                                'quality_tier' => $result['quality']['tier'] ?? null,
+                            ],
                         ]),
                     ]);
                     $finalPrediction->save();

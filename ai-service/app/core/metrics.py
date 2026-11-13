@@ -7,7 +7,7 @@ Implements:
 - Diebold-Mariano test for predictive difference significance
 - Skill scores relative to baselines
 """
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 import numpy as np
 from scipy import stats
 
@@ -65,11 +65,17 @@ def calculate_ece(
     outcomes: binary indicator (1 if occurred, 0 otherwise)
     Returns (ece_value, bin_details).
     """
+    if len(probs) != len(outcomes):
+        raise ValueError("Probabilities and outcomes must have identical lengths.")
     if len(probs) == 0:
         return 0.0, []
 
-    p_arr = np.array(probs)
-    y_arr = np.array(outcomes)
+    p_arr = np.asarray(probs, dtype=float)
+    y_arr = np.asarray(outcomes, dtype=float)
+    if not np.all(np.isfinite(p_arr)) or np.any(p_arr < 0.0) or np.any(p_arr > 1.0):
+        raise ValueError("ECE probabilities must be finite values between 0 and 1.")
+    if not np.all(np.isin(y_arr, [0.0, 1.0])):
+        raise ValueError("ECE outcomes must be binary indicators.")
     n = len(p_arr)
 
     if adaptive:
@@ -112,6 +118,64 @@ def calculate_ece(
         })
 
     return float(round(ece, 4)), bin_details
+
+
+def calculate_multiclass_ece(
+    probabilities: Sequence[Sequence[float]],
+    outcomes: Sequence[str],
+    n_bins: int = 10,
+    adaptive: bool = True,
+) -> Dict[str, object]:
+    """Calculate one-vs-rest ECE for HOME, DRAW and AWAY.
+
+    ``global_ece`` is the unweighted mean of the three class ECE values. This
+    treats each outcome class equally, while ``class_support`` exposes sparse
+    classes so callers do not mistake a small-sample result for a stable
+    calibration estimate.
+    """
+    if len(probabilities) != len(outcomes):
+        raise ValueError("Probabilities and outcomes must have identical lengths.")
+    if not probabilities:
+        return {
+            "global_ece": 0.0,
+            "ece_home": 0.0,
+            "ece_draw": 0.0,
+            "ece_away": 0.0,
+            "class_support": {"HOME": 0, "DRAW": 0, "AWAY": 0},
+            "class_status": {"HOME": "empty", "DRAW": "empty", "AWAY": "empty"},
+            "bins": {"HOME": [], "DRAW": [], "AWAY": []},
+        }
+
+    matrix = np.asarray(probabilities, dtype=float)
+    if matrix.ndim != 2 or matrix.shape[1] != 3 or not np.all(np.isfinite(matrix)):
+        raise ValueError("Multiclass probabilities must be a finite N x 3 matrix.")
+    if np.any(matrix < 0.0) or np.any(matrix > 1.0):
+        raise ValueError("Multiclass probabilities must be between 0 and 1.")
+    if not np.allclose(matrix.sum(axis=1), 1.0, atol=1e-3):
+        raise ValueError("Each multiclass probability row must sum to 1.")
+
+    normalized_outcomes = [str(outcome).upper() for outcome in outcomes]
+    aliases = {"1": "HOME", "H": "HOME", "N": "DRAW", "D": "DRAW", "2": "AWAY", "A": "AWAY"}
+    normalized_outcomes = [aliases.get(outcome, outcome) for outcome in normalized_outcomes]
+    if any(outcome not in {"HOME", "DRAW", "AWAY"} for outcome in normalized_outcomes):
+        raise ValueError("Outcomes must be HOME, DRAW or AWAY (or their documented aliases).")
+
+    result: Dict[str, object] = {"bins": {}, "class_support": {}, "class_status": {}}
+    eces = []
+    for index, name in enumerate(("HOME", "DRAW", "AWAY")):
+        binary_outcomes = [1 if outcome == name else 0 for outcome in normalized_outcomes]
+        ece, bins = calculate_ece(matrix[:, index].tolist(), binary_outcomes, n_bins=n_bins, adaptive=adaptive)
+        support = sum(binary_outcomes)
+        result[f"ece_{name.lower()}"] = ece
+        result["bins"][name] = bins
+        result["class_support"][name] = support
+        result["class_status"][name] = "small_sample" if support < 2 or support == len(normalized_outcomes) else "ok"
+        eces.append(ece)
+
+    result["global_ece"] = round(float(np.mean(eces)), 4)
+    result["sample_size"] = len(normalized_outcomes)
+    result["aggregation"] = "macro_mean_one_vs_rest"
+    return result
 
 
 def diebold_mariano_test(losses_a: List[float], losses_b: List[float]) -> Dict[str, float]:

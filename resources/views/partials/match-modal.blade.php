@@ -493,19 +493,19 @@
         if (probs.home && probs.home.ci80 && probs.home.ci80.length === 2) {
             document.getElementById('card-ci80-home').innerText = `${Math.round(probs.home.ci80[0]*100)}% – ${Math.round(probs.home.ci80[1]*100)}%`;
         } else {
-            document.getElementById('card-ci80-home').innerText = '± 4%';
+            document.getElementById('card-ci80-home').innerText = 'Non estimable';
         }
 
         if (probs.draw && probs.draw.ci80 && probs.draw.ci80.length === 2) {
             document.getElementById('card-ci80-draw').innerText = `${Math.round(probs.draw.ci80[0]*100)}% – ${Math.round(probs.draw.ci80[1]*100)}%`;
         } else {
-            document.getElementById('card-ci80-draw').innerText = '± 3%';
+            document.getElementById('card-ci80-draw').innerText = 'Non estimable';
         }
 
         if (probs.away && probs.away.ci80 && probs.away.ci80.length === 2) {
             document.getElementById('card-ci80-away').innerText = `${Math.round(probs.away.ci80[0]*100)}% – ${Math.round(probs.away.ci80[1]*100)}%`;
         } else {
-            document.getElementById('card-ci80-away').innerText = '± 4%';
+            document.getElementById('card-ci80-away').innerText = 'Non estimable';
         }
 
         // Marchés Dérivés

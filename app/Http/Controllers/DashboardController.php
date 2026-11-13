@@ -56,7 +56,9 @@ class DashboardController extends Controller
 
         // 1. Core KPIs
         $totalMatches = FootballMatch::count();
-        $predictedMatches = Prediction::where('is_official', true)->count();
+        // KPI par rencontre, pas par ligne d'historique : une seule prédiction
+        // officielle est active par match depuis la correction d'intégrité.
+        $predictedMatches = Prediction::where('is_official', true)->distinct()->count('match_id');
         $readiness = $predictionClient->modelReadiness();
         $championModel = !empty($readiness['model_loaded'])
             ? (object) ['version_name' => $readiness['model_version'] ?? 'Version inconnue']
@@ -119,7 +121,10 @@ class DashboardController extends Controller
                 ->where('match_date_utc', '>=', now()->utc())
                 ->whereHas('officialPrediction', fn ($query) => $query
                     ->where('is_official', true)
-                    ->where('is_abstained', false))
+                    ->when(
+                        ! (bool) config('services.prediction.allow_limited_data', true),
+                        fn ($limited) => $limited->where('is_abstained', false)
+                    ))
                 ->count(),
         ];
 
@@ -131,7 +136,10 @@ class DashboardController extends Controller
             $homeOdds = $oddsList->where('selection', 'HOME')->first();
 
             if ($pred && ! $pred->is_abstained && $homeOdds && $homeOdds->decimal_odds > 1.0) {
-                $ci80 = $pred->intervals_json['ci80']['home'][0] ?? ($pred->prob_home - 0.04);
+                $ci80 = $pred->intervals_json['ci80']['home'][0] ?? null;
+                if (! is_numeric($ci80)) {
+                    continue;
+                }
                 $eval = $oddsService->evaluateValue((float)$pred->prob_home, (float)$ci80, (float)$homeOdds->decimal_odds);
 
                 if ($eval['has_value']) {
@@ -227,8 +235,9 @@ class DashboardController extends Controller
                 continue;
             }
 
-            if ($prediction->published_market) {
-                if ($prediction->is_abstained) continue;
+            // Une prédiction abstentionniste reste affichée : elle utilise ses
+            // marchés calculés et porte une étiquette de fiabilité limitée.
+            if ($prediction->published_market && ! $prediction->is_abstained) {
                 $published = $this->publishedPick($match, $prediction);
                 if (! $published) continue;
                 $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
@@ -242,11 +251,7 @@ class DashboardController extends Controller
             }
 
             $source = 'Modèle';
-            $sourceLabel = $prediction->is_abstained
-                ? 'Données limitées'
-                : ($prediction->prediction_origin === 'AI_ESTIMATE'
-                    ? 'Estimation IA'
-                    : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Hybride' : 'Statistiques Python'));
+            $sourceLabel = $this->dailySourceLabel($prediction);
             $markets = $prediction->derived_markets_json ?? [];
             $supportsScoreMarkets = $this->supportsScoreMarketPicks($prediction);
             if (! $supportsScoreMarkets) {
@@ -364,6 +369,31 @@ class DashboardController extends Controller
         return $groups;
     }
 
+    /**
+     * Une prédiction est « à fiabilité limitée » dès que l'abstention, la
+     * qualité ou la confiance l'indiquent — pas uniquement en cas d'abstention.
+     */
+    private function isLimitedData(Prediction $prediction): bool
+    {
+        return $prediction->is_abstained
+            || (float) $prediction->quality_score < 58
+            || in_array($prediction->confidence_tier, ['low', 'insufficient'], true)
+            || in_array($prediction->uncertainty_tier, ['high', 'insufficient'], true);
+    }
+
+    private function dailySourceLabel(Prediction $prediction): string
+    {
+        if ($this->isLimitedData($prediction)) {
+            return 'Modèle · fiabilité limitée';
+        }
+
+        return match ($prediction->prediction_origin) {
+            'AI_ESTIMATE' => 'Estimation IA',
+            'AI_ASSISTED_PYTHON' => 'Hybride',
+            default => 'Statistiques Python',
+        };
+    }
+
     private function publishedPick(FootballMatch $match, Prediction $prediction): ?array
     {
         $market = $prediction->published_market;
@@ -401,18 +431,17 @@ class DashboardController extends Controller
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
             ->whereHas('officialPrediction', fn ($query) => $query
-                ->where('is_official', true)
-                ->where('is_abstained', false))
+                ->where('is_official', true))
             ->orderBy('match_date_utc')
             ->get();
 
         $candidates = $matches->map(function (FootballMatch $match): ?array {
             $prediction = $match->officialPrediction;
-            if (! $prediction || $prediction->is_abstained) {
+            if (! $prediction) {
                 return null;
             }
 
-            if ($prediction->published_market) {
+            if ($prediction->published_market && ! $prediction->is_abstained) {
                 $published = $this->publishedPick($match, $prediction);
                 if (! $published) return null;
                 $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
@@ -424,7 +453,7 @@ class DashboardController extends Controller
             }
 
             $source = 'Modèle';
-            $sourceLabel = 'Modèle';
+            $sourceLabel = $this->isLimitedData($prediction) ? 'Modèle · fiabilité limitée' : 'Modèle';
             $markets = $prediction?->derived_markets_json ?? [];
             $supportsScoreMarkets = $this->supportsScoreMarketPicks($prediction);
             if (! $supportsScoreMarkets) {

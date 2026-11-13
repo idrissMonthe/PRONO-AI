@@ -32,13 +32,17 @@ class PredictionClient
 
     public function modelReadiness(): ?array
     {
-        try {
-            $response = Http::timeout(2)->get("{$this->baseUrl}/v1/ready");
+        // Le dashboard appelle cette méthode à chaque page : un cache court
+        // évite d'ajouter jusqu'à 2 s de latence quand le service est lent.
+        return \Illuminate\Support\Facades\Cache::remember('ai-service.readiness', now()->addSeconds(60), function (): ?array {
+            try {
+                $response = Http::timeout(2)->get("{$this->baseUrl}/v1/ready");
 
-            return $response->successful() ? $response->json() : null;
-        } catch (Exception $e) {
-            return null;
-        }
+                return $response->successful() ? $response->json() : null;
+            } catch (Exception $e) {
+                return null;
+            }
+        });
     }
 
     public function predict(array $payload): array

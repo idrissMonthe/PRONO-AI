@@ -60,7 +60,7 @@
                                 @php $match = $pick['match']; @endphp
                                 <a href="{{ route('matches.show', $match->id) }}" class="pick-card">
                                     <div class="pick-card-top"><span>{{ $match->league->name ?? 'Football' }}</span><span>{{ $match->match_date_utc->timezone('Africa/Douala')->format('d M · H:i') }}</span></div>
-                                    <div class="teams"><strong>{{ $match->homeTeam->short_name }}</strong><span>vs</span><strong>{{ $match->awayTeam->short_name }}</strong></div>
+                                    <div class="teams"><strong>{{ $match->homeTeam->name }}</strong><span>vs</span><strong>{{ $match->awayTeam->name }}</strong></div>
                                     <div class="pick-verdict"><span class="lock-dot"></span><strong>{{ $pick['label'] }}</strong><span class="pick-prob">{{ round($pick['prob'] * 100) }}%</span></div>
                                     <div class="pick-footer"><span class="reliability">{{ $pick['source'] }} · {{ $pick['market'] }}</span><span class="score-pill">{{ $group['title'] }}</span></div>
                                 </a>
@@ -104,7 +104,7 @@
 
     <section class="section-block big-parlay-section">
         <div class="section-heading">
-            <div><span class="eyebrow">SÉLECTION ÉLARGIE</span><h2>Gros combinés</h2><p>Une sélection de 10 matchs réels quand les données le permettent, diversifiée entre championnats et marchés. Les prédictions abstentionnistes sont exclues.</p></div>
+            <div><span class="eyebrow">SÉLECTION ÉLARGIE</span><h2>Gros combinés</h2><p>Une sélection de 10 matchs réels quand les données le permettent, diversifiée entre championnats et marchés. Une prédiction à fiabilité limitée est signalée, jamais masquée.</p></div>
             <span class="big-parlay-meta">{{ $bigParlayPickCount }} sélections · {{ $bigParlayStatus['validated_predictions'] }}/{{ $bigParlayStatus['future_matches'] }} matchs validés</span>
         </div>
 

@@ -4,9 +4,10 @@ Estimates team attack/defense parameters with:
 - Temporal exponential decay: w = exp(-xi * days)
 - L2 regularization
 - Strict identifiability constraint (mean attack == 0, mean defense == 0)
-- Credibility intervals (80% and 95%) via block bootstrap or Laplace covariance approximation
+- Optional 80% and 95% parameter-bootstrap intervals; unavailable when the sample is insufficient
 """
-from typing import Dict, List, Optional, Tuple
+import os
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy.optimize import minimize
 from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
@@ -56,6 +57,9 @@ class DixonColesModel:
         self.team_match_counts: Dict[str, int] = {}
         self.is_fitted: bool = False
         self.training_hash: str = ""
+        self.fit_success: bool = False
+        self.fit_message: str = "Not fitted"
+        self.training_matches: List[MatchData] = []
 
     def fit(self, matches: List[MatchData]) -> "DixonColesModel":
         """
@@ -68,18 +72,17 @@ class DixonColesModel:
         all_teams = sorted(list(set(
             [m.home_team for m in matches] + [m.away_team for m in matches]
         )))
-        self.team_match_counts = {team: 0 for team in all_teams}
+        candidate_team_match_counts = {team: 0 for team in all_teams}
         for match in matches:
-            self.team_match_counts[match.home_team] += 1
-            self.team_match_counts[match.away_team] += 1
+            candidate_team_match_counts[match.home_team] += 1
+            candidate_team_match_counts[match.away_team] += 1
         modeled_teams = [
             team for team in all_teams
-            if self.team_match_counts[team] >= MIN_TEAM_MATCHES_FOR_MODELING
+            if candidate_team_match_counts[team] >= MIN_TEAM_MATCHES_FOR_MODELING
         ]
         if len(modeled_teams) < 2:
             modeled_teams = []
-        self.teams = modeled_teams
-        self.team_indices = {team: index for index, team in enumerate(modeled_teams)}
+        candidate_team_indices = {team: index for index, team in enumerate(modeled_teams)}
         num_teams = len(modeled_teams)
 
         # Precompute weights w_k = exp(-xi * days_ago)
@@ -114,8 +117,8 @@ class DixonColesModel:
             loss = 0.0
             for idx, m in enumerate(matches):
                 w = weights[idx]
-                h_idx = self.team_indices.get(m.home_team)
-                a_idx = self.team_indices.get(m.away_team)
+                h_idx = candidate_team_indices.get(m.home_team)
+                a_idx = candidate_team_indices.get(m.away_team)
                 att_h = att[h_idx] if h_idx is not None else 0.0
                 def_h = defense[h_idx] if h_idx is not None else 0.0
                 att_a = att[a_idx] if a_idx is not None else 0.0
@@ -136,21 +139,121 @@ class DixonColesModel:
 
             # L2 penalty to shrink forces towards mean
             reg = self.l2_reg * (np.sum(att**2) + np.sum(defense**2))
-            return float(loss + reg)
+            value = float(loss + reg)
+            return value if np.isfinite(value) else float("inf")
 
         res = minimize(nll, x0, method="L-BFGS-B", options={"maxiter": 250})
 
-        self.mu = float(res.x[0])
-        self.home_adv = float(res.x[1])
+        fit_message = str(getattr(res, "message", "Unknown optimizer result"))
+        optimized_params = np.asarray(getattr(res, "x", []), dtype=float)
+        optimized_loss = float(getattr(res, "fun", np.inf))
+        valid_result = (
+            bool(getattr(res, "success", False))
+            and optimized_params.shape == x0.shape
+            and np.all(np.isfinite(optimized_params))
+            and np.isfinite(optimized_loss)
+            and np.isfinite(nll(optimized_params))
+        )
+        self.fit_success = valid_result
+        self.fit_message = fit_message
+        if not valid_result:
+            # Do not touch the active parameters. A failed retraining must not
+            # replace a previously valid model with NaN or partial estimates.
+            if not self.is_fitted:
+                self.is_fitted = False
+            raise RuntimeError(f"Dixon-Coles optimization failed: {fit_message}")
 
-        free_att = res.x[2 : 2 + num_free_att]
-        self.attack_strengths = np.append(free_att, -np.sum(free_att)) if num_teams else np.array([])
+        candidate_mu = float(optimized_params[0])
+        candidate_home_adv = float(optimized_params[1])
 
-        free_def = res.x[2 + num_free_att : 2 + num_free_att + num_free_def]
-        self.defense_strengths = np.append(free_def, -np.sum(free_def)) if num_teams else np.array([])
+        free_att = optimized_params[2 : 2 + num_free_att]
+        candidate_attack = np.append(free_att, -np.sum(free_att)) if num_teams else np.array([])
 
+        free_def = optimized_params[2 + num_free_att : 2 + num_free_att + num_free_def]
+        candidate_defense = np.append(free_def, -np.sum(free_def)) if num_teams else np.array([])
+
+        if not (np.all(np.isfinite(candidate_attack)) and np.all(np.isfinite(candidate_defense))):
+            self.fit_success = False
+            raise RuntimeError(f"Dixon-Coles optimization produced invalid parameters: {fit_message}")
+
+        # Commit the complete candidate atomically after all validation passed.
+        self.teams = modeled_teams
+        self.team_indices = candidate_team_indices
+        self.team_match_counts = candidate_team_match_counts
+        self.mu = candidate_mu
+        self.home_adv = candidate_home_adv
+        self.attack_strengths = candidate_attack
+        self.defense_strengths = candidate_defense
         self.is_fitted = True
+        self.training_matches = list(matches)
         return self
+
+    def bootstrap_1n2_intervals(
+        self,
+        home_team: str,
+        away_team: str,
+        is_neutral: bool = False,
+        replicates: int = 0,
+        min_valid_replicates: int = 12,
+        min_observations: int = 20,
+        seed: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Estimate 1N2 uncertainty from fitted-model bootstrap replicates.
+
+        This deliberately returns ``available=False`` instead of fabricated
+        bounds when the training sample or convergence diagnostics are weak.
+        The central production probabilities are never changed by this method.
+        """
+        if replicates <= 0:
+            return {"available": False, "method": "disabled", "valid_replicates": 0}
+        if len(self.training_matches) < min_observations:
+            return {
+                "available": False,
+                "method": "bootstrap_unavailable_insufficient_sample",
+                "valid_replicates": 0,
+                "required_observations": min_observations,
+            }
+
+        rng = np.random.default_rng(seed)
+        probabilities: List[List[float]] = []
+        observations = self.training_matches
+        for _ in range(replicates):
+            indices = rng.integers(0, len(observations), size=len(observations))
+            sample = [observations[int(index)] for index in indices]
+            candidate = DixonColesModel(xi=self.xi, l2_reg=self.l2_reg, rho=self.rho)
+            try:
+                candidate.fit(sample)
+                lh, la, _ = candidate.predict_lambdas(home_team, away_team, is_neutral)
+                matrix, _, _ = compute_score_matrix(lh, la, candidate.rho)
+                p = extract_match_markets_from_matrix(matrix)["1N2"]
+                row = [float(p["home"]), float(p["draw"]), float(p["away"])]
+                if np.all(np.isfinite(row)) and np.isclose(sum(row), 1.0, atol=1e-3):
+                    probabilities.append(row)
+            except (RuntimeError, ValueError, FloatingPointError):
+                continue
+
+        if len(probabilities) < min_valid_replicates:
+            return {
+                "available": False,
+                "method": "bootstrap_unavailable_convergence",
+                "valid_replicates": len(probabilities),
+                "requested_replicates": replicates,
+            }
+
+        values = np.asarray(probabilities, dtype=float)
+        intervals = {}
+        for index, name in enumerate(("home", "draw", "away")):
+            intervals[name] = {
+                "ci80": [round(float(x), 4) for x in np.quantile(values[:, index], [0.10, 0.90])],
+                "ci95": [round(float(x), 4) for x in np.quantile(values[:, index], [0.025, 0.975])],
+            }
+        return {
+            "available": True,
+            "method": "dixon_coles_parametric_bootstrap",
+            "valid_replicates": len(probabilities),
+            "requested_replicates": replicates,
+            "intervals": intervals,
+        }
 
     def predict_lambdas(
         self,
@@ -217,7 +320,7 @@ class DixonColesModel:
     ) -> Dict[str, any]:
         """
         Full match prediction pipeline with score matrix, 1N2, derived markets,
-        and credibility intervals (CDC Section 6.9, 7.10, 7.12 & 29.4).
+        and optional bootstrap intervals (CDC Section 6.9, 7.10, 7.12 & 29.4).
         """
         lh, la, warnings = self.predict_lambdas(home_team, away_team, is_neutral)
 
@@ -229,33 +332,23 @@ class DixonColesModel:
         p_draw = markets["1N2"]["draw"]
         p_away = markets["1N2"]["away"]
 
-        # Credibility intervals (80% and 95%)
-        # Epistemic uncertainty scales inversely with data quality and sample size
-        unc_scale = max(0.02, (100.0 - quality_score) / 300.0 + 0.03)
-
-        ci80_home = [round(max(0.01, p_home - 1.28 * unc_scale), 4), round(min(0.99, p_home + 1.28 * unc_scale), 4)]
-        ci95_home = [round(max(0.01, p_home - 1.96 * unc_scale), 4), round(min(0.99, p_home + 1.96 * unc_scale), 4)]
-
-        ci80_draw = [round(max(0.01, p_draw - 1.28 * unc_scale * 0.7), 4), round(min(0.99, p_draw + 1.28 * unc_scale * 0.7), 4)]
-        ci95_draw = [round(max(0.01, p_draw - 1.96 * unc_scale * 0.7), 4), round(min(0.99, p_draw + 1.96 * unc_scale * 0.7), 4)]
-
-        ci80_away = [round(max(0.01, p_away - 1.28 * unc_scale), 4), round(min(0.99, p_away + 1.28 * unc_scale), 4)]
-        ci95_away = [round(max(0.01, p_away - 1.96 * unc_scale), 4), round(min(0.99, p_away + 1.96 * unc_scale), 4)]
-
-        # Determine confidence and abstention tiers (CDC 7.12)
+        # Determine confidence tiers (CDC 7.12). Une donnée insuffisante
+        # dégrade l'étiquette mais n'empêche plus la prédiction en phase de
+        # test, sauf si l'abstention est explicitement réactivée.
+        allow_limited_data = os.getenv(
+            "PREDICTION_ALLOW_LIMITED_DATA_PREDICTIONS", "true"
+        ).strip().lower() not in {"0", "false", "no", "off"}
         if quality_score < 40.0:
             quality_tier = "insufficient"
             confidence_tier = "low"
-            is_abstained = True
-            warnings.append("abstain_due_to_insufficient_quality")
+            warnings.append("limited_data:unverified_quality" if allow_limited_data else "abstain_due_to_insufficient_quality")
         elif quality_score < 70.0:
             quality_tier = "degraded"
             confidence_tier = "medium"
-            is_abstained = False
         else:
             quality_tier = "usable"
             confidence_tier = "high"
-            is_abstained = False
+        is_abstained = (not allow_limited_data) and quality_score < 40.0
 
         return {
             "expected_goals": {
@@ -264,9 +357,9 @@ class DixonColesModel:
                 "total": round(lh + la, 3),
             },
             "probabilities": {
-                "home": {"p": p_home, "ci80": ci80_home, "ci95": ci95_home},
-                "draw": {"p": p_draw, "ci80": ci80_draw, "ci95": ci95_draw},
-                "away": {"p": p_away, "ci80": ci80_away, "ci95": ci95_away},
+                "home": {"p": p_home, "ci80": None, "ci95": None},
+                "draw": {"p": p_draw, "ci80": None, "ci95": None},
+                "away": {"p": p_away, "ci80": None, "ci95": None},
             },
             "markets": markets,
             "top_scores": markets["top_scores"],
@@ -280,5 +373,6 @@ class DixonColesModel:
                 "confidence_tier": confidence_tier,
             },
             "abstain": is_abstained,
+            "limited_data_mode": allow_limited_data,
             "warnings": warnings,
         }

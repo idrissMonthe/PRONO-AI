@@ -20,14 +20,21 @@ class ComparatorController extends Controller
         $teamB = Team::with('ratings')->find($teamBId);
 
         $simulation = null;
+        $simulationError = null;
         if ($teamA && $teamB) {
-            $simulation = $predictionClient->predict([
-                'match_id' => 'hypothetical_sim',
-                'home_team' => $teamA->name,
-                'away_team' => $teamB->name,
-                'is_neutral_ground' => (bool)$request->get('is_neutral', false),
-                'quality_score' => 95.0,
-            ]);
+            try {
+                $simulation = $predictionClient->predict([
+                    'match_id' => 'hypothetical_sim',
+                    'home_team' => $teamA->name,
+                    'away_team' => $teamB->name,
+                    'is_neutral_ground' => (bool)$request->get('is_neutral', false),
+                    'quality_score' => 95.0,
+                ]);
+            } catch (\Throwable $exception) {
+                // Le comparateur doit rester consultable même lorsque le
+                // service de prédiction est momentanément indisponible.
+                $simulationError = $exception->getMessage();
+            }
         }
 
         // Head-to-head past matches
@@ -40,7 +47,7 @@ class ComparatorController extends Controller
             })->orderBy('match_date_utc', 'desc')->take(6)->get();
         }
 
-        return view('comparator.index', compact('teams', 'teamA', 'teamB', 'simulation', 'h2hMatches'));
+        return view('comparator.index', compact('teams', 'teamA', 'teamB', 'simulation', 'simulationError', 'h2hMatches'));
     }
 }
 

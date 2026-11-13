@@ -1,59 +1,111 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# PRONO-AI / ORACLE FOOT
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+PRONO-AI est une application personnelle de recherche statistique sur les matchs de football. Elle synchronise des rencontres et des cotes, produit des estimations multi-marchés et conserve les snapshots de données et de prédictions pour permettre une évaluation rétrospective.
 
-## About Laravel
+Les prédictions sont expérimentales : elles ne garantissent ni résultat ni rentabilité et doivent être interprétées avec les indicateurs de qualité, les abstentions et les limites de couverture des fournisseurs.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Architecture
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+- Laravel 12 / PHP 8.2+ : interface, persistance MySQL ou SQLite, commandes Artisan, snapshots et orchestration.
+- FastAPI / Python 3.12 : Dixon-Coles/Poisson, Elo, forme récente, retrait de marge et têtes spécialisées par marché.
+- Docker Compose : web, scheduler, ai-service, base de données et dépendances locales.
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+Le modèle central reste Dixon-Coles. Les marchés 1N2, buts, BTTS et score exact utilisent des têtes spécialisées, tandis que l'ensemble conserve ses poids existants. Le système peut s'abstenir lorsqu'un entraînement, une donnée ou une séparation de probabilités n'est pas suffisamment fiable.
 
-## Learning Laravel
+## Sources de données
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+- football-data.org v4 : calendrier, statuts, scores et compétitions accessibles par le compte.
+- API-Football : source séparée pour la CAN et les compétitions africaines
+  configurées, avec identifiants externes préfixés pour éviter les collisions.
+- The Odds API : snapshots de cotes lorsqu'une ligue et un marché sont disponibles.
+- Gemini : explication ou assistance hybride selon la configuration ; il ne remplace pas les probabilités centrales du modèle.
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+La découverte internationale appelle /competitions, respecte le catalogue réel renvoyé par le compte et est mise en cache. Elle ne fabrique aucun code. Les amicaux ne sont synchronisés que si le catalogue du fournisseur expose réellement une compétition correspondante.
 
-## Laravel Sponsors
+## Installation locale
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+~~~powershell
+Copy-Item .env.example .env
+php artisan key:generate
+composer install
+npm install
+npm run build
+php artisan migrate --seed
+~~~
 
-### Premium Partners
+Pour le service Python :
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+~~~powershell
+cd ai-service
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pytest
+~~~
 
-## Contributing
+## Variables importantes
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Renseigner les clés dans .env sans les committer :
 
-## Code of Conduct
+~~~dotenv
+FOOTBALL_DATA_API_KEY=...
+FOOTBALL_DATA_COMPETITIONS=PL,PD,BL1,SA,FL1,CL
+FOOTBALL_DATA_DISCOVER_INTERNATIONAL=false
+FOOTBALL_DATA_CATALOG_CACHE_MINUTES=1440
+API_FOOTBALL_KEY=...
+API_FOOTBALL_COMPETITIONS=6
+API_FOOTBALL_SEASONS=2025
+THE_ODDS_API_KEY=...
+AI_SERVICE_URL=http://127.0.0.1:8001
+AI_SERVICE_SECRET=...
+GEMINI_API_KEY=...
+PREDICTION_HYBRID_MODE=ASSISTED
+PREDICTION_BOOTSTRAP_REPLICATES=0
+PREDICTION_BOOTSTRAP_MIN_OBSERVATIONS=20
+~~~
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+Le bootstrap d'incertitude est volontairement désactivé par défaut pour ne pas ralentir chaque prédiction. Une valeur comme 32 l'active ; les résultats sont réutilisés en mémoire et restent indisponibles si l'échantillon ou le nombre de réplications valides est insuffisant. Une absence d'intervalle est affichée comme non estimable, jamais comme une bande heuristique.
 
-## Security Vulnerabilities
+## Docker Compose
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+~~~powershell
+docker compose up -d --build
+docker compose exec web php artisan migrate --seed
+docker compose exec web php artisan oracle:sync-matches
+docker compose exec web php artisan oracle:sync-odds
+docker compose exec web php artisan oracle:generate-predictions
+~~~
 
-## License
+Le scheduler exécute les synchronisations, les scores live, le règlement des prédictions, l'entraînement nocturne et l'évaluation de performance. Vérifier les journaux dans storage/logs.
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+API-Football utilise une requête live globale toutes les 30 minutes et une
+synchronisation quotidienne des fixtures afin de rester compatible avec le
+quota gratuit de 100 requêtes par jour. La CAN correspond au code 6 et la
+saison active doit être ajustée dans API_FOOTBALL_SEASONS lorsqu'une nouvelle
+saison est publiée.
+
+## Commandes utiles
+
+~~~text
+oracle:sync-matches
+oracle:sync-api-football
+oracle:sync-api-football --live
+oracle:sync-odds
+oracle:sync-live-scores
+oracle:train-model
+oracle:generate-predictions
+oracle:football-data-competitions --refresh
+oracle:evaluate-prediction-performance
+oracle:generate-parlays
+~~~
+
+oracle:football-data-competitions --refresh permet de vérifier le catalogue accessible avant d'activer la découverte internationale. La liste manuelle FOOTBALL_DATA_COMPETITIONS reste toujours le secours et les compétitions de clubs déjà configurées sont conservées.
+
+## Tests
+
+~~~powershell
+pytest -q ai-service/tests
+php artisan test
+~~~
+
+Les tests couvrent notamment la convergence réelle de l'optimiseur, la conservation d'un modèle valide après un échec, l'ECE multiclasses et les contrats de synchronisation football-data.org.

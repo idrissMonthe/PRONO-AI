@@ -18,6 +18,9 @@ class FootballDataSyncTest extends TestCase
         config()->set('services.football_data.api_key', 'test-football-data-key');
         config()->set('services.football_data.base_url', 'https://api.football-data.org/v4');
         config()->set('services.football_data.competitions', ['PL']);
+        // Isolation : la découverte internationale ne doit pas ajouter d'appel
+        // réseau non simulé pendant les tests de synchronisation.
+        config()->set('services.football_data.discover_international', false);
     }
 
     public function test_sync_imports_provider_matches_and_uses_the_auth_header(): void
@@ -128,5 +131,43 @@ class FootballDataSyncTest extends TestCase
             ->assertSessionHas('success');
 
         $this->assertDatabaseHas('teams', ['name' => 'Deportivo Alavés']);
+    }
+
+    public function test_catalogue_discovery_uses_only_provider_competition_codes(): void
+    {
+        Http::fake([
+            'api.football-data.org/v4/competitions' => Http::response([
+                'competitions' => [
+                    [
+                        'code' => 'PL',
+                        'name' => 'Premier League',
+                        'type' => 'LEAGUE',
+                        'area' => ['name' => 'England', 'code' => 'ENG'],
+                        'plan' => 'TIER_ONE',
+                    ],
+                    [
+                        'code' => 'WC',
+                        'name' => 'FIFA World Cup',
+                        'type' => 'INTERNATIONAL',
+                        'area' => ['name' => 'World', 'code' => 'INT'],
+                        'plan' => 'TIER_ONE',
+                    ],
+                    [
+                        'code' => 'CUSTOM',
+                        'name' => 'International Friendly',
+                        'type' => 'CUP',
+                        'area' => ['name' => 'World', 'code' => 'INT'],
+                        'plan' => 'TIER_ONE',
+                    ],
+                ],
+            ]),
+        ]);
+
+        config()->set('services.football_data.international_keywords', ['world cup']);
+        $service = app(\App\Services\FootballData\FootballDataService::class);
+        $international = $service->discoverInternationalCompetitions(true);
+
+        $this->assertSame(['WC'], array_column($international, 'code'));
+        Http::assertSent(fn ($request) => $request->url() === 'https://api.football-data.org/v4/competitions');
     }
 }

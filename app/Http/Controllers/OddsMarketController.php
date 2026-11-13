@@ -54,11 +54,18 @@ class OddsMarketController extends Controller
             $latestOdds = $this->oddsServiceProbabilities($oddsService, $latestSet['snapshots']);
             $openingOdds = $this->oddsServiceProbabilities($oddsService, $openingSet['snapshots']);
 
-            $checks = [
-                ['sel' => 'HOME', 'label' => 'Victoire ' . $match->homeTeam->short_name, 'prob' => (float) $pred->prob_home, 'ci_low' => (float) ($pred->intervals_json['ci80']['home'][0] ?? $pred->prob_home - 0.04)],
-                ['sel' => 'DRAW', 'label' => 'Match Nul', 'prob' => (float) $pred->prob_draw, 'ci_low' => (float) ($pred->intervals_json['ci80']['draw'][0] ?? $pred->prob_draw - 0.03)],
-                ['sel' => 'AWAY', 'label' => 'Victoire ' . $match->awayTeam->short_name, 'prob' => (float) $pred->prob_away, 'ci_low' => (float) ($pred->intervals_json['ci80']['away'][0] ?? $pred->prob_away - 0.04)],
-            ];
+            $checks = [];
+            foreach ([
+                ['sel' => 'HOME', 'label' => 'Victoire ' . $match->homeTeam->short_name, 'prob' => (float) $pred->prob_home],
+                ['sel' => 'DRAW', 'label' => 'Match Nul', 'prob' => (float) $pred->prob_draw],
+                ['sel' => 'AWAY', 'label' => 'Victoire ' . $match->awayTeam->short_name, 'prob' => (float) $pred->prob_away],
+            ] as $candidate) {
+                $ciLow = data_get($pred->intervals_json, 'ci80.'.strtolower($candidate['sel']).'.0');
+                if (is_numeric($ciLow)) {
+                    $candidate['ci_low'] = (float) $ciLow;
+                    $checks[] = $candidate;
+                }
+            }
 
             foreach ($checks as $c) {
                 $snapshot = $latestSet['snapshots'][$c['sel']];

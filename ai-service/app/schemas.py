@@ -8,8 +8,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 class ProbabilityInterval(BaseModel):
     p: float
-    ci80: List[float]
-    ci95: List[float]
+    ci80: Optional[List[float]] = None
+    ci95: Optional[List[float]] = None
 
 
 class ProbabilitiesBlock(BaseModel):
@@ -95,8 +95,12 @@ class PredictResponse(BaseModel):
     quality: QualityBlock
     confidence_tier: Literal["low", "medium", "high"]
     abstain: bool
+    limited_data_mode: bool = False
+    abstain_reason: Optional[str] = None
     warnings: List[str]
     duration_ms: int
+    uncertainty_method: str = "unavailable"
+    uncertainty_replicates: int = 0
 
 
 class DevigRequest(BaseModel):

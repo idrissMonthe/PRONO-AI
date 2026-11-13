@@ -92,6 +92,10 @@ services:
 
     command: php artisan schedule:work
 
+    # Même propriétaire que les workers Apache : évite les logs root qui
+    # rendent storage/ inaccessible en écriture pour www-data.
+    user: "www-data"
+
     depends_on:
       ai-service:
         condition: service_healthy

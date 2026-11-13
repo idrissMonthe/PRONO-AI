@@ -4,7 +4,7 @@ namespace Tests\Unit;
 
 use App\Services\Prediction\PredictionRevisionService;
 use App\Services\AIExplanation\GeminiExplanationService;
-use PHPUnit\Framework\TestCase;
+use Tests\TestCase;
 
 class PredictionRevisionServiceTest extends TestCase
 {
@@ -34,9 +34,23 @@ class PredictionRevisionServiceTest extends TestCase
         $this->assertSame('double_chance', $review['final_candidate']['market']);
     }
 
-    public function test_reject_decision_for_low_quality(): void
+    public function test_low_quality_keeps_the_candidate_in_limited_data_mode(): void
     {
+        config()->set('services.prediction.allow_limited_data', true);
+
         $review = $this->service()->review($this->predictionResult(['1N2' => ['home' => 0.66, 'draw' => 0.20, 'away' => 0.14]]), ['quality_score' => 40]);
+
+        $this->assertSame('keep', $review['decision']);
+        $this->assertSame('1N2', $review['final_candidate']['market']);
+        $this->assertContains('limited_data_mode', $review['risk_factors']);
+    }
+
+    public function test_low_quality_is_rejected_when_limited_data_mode_is_disabled(): void
+    {
+        config()->set('services.prediction.allow_limited_data', false);
+
+        $review = $this->service()->review($this->predictionResult(['1N2' => ['home' => 0.66, 'draw' => 0.20, 'away' => 0.14]]), ['quality_score' => 40]);
+
         $this->assertSame('reject', $review['decision']);
     }
 

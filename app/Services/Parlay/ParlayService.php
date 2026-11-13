@@ -308,7 +308,8 @@ class ParlayService
             &$options,
             $match,
             $prediction,
-            $limitedTeamHistory
+            $limitedTeamHistory,
+            $isAiEstimate
         ): void {
             if (! is_numeric($probability)) {
                 return;

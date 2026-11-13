@@ -51,29 +51,31 @@ class TheOddsApiSyncTest extends TestCase
                 'bookmakers' => [[
                     'key' => 'pinnacle',
                     'title' => 'Pinnacle',
-                    'markets' => [[
-                        'key' => 'h2h',
-                        'last_update' => now()->utc()->toIso8601String(),
-                        'outcomes' => [
-                            ['name' => 'Paris Saint-Germain', 'price' => 2.1],
-                            ['name' => 'FC Bayern München', 'price' => 3.2],
-                            ['name' => 'Draw', 'price' => 3.4],
+                    'markets' => [
+                        [
+                            'key' => 'h2h',
+                            'last_update' => now()->utc()->toIso8601String(),
+                            'outcomes' => [
+                                ['name' => 'Paris Saint-Germain', 'price' => 2.1],
+                                ['name' => 'FC Bayern München', 'price' => 3.2],
+                                ['name' => 'Draw', 'price' => 3.4],
+                            ],
                         ],
-                    ]],
-                    [
-                        'key' => 'totals',
-                        'last_update' => now()->utc()->toIso8601String(),
-                        'outcomes' => [
-                            ['name' => 'Over', 'point' => 2.5, 'price' => 1.95],
-                            ['name' => 'Under', 'point' => 2.5, 'price' => 1.85],
+                        [
+                            'key' => 'totals',
+                            'last_update' => now()->utc()->toIso8601String(),
+                            'outcomes' => [
+                                ['name' => 'Over', 'point' => 2.5, 'price' => 1.95],
+                                ['name' => 'Under', 'point' => 2.5, 'price' => 1.85],
+                            ],
                         ],
-                    ],
-                    [
-                        'key' => 'spreads',
-                        'last_update' => now()->utc()->toIso8601String(),
-                        'outcomes' => [
-                            ['name' => 'Paris Saint-Germain', 'point' => -0.5, 'price' => 2.05],
-                            ['name' => 'FC Bayern München', 'point' => 0.5, 'price' => 1.80],
+                        [
+                            'key' => 'spreads',
+                            'last_update' => now()->utc()->toIso8601String(),
+                            'outcomes' => [
+                                ['name' => 'Paris Saint-Germain', 'point' => -0.5, 'price' => 2.05],
+                                ['name' => 'FC Bayern München', 'point' => 0.5, 'price' => 1.80],
+                            ],
                         ],
                     ],
                 ]],

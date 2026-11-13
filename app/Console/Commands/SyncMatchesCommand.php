@@ -86,6 +86,20 @@ class SyncMatchesCommand extends Command
             Log::info('oracle:sync-matches completed', $result);
             SystemAlert::resolve('provider.football-data.org.unavailable');
 
+            // 0 match n'est pas une erreur technique, mais ce n'est pas une
+            // réussite silencieuse : la fenêtre peut être une trêve.
+            if ((int) $result['received'] === 0) {
+                SystemAlert::raise(
+                    'provider.football-data.org.empty',
+                    "Aucun match reçu pour la fenêtre {$result['date_from']} → {$result['date_to']} (trêve, hors saison ou compétitions non couvertes).",
+                    'warning',
+                    'football-data.org'
+                );
+                $this->warn('⚠️  Aucune rencontre reçue sur cette fenêtre : les données existantes sont conservées.');
+            } else {
+                SystemAlert::resolve('provider.football-data.org.empty');
+            }
+
             if ($result['rejected'] > 0) {
                 $this->warn("⚠️  {$result['rejected']} match(s) rejeté(s) → voir la table data_quarantine.");
             }

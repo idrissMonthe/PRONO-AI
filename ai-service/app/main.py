@@ -19,7 +19,7 @@ from app.core.devig import devig_odds
 from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
 from app.core.metrics import (
     calculate_brier_multiclass,
-    calculate_ece,
+    calculate_multiclass_ece,
     calculate_log_loss,
     calculate_rps,
 )
@@ -43,6 +43,12 @@ MODEL_STATE_PATH = Path(os.getenv("MODEL_STATE_PATH", "/app/data/dixon_coles_mod
 MODEL_VERSION = "M3_MARKET_SPECIALISTS_v6"
 CALIBRATION_VERSION = "calib_v8_shrunk_team_lambdas"
 MIN_OFFICIAL_QUALITY_SCORE = 82.0
+# Phase de test : une donnée limitée ou un historique insuffisant dégrade la
+# confiance mais n'empêche plus de produire une prédiction. Mettre la variable
+# à false pour restaurer l'abstention historique.
+ALLOW_LIMITED_DATA_PREDICTIONS = os.getenv(
+    "PREDICTION_ALLOW_LIMITED_DATA_PREDICTIONS", "true"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 app = FastAPI(
     title="ORACLE FOOT Predictive API",
@@ -66,6 +72,7 @@ elo_engine = EloEngine(k_factor=20.0, default_home_adv=65.0)
 elo_ratings: Dict[str, float] = {}
 recent_form: Dict[str, List[float]] = {}
 market_specialists = MarketSpecialists()
+bootstrap_cache: Dict[str, dict] = {}
 
 
 def load_model_state() -> None:
@@ -92,6 +99,20 @@ def load_model_state() -> None:
         champion_model.team_match_counts = {team: int(count) for team, count in team_match_counts.items()}
         champion_model.training_hash = state.get("training_hash", "")
         champion_model.is_fitted = bool(state.get("is_fitted", False))
+        champion_model.fit_success = champion_model.is_fitted
+        champion_model.fit_message = state.get("fit_message", "Loaded persisted model")
+        champion_model.training_matches = [
+            MatchData(
+                home_team=item["home_team"],
+                away_team=item["away_team"],
+                home_goals=int(item["home_goals"]),
+                away_goals=int(item["away_goals"]),
+                days_ago=float(item["days_ago"]),
+                is_neutral=bool(item.get("is_neutral", False)),
+            )
+            for item in state.get("training_matches", [])
+            if isinstance(item, dict)
+        ]
         elo_ratings.clear()
         elo_ratings.update({k: float(v) for k, v in state.get("elo_ratings", {}).items()})
         recent_form.clear()
@@ -114,6 +135,18 @@ def save_model_state() -> None:
         "team_strength_min_matches": MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS,
         "training_hash": champion_model.training_hash,
         "is_fitted": champion_model.is_fitted,
+        "fit_message": champion_model.fit_message,
+        "training_matches": [
+            {
+                "home_team": item.home_team,
+                "away_team": item.away_team,
+                "home_goals": item.home_goals,
+                "away_goals": item.away_goals,
+                "days_ago": item.days_ago,
+                "is_neutral": item.is_neutral,
+            }
+            for item in champion_model.training_matches
+        ],
         "elo_ratings": elo_ratings,
         "recent_form": recent_form,
         "market_specialists": market_specialists.state(),
@@ -180,7 +213,12 @@ def train(req: TrainRequest):
         )
         for item in req.matches
     ]
-    champion_model.fit(training_rows)
+    try:
+        champion_model.fit(training_rows)
+    except RuntimeError as exc:
+        # The model keeps its previous valid state; expose the real failure to
+        # the caller instead of claiming that retraining succeeded.
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     market_specialists.fit(training_rows)
     elo_ratings.clear()
     recent_form.clear()
@@ -203,6 +241,7 @@ def train(req: TrainRequest):
         json.dumps([item.model_dump() for item in req.matches], sort_keys=True).encode('utf-8')
     ).hexdigest()
     save_model_state()
+    bootstrap_cache.clear()
     return {
         "trained": champion_model.is_fitted,
         "match_count": len(training_rows),
@@ -310,69 +349,86 @@ def predict(req: PredictRequest):
         if has_sparse_team_history:
             warnings.append("market_weight_increased_due_to_sparse_history")
 
-    # Credibility intervals
-    unc_scale = max(0.02, (100.0 - req.quality_score) / 300.0 + 0.035)
-    ci80_home = [round(max(0.01, p_home - 1.28 * unc_scale), 4), round(min(0.99, p_home + 1.28 * unc_scale), 4)]
-    ci95_home = [round(max(0.01, p_home - 1.96 * unc_scale), 4), round(min(0.99, p_home + 1.96 * unc_scale), 4)]
-
-    ci80_draw = [round(max(0.01, p_draw - 1.28 * unc_scale * 0.7), 4), round(min(0.99, p_draw + 1.28 * unc_scale * 0.7), 4)]
-    ci95_draw = [round(max(0.01, p_draw - 1.96 * unc_scale * 0.7), 4), round(min(0.99, p_draw + 1.96 * unc_scale * 0.7), 4)]
-
-    ci80_away = [round(max(0.01, p_away - 1.28 * unc_scale), 4), round(min(0.99, p_away + 1.28 * unc_scale), 4)]
-    ci95_away = [round(max(0.01, p_away - 1.96 * unc_scale), 4), round(min(0.99, p_away + 1.96 * unc_scale), 4)]
+    bootstrap_replicates = int(os.getenv("PREDICTION_BOOTSTRAP_REPLICATES", "0"))
+    bootstrap_min_observations = int(os.getenv("PREDICTION_BOOTSTRAP_MIN_OBSERVATIONS", "20"))
+    bootstrap_key = f"{champion_model.training_hash}:{req.home_team}:{req.away_team}:{req.is_neutral_ground}:{bootstrap_replicates}"
+    intervals = bootstrap_cache.get(bootstrap_key)
+    if intervals is None:
+        intervals = champion_model.bootstrap_1n2_intervals(
+            req.home_team,
+            req.away_team,
+            req.is_neutral_ground,
+            replicates=bootstrap_replicates,
+            min_observations=bootstrap_min_observations,
+            seed=abs(hash(bootstrap_key)) % (2**32),
+        )
+        bootstrap_cache[bootstrap_key] = intervals
+    if intervals.get("available"):
+        interval_values = intervals["intervals"]
+        ci80_home, ci95_home = interval_values["home"]["ci80"], interval_values["home"]["ci95"]
+        ci80_draw, ci95_draw = interval_values["draw"]["ci80"], interval_values["draw"]["ci95"]
+        ci80_away, ci95_away = interval_values["away"]["ci80"], interval_values["away"]["ci95"]
+        warnings.append("dixon_coles_bootstrap_intervals_available")
+    else:
+        ci80_home = ci95_home = ci80_draw = ci95_draw = ci80_away = ci95_away = None
+        warnings.append(f"uncertainty_not_estimable:{intervals.get('method', 'unknown')}")
 
     ordered_probs = sorted([p_home, p_draw, p_away], reverse=True)
     max_probability = ordered_probs[0]
     probability_margin = ordered_probs[0] - ordered_probs[1]
 
-    # Conservative selection policy: official picks must clear all gates.
+    # Chaque garde ci-dessous continue d'étiqueter la prédiction. Seules les
+    # limites techniques et l'option de configuration peuvent encore produire
+    # une abstention : un manque d'historique ou une compétition inconnue ne
+    # suffisent plus.
+    limited_data_mode = ALLOW_LIMITED_DATA_PREDICTIONS
+    limited_data_reasons: List[str] = []
+
     if not champion_model.is_fitted:
         quality_tier = "insufficient"
         confidence_tier = "low"
-        is_abstained = True
-        warnings.append("model_not_trained_prediction_abstained")
-    # Keep this gate aligned with FootballDataService's `usable` tier.
-    # A 90-point gate made every current fixture abstain even when the
-    # persisted quality tier was already usable (82+).
+        limited_data_reasons.append("model_not_trained_using_reference_distribution")
+    # Seuil aligné sur le tier `usable` de FootballDataService (82+).
     elif req.quality_score < MIN_OFFICIAL_QUALITY_SCORE:
-        quality_tier = "insufficient"
+        quality_tier = "insufficient" if req.quality_score < 58 else "degraded"
         confidence_tier = "low"
-        is_abstained = True
-        warnings.append("abstain_due_to_unverified_data_quality")
+        limited_data_reasons.append("unverified_data_quality")
     elif has_sparse_team_history and req.market_probabilities is None:
         quality_tier = "degraded"
         confidence_tier = "low"
-        is_abstained = True
-        warnings.append("abstain_due_to_insufficient_team_history_without_market")
+        limited_data_reasons.append("sparse_team_history_without_market")
     elif "expected_goals_clamped" in warnings:
         quality_tier = "insufficient"
         confidence_tier = "low"
-        is_abstained = True
-        warnings.append("abstain_due_to_extreme_expected_goals")
-    elif has_sparse_team_history:
-        if max_probability < 0.60 or probability_margin < 0.18:
-            quality_tier = "degraded"
-            confidence_tier = "low"
-            is_abstained = True
-            warnings.append("abstain_due_to_low_market_backed_separation")
-        else:
-            quality_tier = "degraded"
-            confidence_tier = "medium"
-            is_abstained = False
-            warnings.append("market_backed_prediction_with_limited_team_history")
+        limited_data_reasons.append("extreme_expected_goals")
     elif max_probability < 0.60 or probability_margin < 0.18:
         quality_tier = "degraded"
         confidence_tier = "low"
-        is_abstained = True
-        warnings.append("abstain_due_to_low_separation")
+        limited_data_reasons.append("low_separation")
     elif max_probability < 0.65 or probability_margin < 0.25:
         quality_tier = "degraded"
         confidence_tier = "medium"
-        is_abstained = False
     else:
         quality_tier = "usable"
         confidence_tier = "high"
-        is_abstained = False
+
+    # Un marché complet améliore la lecture d'une équipe peu observée, sans
+    # jamais transformer la prédiction en probabilité de marché calibrée.
+    if has_sparse_team_history and req.market_probabilities is not None:
+        warnings.append("market_backed_prediction_with_limited_team_history")
+        if quality_tier == "usable":
+            quality_tier = "degraded"
+        # Un historique d'équipe limité plafonne la confiance, même lorsque la
+        # cote du marché renforce la séparation des probabilités.
+        if confidence_tier == "high":
+            confidence_tier = "medium"
+
+    is_abstained = bool(limited_data_reasons) and not limited_data_mode
+    if limited_data_reasons and limited_data_mode:
+        warnings.extend(f"limited_data:{reason}" for reason in limited_data_reasons)
+    elif limited_data_reasons:
+        warnings.extend(f"abstain_due_to_{reason}" for reason in limited_data_reasons)
+    abstain_reason = limited_data_reasons[0] if limited_data_reasons else None
 
     duration_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -386,8 +442,12 @@ def predict(req: PredictRequest):
         "availability_status": "LIMITED_DATA" if is_abstained else "PYTHON_READY",
         "data_quality": req.quality_score,
         "available_markets": list(markets.keys()) if not is_abstained else [],
-        "missing_data": [warning for warning in warnings if any(token in warning for token in ("unknown", "low_sample", "insufficient", "abstain", "untrained"))],
-        "uncertainty": {"low": "high", "medium": "medium", "high": "low"}.get(confidence_tier, "high"),
+        "missing_data": [warning for warning in warnings if any(token in warning for token in ("unknown", "low_sample", "insufficient", "abstain", "untrained", "limited_data", "reference_distribution"))],
+        "uncertainty": (
+            {"low": "high", "medium": "medium", "high": "low"}.get(confidence_tier, "high")
+            if intervals.get("available")
+            else "high"
+        ),
         "model": {
             "version": MODEL_VERSION if champion_model.is_fitted else "M3_UNTRAINED_FALLBACK",
             "family": "pure",
@@ -418,8 +478,12 @@ def predict(req: PredictRequest):
         },
         "confidence_tier": confidence_tier,
         "abstain": is_abstained,
+        "limited_data_mode": limited_data_mode,
+        "abstain_reason": abstain_reason,
         "warnings": warnings,
         "duration_ms": duration_ms,
+        "uncertainty_method": intervals.get("method", "unavailable"),
+        "uncertainty_replicates": int(intervals.get("valid_replicates", 0)),
     }
 
 
@@ -446,8 +510,8 @@ def evaluate_predictions(req: EvaluateRequest):
     rps_list = []
     log_loss_list = []
     brier_list = []
-    home_probs = []
-    home_outcomes = []
+    probability_rows = []
+    outcomes = []
 
     for it in req.items:
         rps = calculate_rps(it.p_home, it.p_draw, it.p_away, it.outcome)
@@ -458,10 +522,11 @@ def evaluate_predictions(req: EvaluateRequest):
         log_loss_list.append(ll)
         brier_list.append(br)
 
-        home_probs.append(it.p_home)
-        home_outcomes.append(1 if it.outcome in ["HOME", "1", "H"] else 0)
+        probability_rows.append([it.p_home, it.p_draw, it.p_away])
+        outcomes.append(it.outcome)
 
-    ece, ece_bins = calculate_ece(home_probs, home_outcomes, n_bins=10, adaptive=True)
+    multiclass_ece = calculate_multiclass_ece(probability_rows, outcomes, n_bins=10, adaptive=True)
+    ece = multiclass_ece["global_ece"]
 
     return {
         "sample_size": len(req.items),
@@ -470,7 +535,11 @@ def evaluate_predictions(req: EvaluateRequest):
         "mean_brier": round(float(sum(brier_list) / len(brier_list)), 5),
         "ece": round(ece, 5),
         "details": {
-            "bins": ece_bins,
+            "bins": multiclass_ece["bins"]["HOME"],
+            "multiclass_ece": multiclass_ece,
+            "ece_home": multiclass_ece["ece_home"],
+            "ece_draw": multiclass_ece["ece_draw"],
+            "ece_away": multiclass_ece["ece_away"],
             "min_rps": round(float(min(rps_list)), 5),
             "max_rps": round(float(max(rps_list)), 5),
         },

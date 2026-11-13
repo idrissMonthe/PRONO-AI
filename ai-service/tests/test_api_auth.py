@@ -39,8 +39,17 @@ def test_prediction_accepts_the_internal_secret(client):
     )
 
     assert response.status_code == 200
-    assert response.json()["abstain"] is True
-    assert response.json()["model"]["version"] == "M3_UNTRAINED_FALLBACK"
+    payload = response.json()
+    assert payload["abstain"] is False
+    assert payload["limited_data_mode"] is True
+    assert payload["model"]["version"] == "M3_UNTRAINED_FALLBACK"
+    assert "limited_data:model_not_trained_using_reference_distribution" in payload["warnings"]
+    assert abs(
+        payload["probabilities"]["home"]["p"]
+        + payload["probabilities"]["draw"]["p"]
+        + payload["probabilities"]["away"]["p"]
+        - 1.0
+    ) < 1e-3
 
 
 def test_ready_reports_the_untrained_fallback(client):
@@ -119,6 +128,27 @@ def test_evaluation_rejects_probabilities_that_do_not_sum_to_one(client):
     )
 
     assert response.status_code == 422
+
+
+def test_evaluation_returns_multiclass_ece_breakdown(client):
+    response = client.post(
+        "/v1/evaluate",
+        json={
+            "items": [
+                {"p_home": 0.8, "p_draw": 0.1, "p_away": 0.1, "outcome": "HOME"},
+                {"p_home": 0.8, "p_draw": 0.1, "p_away": 0.1, "outcome": "DRAW"},
+                {"p_home": 0.8, "p_draw": 0.1, "p_away": 0.1, "outcome": "AWAY"},
+            ]
+        },
+        headers={"X-Service-Secret": "test-internal-secret"},
+    )
+
+    assert response.status_code == 200
+    details = response.json()["details"]
+    assert details["ece_home"] == pytest.approx(0.4667, abs=1e-4)
+    assert details["ece_draw"] == pytest.approx(0.2333, abs=1e-4)
+    assert details["ece_away"] == pytest.approx(0.2333, abs=1e-4)
+    assert details["multiclass_ece"]["aggregation"] == "macro_mean_one_vs_rest"
 
 
 @pytest.mark.parametrize("path", ["/v1/model/info", "/v1/odds/devig", "/v1/evaluate"])

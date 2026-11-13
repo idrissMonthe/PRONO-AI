@@ -72,4 +72,11 @@ RUN rm -f bootstrap/cache/packages.php bootstrap/cache/services.php \
     && chown -R www-data:www-data storage bootstrap/cache \
     && chmod -R ug+rwx storage bootstrap/cache
 
+# Entrypoint : droits storage + libération des verrous de planning orphelins.
+COPY docker/entrypoint.sh /usr/local/bin/pronoia-entrypoint.sh
+RUN chmod +x /usr/local/bin/pronoia-entrypoint.sh
+
+ENTRYPOINT ["pronoia-entrypoint.sh"]
+CMD ["apache2-foreground"]
+
 EXPOSE 80

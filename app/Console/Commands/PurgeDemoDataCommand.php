@@ -13,10 +13,13 @@ class PurgeDemoDataCommand extends Command
 
     public function handle(): int
     {
+        // Seules les rencontres sans identifiant fournisseur (données de
+        // démonstration) sont retirées : les matchs réels api-football et
+        // football-data.org sont conservés.
         $query = FootballMatch::whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
             ->where(function ($q) {
-                $q->whereNull('external_id')->orWhere('data_source', '!=', 'football-data.org');
+                $q->whereNull('external_id')->orWhereIn('data_source', ['demo', 'test']);
             });
 
         $count = (clone $query)->count();

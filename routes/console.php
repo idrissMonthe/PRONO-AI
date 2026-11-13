@@ -6,6 +6,7 @@ use App\Console\Commands\TrainPredictionModelCommand;
 use App\Console\Commands\GeneratePredictionsCommand;
 use App\Console\Commands\SyncOddsCommand;
 use App\Console\Commands\SyncLiveScoresCommand;
+use App\Console\Commands\SyncApiFootballCommand;
 use App\Console\Commands\SettlePredictionsCommand;
 use App\Console\Commands\MonitorOracleCommand;
 use App\Console\Commands\EvaluatePredictionPerformanceCommand;
@@ -59,14 +60,34 @@ Schedule::command(RecalculateQualityCommand::class)
 Schedule::command(SyncLiveScoresCommand::class)
     ->everyMinute()
     ->timezone('Africa/Douala')
-    ->withoutOverlapping()
+    // Verrou court : un conteneur tué ne bloque pas le live pendant 24 h.
+    ->withoutOverlapping(5)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-live.log'));
+
+// API-Football : une requête live globale toutes les 30 minutes pour rester
+// sous le quota gratuit de 100 requêtes/jour.
+Schedule::command(SyncApiFootballCommand::class, ['--live' => true])
+    ->everyThirtyMinutes()
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping(20)
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-api-football-live.log'));
+
+// Fixtures complémentaires (CAN, compétitions internationales, championnats
+// non couverts par football-data.org) : synchronisation quotidienne séparée
+// du flux live.
+Schedule::command(SyncApiFootballCommand::class)
+    ->dailyAt('06:30')
+    ->timezone('Africa/Douala')
+    ->withoutOverlapping()
+    ->runInBackground()
+    ->appendOutputTo(storage_path('logs/oracle-api-football.log'));
 
 Schedule::command(SettlePredictionsCommand::class)
     ->everyTenMinutes()
     ->timezone('Africa/Douala')
-    ->withoutOverlapping()
+    ->withoutOverlapping(15)
     ->runInBackground()
     ->appendOutputTo(storage_path('logs/oracle-settlement.log'));
 
