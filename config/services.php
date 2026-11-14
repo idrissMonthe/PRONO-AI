@@ -35,6 +35,12 @@ return [
         ],
     ],
 
+    // Jeton partagé exigé par les routes API mutantes (ingestion, prédiction,
+    // Gemini, cotes). Vide = API désactivée.
+    'api' => [
+        'token' => env('API_TOKEN'),
+    ],
+
     'gemini' => [
         'api_key' => env('GEMINI_API_KEY'),
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),
@@ -128,12 +134,18 @@ return [
         'regions' => env('THE_ODDS_API_REGIONS', 'eu'),
         'markets' => array_values(array_filter(array_map(
             'trim',
+            // L'endpoint /odds n'accepte que h2h, totals et spreads ; btts
+            // renvoie 422 INVALID_MARKET et ferait échouer la synchronisation.
             explode(',', env('THE_ODDS_API_MARKETS', 'h2h,totals,spreads'))
         ))),
         'bookmakers' => array_values(array_filter(array_map(
             'trim',
             explode(',', env('THE_ODDS_API_BOOKMAKERS', 'pinnacle,bet365,unibet'))
         ))),
+        // Marchés uniquement disponibles par événement (l'endpoint /odds les refuse).
+        'event_markets' => env('THE_ODDS_API_EVENT_MARKETS', 'btts,team_totals,double_chance'),
+        // Chaque marché demandé coûte un crédit : on borne le lot.
+        'event_market_max_events' => (int) env('THE_ODDS_API_EVENT_MARKET_MAX_EVENTS', 8),
         'sports' => [
             'PL' => 'soccer_epl',
             'PD' => 'soccer_spain_la_liga',

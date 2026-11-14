@@ -43,7 +43,7 @@ class ParlayTest extends TestCase
         $this->assertGreaterThan(0, Parlay::count());
     }
 
-    public function test_daily_parlays_include_model_markets_without_inventing_bookmaker_odds(): void
+    public function test_daily_parlays_return_existing_records_without_generating_model_scenarios(): void
     {
         $baseMatch = FootballMatch::with('officialPrediction')
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
@@ -132,58 +132,14 @@ class ParlayTest extends TestCase
 
         $parlays = app(\App\Services\Parlay\ParlayService::class)
             ->getOrGenerateDailyParlays($targetDate);
-        $modelParlays = $parlays->filter(
-            fn (Parlay $parlay): bool => str_starts_with($parlay->title, 'Scénario modèle')
-        );
 
-        $this->assertCount(3, $modelParlays);
-        foreach ($modelParlays as $parlay) {
-            $this->assertNull($parlay->expected_value);
-            $this->assertNotEmpty($parlay->selections_json);
-            foreach ($parlay->selections_json as $selection) {
-                $this->assertSame('model_fair', $selection['price_basis']);
-                $this->assertSame('Cote juste modèle — indicative', $selection['odds_source']);
-                $this->assertNull($selection['ev_pct']);
-                $this->assertEqualsWithDelta(
-                    1 / $selection['model_prob'],
-                    $selection['fair_odds'],
-                    0.01
-                );
-            }
-        }
+        // Les combinés déjà enregistrés pour la date sont retournés tels quels :
+        // les scénarios « modèle » ne sont plus générés automatiquement.
+        $this->assertCount(1, $parlays);
+        $this->assertSame('Ancien combiné 1N2', $parlays->first()->title);
         $this->assertFalse(
-            $modelParlays->flatMap(fn (Parlay $parlay) => $parlay->selections_json)
-                ->contains(fn (array $selection): bool => $selection['match_id'] === $invalidMatrixMatchId)
+            $parlays->contains(fn (Parlay $parlay): bool => str_starts_with($parlay->title, 'Scénario modèle'))
         );
-
-        $this->assertContains(
-            'BTTS',
-            collect($modelParlays->firstWhere('risk_level', 'EQUILIBRE')->selections_json)
-                ->pluck('market_group')
-                ->all()
-        );
-        $limitedHistoryPick = collect($modelParlays->firstWhere('risk_level', 'EQUILIBRE')->selections_json)
-            ->firstWhere('limited_team_history', true);
-        $this->assertNotNull($limitedHistoryPick);
-        $this->assertGreaterThanOrEqual(0.60, $limitedHistoryPick['model_prob']);
-        $this->assertLessThan(0.78, $limitedHistoryPick['model_prob']);
-
-        $this->get(route('parlays.index', ['date' => $targetDate->toDateString()]))
-            ->assertOk()
-            ->assertSee('Cote juste indicative')
-            ->assertSee('cette cote n’est pas une cote proposée par un bookmaker')
-            ->assertSee('EV : non calculée');
-
-        $explanation = app(\App\Services\AIExplanation\GeminiExplanationService::class)
-            ->generateDeterministicParlayExplanation([
-                'pricing_basis' => 'cotes justes indicatives du modèle',
-                'combined_odds' => 3.0,
-                'combined_prob' => 0.3,
-                'risk_score' => 7.0,
-                'selections' => [],
-            ]);
-        $this->assertStringContainsString('pas une cote bookmaker', $explanation);
-        $this->assertStringContainsString('aucune EV n’est calculée', $explanation);
     }
 
     public function test_parlay_regenerate_endpoint(): void
@@ -323,7 +279,10 @@ class ParlayTest extends TestCase
 
                 $this->assertNotNull($pick);
                 $this->assertSame('Modèle · fiabilité limitée', $pick['source']);
-                $this->assertSame($match->awayTeam->short_name.' ou nul', $pick['label']);
+                $this->assertSame(
+                    app(\App\Services\Parlay\ParlayService::class)->displayTeamName($match->awayTeam->name).' ou nul',
+                    $pick['label']
+                );
                 $this->assertSame(0.76, $pick['prob']);
 
                 $balancedPick = collect($tiers['equilibre'])->first(
@@ -581,7 +540,10 @@ class ParlayTest extends TestCase
 
                 $this->assertNotNull($pick);
                 $this->assertSame('Marge de buts', $pick['market']);
-                $this->assertSame($match->homeTeam->short_name.' gagne par 2 buts ou plus', $pick['label']);
+                $this->assertSame(
+                    app(\App\Services\Parlay\ParlayService::class)->displayTeamName($match->homeTeam->name).' gagne par 2 buts ou plus',
+                    $pick['label']
+                );
                 $this->assertEqualsWithDelta(0.35, $pick['prob'], 0.0001);
 
                 return true;

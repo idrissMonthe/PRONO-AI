@@ -119,4 +119,165 @@ class TheOddsApiSyncTest extends TestCase
         $this->assertArrayHasKey('commenceTimeTo', $query);
         $this->assertSame('test-odds-api-key', $query['apiKey']);
     }
+
+    public function test_advanced_team_name_resolution_matches_canonical_divergences_and_records_alias(): void
+    {
+        config()->set('services.the_odds_api.sports.PD', 'soccer_spain_la_liga');
+        $kickoff = now('Africa/Douala')->addDays(2)->setTime(21, 0);
+
+        $match = app(FootballDataService::class)->ingestMatchRecord([
+            'external_id' => 'odds-api-bilbao-match',
+            'home_team' => 'Athletic Club',
+            'away_team' => 'Real Betis Balompié',
+            'date' => $kickoff->copy()->utc()->toIso8601String(),
+            'league_code' => 'PD',
+            'league_name' => 'Primera Division',
+            'country' => 'Spain',
+            'season' => '2026-2027',
+            'status' => 'SCHEDULED',
+        ], 'football-data.org');
+
+        $event = [
+            'id' => 'event-la-liga-1',
+            'commence_time' => $kickoff->copy()->utc()->toIso8601String(),
+            'home_team' => 'Athletic Bilbao',
+            'away_team' => 'Real Betis',
+            'bookmakers' => [[
+                'key' => 'pinnacle',
+                'title' => 'Pinnacle',
+                'markets' => [
+                    [
+                        'key' => 'h2h',
+                        'last_update' => now()->utc()->toIso8601String(),
+                        'outcomes' => [
+                            ['name' => 'Athletic Bilbao', 'price' => 1.95],
+                            ['name' => 'Real Betis', 'price' => 4.20],
+                            ['name' => 'Draw', 'price' => 3.40],
+                        ],
+                    ],
+                ],
+            ]],
+        ];
+
+        Http::fake([
+            '*/soccer_spain_la_liga/odds*' => Http::response([$event]),
+            '*' => Http::response([]),
+        ]);
+
+        $result = app(TheOddsApiService::class)->sync(
+            $kickoff->toDateString(),
+            $kickoff->toDateString()
+        );
+
+        $this->assertSame(1, $result['matched']);
+        $this->assertDatabaseHas('odds_snapshots', [
+            'match_id' => $match->id,
+            'selection' => 'HOME',
+            'decimal_odds' => 1.95,
+        ]);
+        $this->assertDatabaseHas('team_aliases', [
+            'team_id' => $match->home_team_id,
+            'alias' => 'Athletic Bilbao',
+        ]);
+        $this->assertDatabaseHas('team_aliases', [
+            'team_id' => $match->away_team_id,
+            'alias' => 'Real Betis',
+        ]);
+    }
+
+    public function test_event_level_btts_odds_are_stored_with_bookmaker_price(): void
+    {
+        config()->set('services.the_odds_api.sports.PD', 'soccer_spain_la_liga');
+        config()->set('services.the_odds_api.event_markets', 'btts,team_totals');
+        config()->set('services.the_odds_api.event_market_max_events', 5);
+
+        $kickoff = now('Africa/Douala')->addDays(3)->setTime(21, 0);
+        $match = app(FootballDataService::class)->ingestMatchRecord([
+            'external_id' => 'odds-api-btts-match',
+            'home_team' => 'Sevilla FC',
+            'away_team' => 'Valencia CF',
+            'date' => $kickoff->copy()->utc()->toIso8601String(),
+            'league_code' => 'PD',
+            'league_name' => 'Primera Division',
+            'country' => 'Spain',
+            'season' => '2026-2027',
+            'status' => 'SCHEDULED',
+        ], 'football-data.org');
+
+        $event = [
+            'id' => 'event-btts-1',
+            'commence_time' => $kickoff->copy()->utc()->toIso8601String(),
+            'home_team' => 'Sevilla FC',
+            'away_team' => 'Valencia CF',
+            'bookmakers' => [[
+                'key' => 'pinnacle',
+                'title' => 'Pinnacle',
+                'markets' => [[
+                    'key' => 'h2h',
+                    'last_update' => now()->utc()->toIso8601String(),
+                    'outcomes' => [
+                        ['name' => 'Sevilla FC', 'price' => 2.30],
+                        ['name' => 'Valencia CF', 'price' => 3.10],
+                        ['name' => 'Draw', 'price' => 3.20],
+                    ],
+                ]],
+            ]],
+        ];
+
+        $eventOdds = [
+            'id' => 'event-btts-1',
+            'bookmakers' => [[
+                'key' => 'pinnacle',
+                'title' => 'Pinnacle',
+                'markets' => [[
+                    'key' => 'btts',
+                    'last_update' => now()->utc()->toIso8601String(),
+                    'outcomes' => [
+                        ['name' => 'Yes', 'price' => 1.72],
+                        ['name' => 'No', 'price' => 2.05],
+                    ],
+                ], [
+                    'key' => 'team_totals',
+                    'last_update' => now()->utc()->toIso8601String(),
+                    'outcomes' => [
+                        ['name' => 'Over', 'description' => 'Sevilla FC', 'point' => 1.5, 'price' => 2.05],
+                        ['name' => 'Under', 'description' => 'Sevilla FC', 'point' => 1.5, 'price' => 1.78],
+                    ],
+                ]],
+            ]],
+        ];
+
+        Http::fake([
+            '*/events/event-btts-1/odds*' => Http::response($eventOdds),
+            '*/soccer_spain_la_liga/odds*' => Http::response([$event]),
+            '*' => Http::response([]),
+        ]);
+
+        $result = app(TheOddsApiService::class)->sync(
+            $kickoff->toDateString(),
+            $kickoff->toDateString()
+        );
+
+        $this->assertSame(1, $result['matched']);
+        $this->assertSame(2, $result['event_markets']['btts']);
+        $this->assertDatabaseHas('odds_snapshots', [
+            'match_id' => $match->id,
+            'selection' => 'YES',
+            'decimal_odds' => 1.72,
+            'source' => 'the-odds-api',
+        ]);
+        $this->assertDatabaseHas('odds_snapshots', [
+            'match_id' => $match->id,
+            'selection' => 'NO',
+            'decimal_odds' => 2.05,
+            'source' => 'the-odds-api',
+        ]);
+        $this->assertDatabaseHas('odds_snapshots', [
+            'match_id' => $match->id,
+            'selection' => 'HOME_OVER',
+            'line' => 1.5,
+            'decimal_odds' => 2.05,
+            'source' => 'the-odds-api',
+        ]);
+    }
 }

@@ -20,7 +20,7 @@ use Throwable;
 
 class GeneratePredictionsCommand extends Command
 {
-    protected $signature = 'oracle:generate-predictions {--limit=250 : Nombre maximal de matchs à analyser}';
+    protected $signature = 'oracle:generate-predictions {--limit=250 : Nombre maximal de matchs à analyser} {--force : Force la régénération de toutes les prédictions sans vérification du cache}';
     protected $description = 'Génère les prédictions officielles des prochains matchs.';
 
     public function handle(PredictionClient $client, HashChainService $chain, OddsService $oddsService, FootballDataService $footballDataService, PredictionRevisionService $revisionService): int
@@ -32,7 +32,7 @@ class GeneratePredictionsCommand extends Command
 
         // Les deux fournisseurs alimentent le même pipeline : une rencontre
         // découverte via API-Football doit être prédite comme les autres.
-        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
+        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots.market', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
             ->whereNotNull('external_id')
             ->whereIn('data_source', ['football-data.org', 'api-football'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
@@ -117,8 +117,68 @@ class GeneratePredictionsCommand extends Command
                     'rest_days_away' => $awayRestDays,
                 ]);
 
+                // Sélections plutôt qu'identifiants de marché : ces ids sont
+                // propres au catalogue du fournisseur (15/18/21/…).
+                $totalsMarketId = \App\Models\Market::where('code', 'totals')->value('id');
+                $bttsMarketId = \App\Models\Market::where('code', 'btts')->value('id');
+                $teamTotalsMarketId = \App\Models\Market::where('code', 'team_totals')->value('id');
+                $doubleChanceMarketId = \App\Models\Market::where('code', 'double_chance')->value('id');
+
+                $totalsOdds = $match->oddsSnapshots
+                    ->whereIn('selection', ['OVER', 'UNDER'])
+                    ->whereNotNull('line')
+                    ->when($totalsMarketId !== null, fn ($collection) => $collection->where('market_id', $totalsMarketId))
+                    ->groupBy(fn ($o) => (string) (float) $o->line)
+                    ->map(fn ($group) => [
+                        'over' => (float) ($group->firstWhere('selection', 'OVER')?->decimal_odds ?? null),
+                        'under' => (float) ($group->firstWhere('selection', 'UNDER')?->decimal_odds ?? null),
+                    ])->all();
+
+                $bttsOdds = $match->oddsSnapshots
+                    ->whereIn('selection', ['YES', 'NO'])
+                    ->when($bttsMarketId !== null, fn ($collection) => $collection->where('market_id', $bttsMarketId))
+                    ->mapWithKeys(fn ($o) => [strtolower($o->selection) => (float) $o->decimal_odds])
+                    ->all();
+
+                $teamTotalsOdds = $match->oddsSnapshots
+                    ->whereNotNull('line')
+                    ->when($teamTotalsMarketId !== null, fn ($collection) => $collection->where('market_id', $teamTotalsMarketId))
+                    ->mapWithKeys(fn ($o) => [strtolower(str_replace('_', '.', $o->selection)).'@'.(float) $o->line => (float) $o->decimal_odds])
+                    ->all();
+
+                $doubleChanceOdds = $match->oddsSnapshots
+                    ->whereIn('selection', ['1X', 'X2', '12'])
+                    ->when($doubleChanceMarketId !== null, fn ($collection) => $collection->where('market_id', $doubleChanceMarketId))
+                    ->mapWithKeys(fn ($o) => [(string) $o->selection => (float) $o->decimal_odds])
+                    ->all();
+
+                $handicapOdds = $match->oddsSnapshots
+                    ->filter(fn ($odd) => ($odd->market?->code) === 'asian_handicap')
+                    ->map(fn ($odd) => [
+                        'selection' => (string) $odd->selection,
+                        'line' => (float) $odd->line,
+                        'odds' => (float) $odd->decimal_odds,
+                    ])->values()->all();
+
+                $oddsContext = [
+                    'match_id' => (string) $match->id,
+                    'home_team' => $match->homeTeam->name,
+                    'away_team' => $match->awayTeam->name,
+                    'handicap' => $handicapOdds,
+                    '1N2' => $latestOddsSet ? [
+                        'home' => (float) ($latestOddsSet['HOME']->decimal_odds ?? 0),
+                        'draw' => (float) ($latestOddsSet['DRAW']->decimal_odds ?? 0),
+                        'away' => (float) ($latestOddsSet['AWAY']->decimal_odds ?? 0),
+                    ] : null,
+                    'totals' => $totalsOdds,
+                    'btts' => $bttsOdds,
+                    'team_totals' => $teamTotalsOdds,
+                    'double_chance' => $doubleChanceOdds,
+                ];
+
                 $probabilities = $result['probabilities'] ?? null;
                 $review = $revisionService->review($result, [
+                    'match_id' => (string) $match->id,
                     'home_team' => $match->homeTeam->name,
                     'away_team' => $match->awayTeam->name,
                     'quality_score' => (float) $quality['score'],
@@ -128,6 +188,7 @@ class GeneratePredictionsCommand extends Command
                     'rest_days' => ['home' => $homeRestDays, 'away' => $awayRestDays],
                     'missing_data' => $quality['missing'] ?? [],
                     'recent_form' => $recentForm,
+                    'odds_context' => $oddsContext,
                     'odds_snapshot' => $latestOddsSet ? $latestOddsSet->map(fn ($odd) => [
                         'selection' => $odd->selection,
                         'decimal_odds' => (float) $odd->decimal_odds,
@@ -135,7 +196,7 @@ class GeneratePredictionsCommand extends Command
                         'snapshot_time_utc' => $odd->snapshot_time_utc?->toIso8601String(),
                     ])->values()->all() : [],
                     'initial_candidate' => null,
-                    'candidates' => $revisionService->candidatesFromResult($result),
+                    'candidates' => $revisionService->candidatesFromResult($result, $oddsContext),
                 ]);
                 $review['initial_candidate'] = $review['initial_candidate'] ?? $review['final_candidate'];
                 $snapshotVariables = [
@@ -157,7 +218,7 @@ class GeneratePredictionsCommand extends Command
                 $fingerprintVariables = $snapshotVariables;
                 unset($fingerprintVariables['as_of_utc']);
                 $snapshotHash = hash('sha256', json_encode($fingerprintVariables, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-                if ($match->officialPrediction?->featureSnapshot?->snapshot_hash === $snapshotHash) {
+                if (! $this->option('force') && $match->officialPrediction?->featureSnapshot?->snapshot_hash === $snapshotHash) {
                     continue;
                 }
 
@@ -262,6 +323,10 @@ class GeneratePredictionsCommand extends Command
                         'warnings_json' => array_values(array_unique(array_merge($result['warnings'] ?? [], ['revision_'.$decision]))),
                         'market_metrics_json' => array_merge($initialPrediction->market_metrics_json ?? [], [
                             'revision' => ['decision' => $decision, 'provider' => $review['provider'] ?? 'local_revision_rules'],
+                            'published_odds' => isset($finalCandidate['odds']) ? (float) $finalCandidate['odds'] : null,
+                            // Sans provenance bookmaker, le prix ne doit jamais
+                            // être présenté comme une cote de marché.
+                            'published_odds_source' => ($finalCandidate['odds_source'] ?? null) === 'bookmaker' ? 'bookmaker' : null,
                             // Traçabilité du mode données limitées, sans nouvelle migration.
                             'limited_data' => [
                                 'mode' => (bool) ($result['limited_data_mode'] ?? false),

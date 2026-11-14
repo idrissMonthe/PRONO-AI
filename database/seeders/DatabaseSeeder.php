@@ -51,7 +51,6 @@ class DatabaseSeeder extends Seeder
         $markets = [
             ['code' => '1N2', 'name' => 'Résultat du Match (1N2)', 'category' => 'main'],
             ['code' => 'double_chance', 'name' => 'Double Chance (1N, N2, 12)', 'category' => 'derived'],
-            ['code' => 'dnb', 'name' => 'Draw No Bet (Remboursé si nul)', 'category' => 'derived'],
             ['code' => 'totals', 'name' => 'Total de Buts (Plus / Moins)', 'category' => 'goals'],
             ['code' => 'btts', 'name' => 'Les Deux Équipes Marquent (BTTS)', 'category' => 'goals'],
             ['code' => 'exact_score', 'name' => 'Score Exact', 'category' => 'score'],

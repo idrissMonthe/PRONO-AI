@@ -1,9 +1,48 @@
+# =============================================================
+# ORACLE FOOT / PRONO IA — Docker Compose (Full Stack)
+# =============================================================
+# Services :
+#   db          → MySQL 8.0           (127.0.0.1:3307 uniquement)
+#   ai-service  → FastAPI Python       (127.0.0.1:8001 uniquement)
+#   web         → Laravel Apache       (port 8000 sur l'hôte)
+#   scheduler   → Laravel schedule:work (tâches planifiées)
+# =============================================================
 
 services:
 
-  # ==========================================
-  # MOTEUR IA PYTHON
-  # ==========================================
+  # ============================================================
+  # BASE DE DONNÉES MySQL
+  # ============================================================
+  db:
+    image: mysql:8.0
+    container_name: pronoia-db
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD doit être défini dans .env}
+      MYSQL_DATABASE: prono
+
+    volumes:
+      - db_data:/var/lib/mysql
+      # Script d'init exécuté uniquement si le volume est vide
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d
+
+    ports:
+      # Écoute locale uniquement : la base n'est pas exposée au réseau
+      - "127.0.0.1:3307:3306"
+
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+    restart: unless-stopped
+
+
+  # ============================================================
+  # MOTEUR IA PYTHON (FastAPI)
+  # ============================================================
   ai-service:
     build:
       context: ./ai-service
@@ -12,29 +51,32 @@ services:
     container_name: pronoia-ai
 
     volumes:
-      - ./ai-service/app:/app/app
-      - ./ai-service/data:/app/data
+      - ./ai-service/app:/app/app         # hot-reload du code
+      - ./ai-service/data:/app/data       # modèle entraîné persisté
 
     environment:
-      AI_SERVICE_SECRET: ${AI_SERVICE_SECRET:-}
+      AI_SERVICE_SECRET: ${AI_SERVICE_SECRET:?AI_SERVICE_SECRET doit être défini dans .env}
+      MODEL_STATE_PATH: /app/data/dixon_coles_model.json
       PYTHONUNBUFFERED: "1"
 
+    ports:
+      # Accessible seulement depuis la machine hôte, jamais depuis le réseau
+      - "127.0.0.1:8001:8001"
+
     healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/v1/health', timeout=3)"]
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 20s
 
     restart: unless-stopped
 
 
-  # ==========================================
-  # APPLICATION WEB LARAVEL
-  # ==========================================
+  # ============================================================
+  # APPLICATION WEB LARAVEL (Apache)
+  # ============================================================
   web:
     build:
       context: .
@@ -43,33 +85,45 @@ services:
     container_name: pronoia-laravel
 
     ports:
-      - "8000:80"
+      # Boucle locale uniquement : le dashboard, l'historique IA et les
+      # routes qui appellent Gemini ne doivent pas être joignables du LAN.
+      - "127.0.0.1:8000:80"
 
+    # Variables surchargées par rapport au .env local
     env_file:
       - .env
 
     environment:
-      APP_URL: http://127.0.0.1:8000
-
-      AI_SERVICE_URL: http://ai-service:8000
-
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: "http://localhost:8000"
       DB_CONNECTION: mysql
-      DB_HOST: host.docker.internal
+      DB_HOST: db
       DB_PORT: "3306"
-      DB_DATABASE: ${DB_DATABASE:-prono}
-      DB_USERNAME: ${DB_USERNAME:-root}
-      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_DATABASE: prono
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD}
+      AI_SERVICE_URL: "http://ai-service:8001"
+      AI_SERVICE_SECRET: ${AI_SERVICE_SECRET}
+      CACHE_STORE: file
+      SESSION_DRIVER: file       # file est plus simple sans Redis
+      RUN_MIGRATIONS: "1"
+
+    volumes:
+      - ./storage:/var/www/html/storage      # logs + cache persistés
 
     depends_on:
+      db:
+        condition: service_healthy
       ai-service:
         condition: service_healthy
 
     restart: unless-stopped
 
 
-  # ==========================================
-  # PLANIFICATEUR LARAVEL EN ARRIÈRE-PLAN
-  # ==========================================
+  # ============================================================
+  # PLANIFICATEUR LARAVEL (schedule:work)
+  # ============================================================
   scheduler:
     build:
       context: .
@@ -81,23 +135,44 @@ services:
       - .env
 
     environment:
-      APP_URL: http://127.0.0.1:8000
-      AI_SERVICE_URL: http://ai-service:8000
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: "http://localhost:8000"
       DB_CONNECTION: mysql
-      DB_HOST: host.docker.internal
+      DB_HOST: db
       DB_PORT: "3306"
-      DB_DATABASE: ${DB_DATABASE:-prono}
-      DB_USERNAME: ${DB_USERNAME:-root}
-      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_DATABASE: prono
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD}
+      AI_SERVICE_URL: "http://ai-service:8001"
+      AI_SERVICE_SECRET: ${AI_SERVICE_SECRET}
+      CACHE_STORE: file
+      SESSION_DRIVER: file
+      RUN_MIGRATIONS: "0"
 
-    command: php artisan schedule:work
+    volumes:
+      - ./storage:/var/www/html/storage
 
     # Même propriétaire que les workers Apache : évite les logs root qui
     # rendent storage/ inaccessible en écriture pour www-data.
     user: "www-data"
 
+    command: ["php", "/var/www/html/artisan", "schedule:work", "--verbose"]
+
     depends_on:
+      db:
+        condition: service_healthy
       ai-service:
         condition: service_healthy
+      web:
+        condition: service_started     # s'assure que les migrations sont jouées
 
     restart: unless-stopped
+
+
+# ============================================================
+# VOLUMES NOMMÉS
+# ============================================================
+volumes:
+  db_data:
+    driver: local

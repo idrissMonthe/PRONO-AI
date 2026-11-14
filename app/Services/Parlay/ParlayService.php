@@ -14,6 +14,9 @@ use Illuminate\Support\Facades\Log;
 
 class ParlayService
 {
+    /** @var array<string, int|null> */
+    private array $marketIdCache = [];
+
     public function __construct(
         protected GeminiExplanationService $geminiService,
         protected PredictionRevisionService $revisionService
@@ -29,21 +32,7 @@ class ParlayService
 
         $existing = Parlay::whereDate('date_for', $targetDate->toDateString())->orderBy('id', 'asc')->get();
         if ($existing->isNotEmpty()) {
-            $modelTitles = [
-                'Gros combiné — 10 sélections diversifiées',
-                'Scénario modèle prudent (marchés de buts)',
-                'Scénario modèle équilibré (marchés variés)',
-                'Scénario modèle audacieux (marchés de buts)',
-            ];
-            $existingModelTitles = $existing
-                ->filter(fn (Parlay $parlay): bool => collect($parlay->selections_json ?? [])
-                    ->contains(fn (array $selection): bool => ($selection['price_basis'] ?? null) === 'model_fair'))
-                ->pluck('title')
-                ->all();
-
-            return count(array_diff($modelTitles, $existingModelTitles)) === 0
-                ? $existing
-                : $existing->merge($this->generateModelMarketParlays($targetDate));
+            return $existing;
         }
 
         return $this->generateDailyParlays($targetDate);
@@ -82,101 +71,273 @@ class ParlayService
                 ->where('match_date_utc', '>=', $nowUtc)
                 ->where('match_date_utc', '<=', $windowEndUtc)
                 ->whereHas('officialPrediction', function ($q) {
-                    $q->where('is_official', true)->where('is_abstained', false);
+                    $q->where('is_official', true)
+                        ->when(
+                            ! (bool) config('services.prediction.allow_limited_data', true),
+                            fn ($sub) => $sub->where('is_abstained', false)
+                        );
                 })
                 ->orderBy('match_date_utc', 'asc')
                 ->take(12)
                 ->get();
         }
 
-        // 2. Extraire les sélections fiables avec leurs probabilités réelles et cotes réelles
+        // Si toujours moins de 2 matchs (ex: trêve internationale ou pause), étendre aux 10 prochains jours
+        if ($matches->count() < 2) {
+            $windowEndUtc = $targetDate->copy()->addDays(10)->endOfDay()->utc();
+
+            $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction.modelVersion', 'oddsSnapshots.bookmaker'])
+                ->whereIn('status', ['SCHEDULED', 'TIMED'])
+                ->where('match_date_utc', '>=', $nowUtc)
+                ->where('match_date_utc', '<=', $windowEndUtc)
+                ->whereHas('officialPrediction', function ($q) {
+                    $q->where('is_official', true)
+                        ->when(
+                            ! (bool) config('services.prediction.allow_limited_data', true),
+                            fn ($sub) => $sub->where('is_abstained', false)
+                        );
+                })
+                ->orderBy('match_date_utc', 'asc')
+                ->take(16)
+                ->get();
+        }
+
+        // 2. Extraire les sélections fiables de tous les marchés (1N2, Totaux Over/Under, Double Chance, BTTS)
+        // en associant systématiquement les VRAIES COTES BOOKMAKERS de The Odds API aux probabilités du modèle Python.
         $candidates = [];
-        $modelCandidates = [];
 
         foreach ($matches as $match) {
             $pred = $match->officialPrediction;
-            if (! $pred) continue;
-
-            if ($pred->published_market && $pred->published_market !== '1N2') {
+            if (! $pred) {
                 continue;
             }
 
-            $modelCandidates = array_merge(
-                $modelCandidates,
-                $this->buildModelMarketCandidates($match, $pred)
-            );
+            $derived = $pred->derived_markets_json ?? [];
 
-            $oddsList = $match->oddsSnapshots->where('is_closing', false)
-                ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 10000000000 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0));
-            if ($oddsList->isEmpty()) {
-                $oddsList = $match->oddsSnapshots;
-            }
+            // Les cotes sont lues PAR MARCHÉ : « HOME » existe aussi bien en
+            // 1N2 qu'en handicap, et mélanger les deux produisait des prix
+            // incohérents avec la probabilité affichée.
+            $h2hOdds = $this->oddsFor($match, '1N2');
+            $homeOdds = $h2hOdds->firstWhere('selection', 'HOME');
+            $drawOdds = $h2hOdds->firstWhere('selection', 'DRAW');
+            $awayOdds = $h2hOdds->firstWhere('selection', 'AWAY');
 
-            $homeOdds = $oddsList->where('selection', 'HOME')->first();
-            $drawOdds = $oddsList->where('selection', 'DRAW')->first();
-            $awayOdds = $oddsList->where('selection', 'AWAY')->first();
+            $pHome = (float) ($derived['1N2']['home'] ?? $pred->prob_home);
+            $pDraw = (float) ($derived['1N2']['draw'] ?? $pred->prob_draw);
+            $pAway = (float) ($derived['1N2']['away'] ?? $pred->prob_away);
 
-            $pHome = (float) $pred->prob_home;
-            $pDraw = (float) $pred->prob_draw;
-            $pAway = (float) $pred->prob_away;
+            $homeDisplay = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
+            $awayDisplay = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
+            $matchLabel = "{$homeDisplay} vs {$awayDisplay}";
 
-            // Déterminer la sélection dominante pour ce match
-            $options = [
-                [
-                    'selection' => 'HOME',
-                    'label'     => 'Victoire ' . $match->homeTeam->short_name,
-                    'prob'      => $pHome,
-                    'odds_obj'  => $homeOdds,
-                ],
-                [
-                    'selection' => 'AWAY',
-                    'label'     => 'Victoire ' . $match->awayTeam->short_name,
-                    'prob'      => $pAway,
-                    'odds_obj'  => $awayOdds,
-                ],
-                [
-                    'selection' => 'DRAW',
-                    'label'     => 'Match Nul',
-                    'prob'      => $pDraw,
-                    'odds_obj'  => $drawOdds,
-                ],
-            ];
-
-            // Trier par probabilité décroissante
-            usort($options, fn ($a, $b) => $b['prob'] <=> $a['prob']);
-            $publishedSelection = match ($pred->published_selection) {
-                'home' => 'HOME',
-                'draw' => 'DRAW',
-                'away' => 'AWAY',
-                default => null,
-            };
-            $best = ($pred->published_market === '1N2' && $publishedSelection)
-                ? (collect($options)->firstWhere('selection', $publishedSelection) ?? $options[0])
-                : $options[0];
-
-            if ($best['prob'] >= 0.40 && $best['odds_obj'] && $best['odds_obj']->decimal_odds > 1.15) {
-                $decimalOdds = (float) $best['odds_obj']->decimal_odds;
-                $ev = ($best['prob'] * $decimalOdds) - 1.0;
-
+            // A. Marché 1N2 (Résultat du Match avec cotes The Odds API)
+            if ($homeOdds && (float)$homeOdds->decimal_odds > 1.15 && $pHome >= 0.35
+                && $this->modelAgreesWithMarket($pHome, (float) $homeOdds->decimal_odds)) {
+                $o = (float) $homeOdds->decimal_odds;
                 $candidates[] = [
                     'match_id'        => $match->id,
-                    'match_label'     => "{$match->homeTeam->name} vs {$match->awayTeam->name}",
+                    'match_label'     => $matchLabel,
                     'league'          => $match->league->name ?? 'Ligue',
                     'match_date_utc'  => $match->match_date_utc->toIso8601String(),
-                    'selection'       => $best['selection'],
-                    'selection_label' => $best['label'],
-                    'model_prob'      => round($best['prob'], 4),
-                    'model_prob_pct'  => round($best['prob'] * 100, 1),
-                    'model_version'   => $pred->modelVersion->version_name ?? 'M3_DIXON_COLES',
-                    'odds'            => round($decimalOdds, 2),
-                    'odds_source'     => $best['odds_obj']->source === 'the-odds-api'
-                        ? ($best['odds_obj']->bookmaker->name ?? 'The Odds API')
-                        : 'Historique local',
-                    'odds_updated_at' => $best['odds_obj']->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
-                    'fair_odds'       => round(1.0 / max(0.01, $best['prob']), 2),
-                    'ev_pct'          => round($ev * 100, 2),
+                    'selection'       => 'HOME',
+                    'selection_label' => "Victoire {$homeDisplay}",
+                    'market_group'    => '1N2',
+                    'model_prob'      => round($pHome, 4),
+                    'model_prob_pct'  => round($pHome * 100, 1),
+                    'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                    'odds'            => round($o, 2),
+                    'odds_source'     => $homeOdds->bookmaker->name ?? 'Pinnacle',
+                    'odds_updated_at' => $homeOdds->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                    'fair_odds'       => round(1.0 / max(0.01, $pHome), 2),
+                    'ev_pct'          => round((($pHome * $o) - 1.0) * 100, 2),
                     'price_basis'     => 'bookmaker',
                 ];
+            }
+            if ($awayOdds && (float)$awayOdds->decimal_odds > 1.15 && $pAway >= 0.35
+                && $this->modelAgreesWithMarket($pAway, (float) $awayOdds->decimal_odds)) {
+                $o = (float) $awayOdds->decimal_odds;
+                $candidates[] = [
+                    'match_id'        => $match->id,
+                    'match_label'     => $matchLabel,
+                    'league'          => $match->league->name ?? 'Ligue',
+                    'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                    'selection'       => 'AWAY',
+                    'selection_label' => "Victoire {$awayDisplay}",
+                    'market_group'    => '1N2',
+                    'model_prob'      => round($pAway, 4),
+                    'model_prob_pct'  => round($pAway * 100, 1),
+                    'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                    'odds'            => round($o, 2),
+                    'odds_source'     => $awayOdds->bookmaker->name ?? 'Pinnacle',
+                    'odds_updated_at' => $awayOdds->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                    'fair_odds'       => round(1.0 / max(0.01, $pAway), 2),
+                    'ev_pct'          => round((($pAway * $o) - 1.0) * 100, 2),
+                    'price_basis'     => 'bookmaker',
+                ];
+            }
+
+            // B. Marché Totaux de Buts (Over / Under avec vraies cotes bookmakers The Odds API)
+            $totalsOdds = $this->oddsFor($match, 'totals')
+                ->filter(fn ($odd) => in_array($odd->selection, ['OVER', 'UNDER'], true) && $odd->line !== null);
+            foreach ($totalsOdds as $tOdd) {
+                $line = (float) $tOdd->line;
+                if ($line <= 0.0) continue;
+                $key = ($tOdd->selection === 'OVER' ? 'over_' : 'under_') . str_replace('.', '_', (string) $line);
+                $p = (float) ($derived['totals'][$key] ?? 0);
+                if ($p === 0.0) {
+                    $floorKey = ($tOdd->selection === 'OVER' ? 'over_' : 'under_') . str_replace('.', '_', (string) floor($line) . '_5');
+                    $p = (float) ($derived['totals'][$floorKey] ?? 0);
+                }
+                if ($p >= 0.40 && (float)$tOdd->decimal_odds > 1.15
+                    && $this->modelAgreesWithMarket($p, (float) $tOdd->decimal_odds)) {
+                    $o = (float) $tOdd->decimal_odds;
+                    $prefix = $tOdd->selection === 'OVER' ? '+' : '-';
+                    $candidates[] = [
+                        'match_id'        => $match->id,
+                        'match_label'     => $matchLabel,
+                        'league'          => $match->league->name ?? 'Ligue',
+                        'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                        'selection'       => $tOdd->selection . '_' . $line,
+                        'selection_label' => "{$prefix}{$line} Buts",
+                        'market_group'    => 'Total buts',
+                        'model_prob'      => round($p, 4),
+                        'model_prob_pct'  => round($p * 100, 1),
+                        'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                        'odds'            => round($o, 2),
+                        'odds_source'     => $tOdd->bookmaker->name ?? 'Pinnacle',
+                        'odds_updated_at' => $tOdd->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                        'fair_odds'       => round(1.0 / max(0.01, $p), 2),
+                        'ev_pct'          => round((($p * $o) - 1.0) * 100, 2),
+                        'price_basis'     => 'bookmaker',
+                    ];
+                }
+            }
+
+            // B2. Handicap asiatique (cotes bookmakers réelles)
+            foreach ($this->oddsFor($match, 'asian_handicap') as $hOdd) {
+                if (! in_array($hOdd->selection, ['HOME', 'AWAY'], true) || $hOdd->line === null) {
+                    continue;
+                }
+                $rawLine = (float) $hOdd->line;
+                $homeLine = $hOdd->selection === 'HOME' ? $rawLine : -$rawLine;
+                $entry = $derived['asian_handicap'][$this->handicapKey($homeLine)] ?? null;
+                if (! $entry) {
+                    continue;
+                }
+                $side = $hOdd->selection === 'HOME' ? 'home' : 'away';
+                $p = (float) ($entry[$side]['win'] ?? 0) + 0.5 * (float) ($entry[$side]['half_win'] ?? 0);
+                $o = (float) $hOdd->decimal_odds;
+                // On ne retient que les handicaps lisibles : ni quasi-certitude,
+                // ni scénario improbable déguisé en cote attractive.
+                if ($p < 0.45 || $p > 0.80 || $o < 1.25 || $o > 3.20
+                    || ! $this->modelAgreesWithMarket($p, $o)) {
+                    continue;
+                }
+                $teamLabel = $hOdd->selection === 'HOME' ? $homeDisplay : $awayDisplay;
+                $lineLabel = ($rawLine > 0 ? '+' : '') . rtrim(rtrim(number_format($rawLine, 2, ',', ''), '0'), ',');
+                $candidates[] = [
+                    'match_id'        => $match->id,
+                    'match_label'     => $matchLabel,
+                    'league'          => $match->league->name ?? 'Ligue',
+                    'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                    'selection'       => 'AH_' . $hOdd->selection . '_' . $rawLine,
+                    'selection_label' => "{$teamLabel} handicap {$lineLabel}",
+                    'market_group'    => 'Handicap',
+                    'model_prob'      => round($p, 4),
+                    'model_prob_pct'  => round($p * 100, 1),
+                    'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                    'odds'            => round($o, 2),
+                    'odds_source'     => $hOdd->bookmaker->name ?? 'Pinnacle',
+                    'odds_updated_at' => $hOdd->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                    'fair_odds'       => round(1.0 / max(0.01, $p), 2),
+                    'ev_pct'          => round((($p * $o) - 1.0) * 100, 2),
+                    'price_basis'     => 'bookmaker',
+                ];
+            }
+
+            // C. Marché Double Chance (Cotes bookmakers dérivées des cotes réelles The Odds API)
+            if ($homeOdds && $drawOdds && $awayOdds) {
+                $oH = (float) $homeOdds->decimal_odds;
+                $oD = (float) $drawOdds->decimal_odds;
+                $oA = (float) $awayOdds->decimal_odds;
+
+                // Formule bookmaker standard pour cote combinée double chance
+                $odds1X = round(1.0 / ((1.0 / $oH) + (1.0 / $oD)), 2);
+                $oddsX2 = round(1.0 / ((1.0 / $oD) + (1.0 / $oA)), 2);
+
+                $prob1X = (float) ($derived['double_chance']['1X'] ?? ($pHome + $pDraw));
+                $probX2 = (float) ($derived['double_chance']['X2'] ?? ($pDraw + $pAway));
+
+                if ($prob1X >= 0.55 && $odds1X >= 1.15 && $this->modelAgreesWithMarket($prob1X, $odds1X)) {
+                    $candidates[] = [
+                        'match_id'        => $match->id,
+                        'match_label'     => $matchLabel,
+                        'league'          => $match->league->name ?? 'Ligue',
+                        'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                        'selection'       => 'DC_1X',
+                        'selection_label' => "{$homeDisplay} ou Nul (1X)",
+                        'market_group'    => 'Double chance',
+                        'model_prob'      => round($prob1X, 4),
+                        'model_prob_pct'  => round($prob1X * 100, 1),
+                        'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                        'odds'            => $odds1X,
+                        'odds_source'     => $homeOdds->bookmaker->name ?? 'Pinnacle',
+                        'odds_updated_at' => $homeOdds->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                        'fair_odds'       => round(1.0 / max(0.01, $prob1X), 2),
+                        'ev_pct'          => round((($prob1X * $odds1X) - 1.0) * 100, 2),
+                        'price_basis'     => 'bookmaker',
+                    ];
+                }
+                if ($probX2 >= 0.55 && $oddsX2 >= 1.15 && $this->modelAgreesWithMarket($probX2, $oddsX2)) {
+                    $candidates[] = [
+                        'match_id'        => $match->id,
+                        'match_label'     => $matchLabel,
+                        'league'          => $match->league->name ?? 'Ligue',
+                        'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                        'selection'       => 'DC_X2',
+                        'selection_label' => "Nul ou {$awayDisplay} (X2)",
+                        'market_group'    => 'Double chance',
+                        'model_prob'      => round($probX2, 4),
+                        'model_prob_pct'  => round($probX2 * 100, 1),
+                        'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                        'odds'            => $oddsX2,
+                        'odds_source'     => $awayOdds->bookmaker->name ?? 'Pinnacle',
+                        'odds_updated_at' => $awayOdds->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                        'fair_odds'       => round(1.0 / max(0.01, $probX2), 2),
+                        'ev_pct'          => round((($probX2 * $oddsX2) - 1.0) * 100, 2),
+                        'price_basis'     => 'bookmaker',
+                    ];
+                }
+            }
+
+            // D. Marché BTTS si cote disponible
+            $bttsOdds = $this->oddsFor($match, 'btts')
+                ->filter(fn ($odd) => in_array($odd->selection, ['YES', 'NO'], true));
+            foreach ($bttsOdds as $bOdd) {
+                $key = strtolower($bOdd->selection) === 'yes' ? 'yes' : 'no';
+                $p = (float) ($derived['btts'][$key] ?? 0);
+                if ($p >= 0.40 && (float)$bOdd->decimal_odds > 1.15 && $this->modelAgreesWithMarket($p, (float) $bOdd->decimal_odds)) {
+                    $o = (float) $bOdd->decimal_odds;
+                    $label = $key === 'yes' ? 'Les 2 équipes marquent' : 'Au moins une équipe ne marque pas';
+                    $candidates[] = [
+                        'match_id'        => $match->id,
+                        'match_label'     => $matchLabel,
+                        'league'          => $match->league->name ?? 'Ligue',
+                        'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                        'selection'       => 'BTTS_' . strtoupper($key),
+                        'selection_label' => $label,
+                        'market_group'    => 'BTTS',
+                        'model_prob'      => round($p, 4),
+                        'model_prob_pct'  => round($p * 100, 1),
+                        'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                        'odds'            => round($o, 2),
+                        'odds_source'     => $bOdd->bookmaker->name ?? 'Pinnacle',
+                        'odds_updated_at' => $bOdd->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                        'fair_odds'       => round(1.0 / max(0.01, $p), 2),
+                        'ev_pct'          => round((($p * $o) - 1.0) * 100, 2),
+                        'price_basis'     => 'bookmaker',
+                    ];
+                }
             }
         }
 
@@ -189,12 +350,36 @@ class ParlayService
 
         $createdParlays = collect();
 
-        // 3. Génération du Combiné Modéré (2 sélections aux probabilités les plus élevées)
-        $moderateCandidates = collect($candidates)
-            ->sortByDesc('model_prob')
-            ->take(2)
-            ->values()
-            ->all();
+        // Helper pour garantir qu'aucune sélection ne provient du même match
+        $pickDistinctMatches = function (array $pool, int $count, callable $sortFn, int $maxPerMarket = 2): array {
+            $sorted = collect($pool)->sort($sortFn)->values();
+            $chosen = [];
+            $usedMatches = [];
+            $usedGroups = [];
+            foreach ($sorted as $cand) {
+                if (in_array($cand['match_id'], $usedMatches, true)) {
+                    continue;
+                }
+                $group = $cand['market_group'] ?? 'autre';
+                if (($usedGroups[$group] ?? 0) >= $maxPerMarket) {
+                    continue;
+                }
+                $chosen[] = $cand;
+                $usedMatches[] = $cand['match_id'];
+                $usedGroups[$group] = ($usedGroups[$group] ?? 0) + 1;
+                if (count($chosen) >= $count) {
+                    break;
+                }
+            }
+            return $chosen;
+        };
+
+        // 1. COMBINÉ SÉCURITÉ & CONFIANCE (MODERE, 2 sélections à très forte probabilité >= 60%)
+        $moderatePool = collect($candidates)->where('model_prob', '>=', 0.60)->all();
+        if (count($moderatePool) < 2) {
+            $moderatePool = collect($candidates)->where('model_prob', '>=', 0.50)->all();
+        }
+        $moderateCandidates = $pickDistinctMatches($moderatePool, 2, fn ($a, $b) => $b['model_prob'] <=> $a['model_prob']);
 
         if (count($moderateCandidates) >= 2) {
             $createdParlays->push($this->createParlayRecord(
@@ -205,14 +390,18 @@ class ParlayService
             ));
         }
 
-        // 4. Génération du Combiné Équilibré (3 sélections avec bon compromis proba/valeur)
-        if (count($candidates) >= 3) {
-            $balancedCandidates = collect($candidates)
-                ->sortByDesc(fn ($c) => $c['model_prob'] * 0.7 + max(0, $c['ev_pct']) * 0.01)
-                ->take(3)
-                ->values()
-                ->all();
+        // 2. COMBINÉ ÉQUILIBRÉ VALEUR (EQUILIBRE, 3 sélections avec forte espérance mathématique +EV)
+        $balancedPool = collect($candidates)
+            ->where('model_prob', '>=', 0.40)
+            ->where('odds', '>=', 1.40)
+            ->where('odds', '<=', 3.50)
+            ->all();
+        if (count($balancedPool) < 3) {
+            $balancedPool = $candidates;
+        }
+        $balancedCandidates = $pickDistinctMatches($balancedPool, 3, fn ($a, $b) => ($b['ev_pct'] * 0.6 + $b['model_prob_pct'] * 0.4) <=> ($a['ev_pct'] * 0.6 + $a['model_prob_pct'] * 0.4));
 
+        if (count($balancedCandidates) >= 3) {
             $createdParlays->push($this->createParlayRecord(
                 'Combiné Équilibré Valeur (3 Sélections)',
                 $targetDate,
@@ -221,14 +410,29 @@ class ParlayService
             ));
         }
 
-        // 5. Génération du Combiné Audacieux (3 à 4 sélections à cote dynamique)
-        if (count($candidates) >= 4) {
-            $audaciousCandidates = collect($candidates)
-                ->sortByDesc('odds')
-                ->take(3)
-                ->values()
+        // 3. COMBINÉ AUDACIEUX RENDEMENT (AUDACIEUX, 3 sélections à cote dynamique)
+        // Une sélection audacieuse reste un scénario plausible : probabilité
+        // encadrée et écart modèle/marché borné pour écarter les cotes
+        // incohérentes (données mal appariées) ou les quasi-impossibles.
+        $audaciousPool = collect($candidates)
+            ->where('model_prob', '>=', 0.28)
+            ->where('model_prob', '<=', 0.55)
+            ->where('odds', '>=', 1.70)
+            ->where('odds', '<=', 4.50)
+            ->where('ev_pct', '>=', -10)
+            ->where('ev_pct', '<=', 35)
+            ->all();
+        if (count($audaciousPool) < 3) {
+            $audaciousPool = collect($candidates)
+                ->where('model_prob', '>=', 0.25)
+                ->where('model_prob', '<=', 0.55)
+                ->where('odds', '>=', 1.60)
+                ->where('odds', '<=', 4.50)
                 ->all();
+        }
+        $audaciousCandidates = $pickDistinctMatches($audaciousPool, 3, fn ($a, $b) => ($b['odds'] * 0.4 + $b['ev_pct'] * 0.6) <=> ($a['odds'] * 0.4 + $a['ev_pct'] * 0.6));
 
+        if (count($audaciousCandidates) >= 3) {
             $createdParlays->push($this->createParlayRecord(
                 'Combiné Audacieux Rendement (3 Sélections)',
                 $targetDate,
@@ -237,9 +441,7 @@ class ParlayService
             ));
         }
 
-        return $createdParlays->merge(
-            $this->createModelMarketParlays($modelCandidates, $targetDate)
-        );
+        return $createdParlays;
     }
 
     /**
@@ -261,6 +463,25 @@ class ParlayService
             ->take(12)
             ->get();
 
+        if ($matches->count() < 2) {
+            $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction.modelVersion'])
+                ->whereIn('status', ['SCHEDULED', 'TIMED'])
+                ->where('match_date_utc', '>=', Carbon::now()->utc())
+                ->whereBetween('match_date_utc', [
+                    $targetDate->copy()->startOfDay()->utc(),
+                    $targetDate->copy()->addDays(10)->endOfDay()->utc(),
+                ])
+                ->whereHas('officialPrediction', fn ($query) => $query
+                    ->where('is_official', true)
+                    ->when(
+                        ! (bool) config('services.prediction.allow_limited_data', true),
+                        fn ($sub) => $sub->where('is_abstained', false)
+                    ))
+                ->orderBy('match_date_utc')
+                ->take(16)
+                ->get();
+        }
+
         $modelCandidates = $matches->flatMap(
             fn (FootballMatch $match): array => $match->officialPrediction
                 ? $this->buildModelMarketCandidates($match, $match->officialPrediction)
@@ -276,10 +497,14 @@ class ParlayService
     private function buildModelMarketCandidates(FootballMatch $match, Prediction $prediction): array
     {
         $isAiEstimate = $prediction->prediction_origin === 'AI_ESTIMATE';
+        $allowLimited = (bool) config('services.prediction.allow_limited_data', true);
+        $allowedTiers = $allowLimited ? ['low', 'medium', 'high'] : ['medium', 'high'];
+        $minQuality   = $allowLimited ? 30 : 70;
+
         if ($prediction->is_abstained
             || ($isAiEstimate && ! (bool) config('services.hybrid_prediction.allow_ai_in_parlays', true))
-            || (! $isAiEstimate && ! in_array($prediction->confidence_tier, ['medium', 'high'], true))
-            || (! $isAiEstimate && (float) $prediction->quality_score < 70)
+            || (! $isAiEstimate && ! in_array($prediction->confidence_tier, $allowedTiers, true))
+            || (! $isAiEstimate && (float) $prediction->quality_score < $minQuality)
             || ($isAiEstimate && ! $prediction->published_market)
             || (float) $prediction->home_lambda <= 0
             || (float) $prediction->away_lambda <= 0
@@ -300,13 +525,15 @@ class ParlayService
                 || $warning === 'market_backed_prediction_with_limited_team_history'
         );
         $markets = $prediction->derived_markets_json ?? [];
-        $home = $match->homeTeam->short_name;
-        $away = $match->awayTeam->short_name;
+        $home = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
+        $away = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
         $options = [];
 
         $add = function (string $key, string $label, string $market, $probability) use (
             &$options,
             $match,
+            $home,
+            $away,
             $prediction,
             $limitedTeamHistory,
             $isAiEstimate
@@ -323,7 +550,7 @@ class ParlayService
             $fairOdds = round(1.0 / $probability, 2);
             $options[] = [
                 'match_id' => $match->id,
-                'match_label' => "{$match->homeTeam->name} vs {$match->awayTeam->name}",
+                'match_label' => "{$home} vs {$away}",
                 'league' => $match->league->name ?? 'Ligue',
                 'match_date_utc' => $match->match_date_utc->toIso8601String(),
                 'selection' => 'MODEL_'.$key,
@@ -353,7 +580,25 @@ class ParlayService
             ]))->first(fn (array $candidate): bool => $candidate['market'] === $prediction->published_market
                 && $candidate['selection'] === $prediction->published_selection);
             if (! $published) return [];
-            $add($published['selection'], $published['label'], $published['market'], $published['probability']);
+
+            $label = $published['label'];
+            if ($published['market'] === '1N2') {
+                $label = match ($published['selection']) {
+                    'home' => "Victoire {$home}",
+                    'away' => "Victoire {$away}",
+                    'draw' => 'Match Nul',
+                    default => $published['label'],
+                };
+            } elseif ($published['market'] === 'double_chance') {
+                $label = match ($published['selection']) {
+                    '1X' => "{$home} ou Nul",
+                    'X2' => "Nul ou {$away}",
+                    '12' => "Pas de nul",
+                    default => $published['label'],
+                };
+            }
+
+            $add($published['selection'], $label, $published['market'], $published['probability']);
             return $options;
         }
 
@@ -604,5 +849,73 @@ class ParlayService
             'ai_model_used'   => $aiResult['model'] ?? 'deterministic_template',
             'status'          => 'PENDING',
         ]);
+    }
+
+    /**
+     * Écarte les sélections où le modèle et le marché sont en contradiction
+     * flagrante (ex. 76 % face à une cote de 2,44 → 41 % implicite) : un tel
+     * écart signale une donnée de match mal appariée, pas une valeur exploitable.
+     */
+    private function modelAgreesWithMarket(float $modelProbability, float $decimalOdds): bool
+    {
+        if ($decimalOdds <= 1.0) {
+            return false;
+        }
+
+        $implied = 1.0 / $decimalOdds;
+
+        return abs($modelProbability - $implied) <= 0.22;
+    }
+
+    /**
+     * Retourne les cotes d'un match pour un marché donné, la source la plus
+     * fiable (The Odds API) et la plus récente d'abord.
+     */
+    private function oddsFor(FootballMatch $match, string $code): Collection
+    {
+        $marketId = $this->marketId($code);
+        if ($marketId === null) {
+            return collect();
+        }
+
+        return ($match->oddsSnapshots ?? collect())
+            ->where('market_id', $marketId)
+            ->sortByDesc(fn ($odd) => ($odd->source === 'the-odds-api' ? 1e10 : 0) + ($odd->snapshot_time_utc?->timestamp ?? 0))
+            ->values();
+    }
+
+    private function marketId(string $code): ?int
+    {
+        if (! array_key_exists($code, $this->marketIdCache)) {
+            $this->marketIdCache[$code] = \App\Models\Market::where('code', $code)->value('id');
+        }
+
+        return $this->marketIdCache[$code];
+    }
+
+    /**
+     * Convertit une ligne de handicap côté domicile en clé du modèle
+     * (`-0.5` → `m0_5`, `0` → `0_0`, `+0.5` → `0_5`).
+     */
+    private function handicapKey(float $line): string
+    {
+        $body = str_replace('.', '_', (string) abs($line));
+        if (! str_contains($body, '_')) {
+            $body .= '_0';
+        }
+
+        return $line < 0 ? 'm' . $body : $body;
+    }
+
+    /**
+     * Nettoie et formate les noms d'équipes sans couper les mots.
+     */
+    public function displayTeamName(?string $name): string
+    {
+        if (! $name) return '';
+        // Supprime les acronymes ou suffixes génériques qui polluent sans couper les mots
+        $cleaned = preg_replace('/\b(FC|CF|SSC|AC|US|SV\s*07|1\.\s*FSV|1\.\s*FC)\b/i', '', $name);
+        $cleaned = trim(preg_replace('/\s+/', ' ', $cleaned));
+        return $cleaned ?: $name;
     }
 }

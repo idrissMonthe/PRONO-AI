@@ -108,6 +108,9 @@ class GeminiController extends Controller
             'prob_draw' => ['nullable', 'numeric', 'between:0,1'],
             'prob_away' => ['nullable', 'numeric', 'between:0,1'],
             'quality_score' => ['nullable', 'numeric', 'between:0,100'],
+            'top_scores' => ['nullable', 'array', 'max:50'],
+            'top_scores.*.score' => ['required_with:top_scores', 'string', 'max:10'],
+            'top_scores.*.p' => ['required_with:top_scores', 'numeric', 'between:0,1'],
         ]);
 
         if ($request->has('context') && strlen((string) json_encode($data['context'])) > 20000) {
@@ -148,7 +151,7 @@ class GeminiController extends Controller
                     'draw' => ['p' => (float)($data['prob_draw'] ?? 0.27)],
                     'away' => ['p' => (float)($data['prob_away'] ?? 0.27)],
                 ],
-                'top_scores' => $request->input('top_scores', [['score' => '1-1', 'p' => 0.12]]),
+                'top_scores' => $data['top_scores'] ?? [['score' => '1-1', 'p' => 0.12]],
                 'quality' => ['score' => (float)($data['quality_score'] ?? 90.0)],
             ];
         }

@@ -15,7 +15,7 @@ class GeminiExplanationService
     public function __construct()
     {
         $this->apiKey = config('services.gemini.api_key', env('GEMINI_API_KEY'));
-        $this->model = config('services.gemini.model', env('GEMINI_MODEL', 'gemini-2.5-flash'));
+        $this->model = config('services.gemini.model', env('GEMINI_MODEL', 'gemini-flash-lite-latest'));
     }
 
     public function getApiKey(): ?string
@@ -25,7 +25,7 @@ class GeminiExplanationService
 
     public function getModel(): string
     {
-        return config('services.gemini.model') ?: ($this->model ?: env('GEMINI_MODEL', 'gemini-2.5-flash'));
+        return config('services.gemini.model') ?: ($this->model ?: env('GEMINI_MODEL', 'gemini-flash-lite-latest'));
     }
 
     public function isConfigured(): bool
@@ -78,7 +78,7 @@ class GeminiExplanationService
             'allowed_markets' => $allowedMarkets,
         ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
         $contextHash = hash('sha256', json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-        $modelsToTry = array_unique([$this->getModel(), 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+        $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -91,7 +91,8 @@ class GeminiExplanationService
                             'temperature' => 0.1,
                             'maxOutputTokens' => 700,
                             'responseMimeType' => 'application/json',
-                            'thinkingConfig' => ['thinkingBudget' => 0],
+                            // Pas de thinkingConfig : thinkingBudget=0 est rejeté
+                            // (400 INVALID_ARGUMENT) par les modèles actuels.
                         ],
                     ]);
 
@@ -195,7 +196,7 @@ class GeminiExplanationService
         $model = $this->getModel();
 
         // Modèles candidats en cascade en cas de saturation temporaire (503)
-        $modelsToTry = array_unique([$model, 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+        $modelsToTry = array_unique([$model, 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -223,9 +224,6 @@ class GeminiExplanationService
                         'generationConfig' => [
                             'temperature' => 0.2, // Faible température pour précision factuelle
                             'maxOutputTokens' => 800,
-                            'thinkingConfig' => [
-                                'thinkingBudget' => 0, // Réponse directe et instantanée
-                            ],
                         ]
                     ]);
 
@@ -438,17 +436,29 @@ class GeminiExplanationService
         if (! $this->isConfigured()) return $fallback;
 
         $systemInstruction = implode("\n", [
-            "Tu es un réviseur critique de pronostics football.",
+            "Tu es un expert analyste et réviseur critique de pronostics football pour un outil d'aide aux parieurs.",
             "Tu ne calcules aucune probabilité et tu n'en inventes jamais.",
             "Tu peux uniquement choisir une candidate_key présente dans candidates.",
-            "Réponds uniquement avec un objet JSON valide.",
-            "Champs : decision (keep|replace|reject|insufficient_data), candidate_key (clé existante ou null), reasoning, supporting_factors (tableau), risk_factors (tableau), required_recalculation (booléen), confidence_in_revision (low|medium|high).",
-            "Si aucune candidate ne convient, utilise reject ou insufficient_data.",
+            "RÈGLES CRUCIALES DE SÉLECTION (Inspirées de bookmakers type 1xBet / Pinnacle) :",
+            "1. COTE MINIMALE UTILE : Ne JAMAIS choisir une candidate dont la cote est inférieure à 1.25 (ex: -5,5 buts ou +0,5 buts à 1.03, ou favori écrasant à 1.12), car ces cotes n'ont aucune valeur financière sur un ticket de pari.",
+            "2. DIVERSITÉ DES MARCHÉS : La double chance ne doit pas être choisie par défaut. Si la sélection initiale est une double chance, préfère une alternative de fiabilité comparable parmi BTTS, totaux de buts, handicap ou 1N2. Ne retiens la double chance que si aucun autre marché n'atteint une probabilité proche.",
+            "3. RECHERCHE D'ALTERNATIVE RENTABLE ET SÛRE : Si la sélection initiale a une cote trop faible (< 1.25) ou présente un rapport risque/gain insuffisant, cherche parmi les candidates une ALTERNATIVE FIABLE avec une cote abordable (idéalement 1.30 à 1.85) tout en conservant une forte probabilité statistique.",
+            "4. Si la sélection initiale est solide, a une cote >= 1.25, n'est pas une double chance et présente le meilleur équilibre sécurité/cote, conserve-la avec decision=keep.",
+            "5. Si tu remplaces la sélection par une alternative plus rentable, plus diversifiée et tout aussi fiable, utilise decision=replace et spécifie la candidate_key.",
+            "Réponds UNIQUEMENT avec un objet JSON valide.",
+            "Champs : decision (keep|replace|reject|insufficient_data), candidate_key (clé existante ou null), reasoning (ton explication claire en français de l'arbitrage cote / fiabilité), supporting_factors (tableau), risk_factors (tableau), required_recalculation (booléen), confidence_in_revision (low|medium|high).",
         ]);
-        $prompt = "Données réelles du moteur Python :\n".json_encode($context, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)."\n\nExamine la sélection initiale de façon critique et ne choisis qu'une candidate existante.";
+
+        $prompt = "DOCUMENT STATISTIQUE DU MATCH (Source de vérité) :\n"
+            . "Rencontre : " . ($context['home_team'] ?? 'Domicile') . " vs " . ($context['away_team'] ?? 'Extérieur') . "\n"
+            . "Espérance de buts (xG Dixon-Coles) : Domicile = " . ($context['python_result']['expected_goals']['home'] ?? 'N/A') . ", Extérieur = " . ($context['python_result']['expected_goals']['away'] ?? 'N/A') . "\n"
+            . "Sélection initiale proposée : " . json_encode($context['initial_candidate'] ?? [], JSON_UNESCAPED_UNICODE) . "\n\n"
+            . "CANDIDATES DISPONIBLES (avec probabilités calculées et cotes réelles) :\n"
+            . json_encode($context['candidates'] ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n\n"
+            . "Consigne : Analyse la sélection initiale et ses alternatives. Si la cote initiale est trop faible (< 1.25) ou manque de valeur, sélectionne une alternative fiable avec une cote plus abordable (1.30 - 1.85) et solide selon les xG. Justifie ton choix dans 'reasoning'.";
         $contextHash = hash('sha256', json_encode($context));
         $apiKey = $this->getApiKey();
-        $modelsToTry = array_unique([$this->getModel(), 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+        $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -461,7 +471,6 @@ class GeminiExplanationService
                             'temperature' => 0.1,
                             'maxOutputTokens' => 600,
                             'responseMimeType' => 'application/json',
-                            'thinkingConfig' => ['thinkingBudget' => 0],
                         ],
                     ]);
 
@@ -547,7 +556,7 @@ class GeminiExplanationService
 
         $apiKey = $this->getApiKey();
         $model = $this->getModel();
-        $modelsToTry = array_unique([$model, 'gemini-2.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash-lite']);
+        $modelsToTry = array_unique([$model, 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -568,7 +577,6 @@ class GeminiExplanationService
                         'generationConfig' => [
                             'temperature' => 0.2,
                             'maxOutputTokens' => 600,
-                            'thinkingConfig' => ['thinkingBudget' => 0],
                         ],
                     ]);
 

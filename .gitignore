@@ -19,6 +19,11 @@
 /storage/*.key
 /storage/pail
 /vendor
+
+# Dumps et sauvegardes de base : jamais dans Git (données personnelles)
+*.sql
+*.sql.gz
+/docker/mysql-init/*.sql
 Homestead.json
 Homestead.yaml
 Thumbs.db

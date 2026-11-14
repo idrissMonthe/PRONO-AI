@@ -14,6 +14,9 @@ class GeminiControllerTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        // Les écritures API exigent le jeton partagé.
+        config()->set('services.api.token', 'test-api-token');
+        $this->withHeader('X-API-Token', 'test-api-token');
         $this->seed(DatabaseSeeder::class);
         $this->seed(SampleMatchesSeeder::class);
     }

@@ -39,7 +39,9 @@ from app.schemas import (
 from app.core.poisson_regressor import MatchData
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-MODEL_STATE_PATH = Path(os.getenv("MODEL_STATE_PATH", "/app/data/dixon_coles_model.json"))
+_DEFAULT_MODEL_STATE = Path(__file__).resolve().parents[1] / "data" / "dixon_coles_model.json"
+MODEL_STATE_PATH = Path(os.getenv("MODEL_STATE_PATH", str(_DEFAULT_MODEL_STATE) if _DEFAULT_MODEL_STATE.exists() else "/app/data/dixon_coles_model.json"))
+
 MODEL_VERSION = "M3_MARKET_SPECIALISTS_v6"
 CALIBRATION_VERSION = "calib_v8_shrunk_team_lambdas"
 MIN_OFFICIAL_QUALITY_SCORE = 82.0
@@ -60,7 +62,15 @@ app = FastAPI(
 # CORS restrictive to local origin only (CDC 15.4)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=[
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8001",
+        "http://localhost:8001",
+        "http://web",
+        "http://web:80",
+        "http://web:8000",
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],

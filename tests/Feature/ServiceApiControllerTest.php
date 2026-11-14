@@ -11,6 +11,14 @@ use Tests\TestCase;
 
 class ServiceApiControllerTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Les écritures API exigent le jeton partagé.
+        config()->set('services.api.token', 'test-api-token');
+        $this->withHeader('X-API-Token', 'test-api-token');
+    }
+
     public function test_prediction_endpoint_validates_and_forwards_the_request(): void
     {
         $client = Mockery::mock(PredictionClient::class);

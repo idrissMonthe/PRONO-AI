@@ -22,8 +22,8 @@ Route::prefix('matches')->name('matches.')->group(function () {
     Route::get('/', [MatchController::class, 'index'])->name('index');
     Route::get('/{id}/modal-data', [MatchController::class, 'modalData'])->name('modal-data');
     Route::get('/{id}', [MatchController::class, 'show'])->name('show');
-    Route::post('/{id}/ask', [MatchController::class, 'askAssistant'])->name('ask');
-    Route::post('/{id}/whatif', [MatchController::class, 'simulateWhatIf'])->name('whatif');
+    Route::post('/{id}/ask', [MatchController::class, 'askAssistant'])->middleware('throttle:ai')->name('ask');
+    Route::post('/{id}/whatif', [MatchController::class, 'simulateWhatIf'])->middleware('throttle:heavy')->name('whatif');
 });
 
 // 3. Team Comparator
@@ -34,28 +34,28 @@ Route::prefix('comparator')->name('comparator.')->group(function () {
 // 4. Odds & Markets (v2.0)
 Route::prefix('odds')->name('odds.')->group(function () {
     Route::get('/', [OddsMarketController::class, 'index'])->name('index');
-    Route::post('/paper-bet', [OddsMarketController::class, 'recordPaperBet'])->name('paper-bet');
+    Route::post('/paper-bet', [OddsMarketController::class, 'recordPaperBet'])->middleware('throttle:writes')->name('paper-bet');
 });
 
 // 5. Combinés & Parlays Probabilistes (Section 9 & 28)
 Route::prefix('parlays')->name('parlays.')->group(function () {
     Route::get('/', [ParlayController::class, 'index'])->name('index');
-    Route::post('/generate', [ParlayController::class, 'generate'])->name('generate');
+    Route::post('/generate', [ParlayController::class, 'generate'])->middleware('throttle:heavy')->name('generate');
     Route::get('/{id}', [ParlayController::class, 'show'])->name('show');
 });
 
 // 6. Evaluation Laboratory & Model Registry
 Route::prefix('laboratory')->name('laboratory.')->group(function () {
     Route::get('/', [LaboratoryController::class, 'index'])->name('index');
-    Route::post('/run-backtest', [LaboratoryController::class, 'runBacktest'])->name('run-backtest');
-    Route::post('/promote', [LaboratoryController::class, 'promoteModel'])->name('promote');
+    Route::post('/run-backtest', [LaboratoryController::class, 'runBacktest'])->middleware('throttle:heavy')->name('run-backtest');
+    Route::post('/promote', [LaboratoryController::class, 'promoteModel'])->middleware('throttle:writes')->name('promote');
 });
 
 // 6. Data Management & Entity Resolution
 Route::prefix('data')->name('data.')->group(function () {
     Route::get('/', [DataManagementController::class, 'index'])->name('index');
-    Route::post('/add-alias', [DataManagementController::class, 'addAlias'])->name('add-alias');
-    Route::post('/sync-api', [DataManagementController::class, 'syncApi'])->name('sync-api');
+    Route::post('/add-alias', [DataManagementController::class, 'addAlias'])->middleware('throttle:writes')->name('add-alias');
+    Route::post('/sync-api', [DataManagementController::class, 'syncApi'])->middleware('throttle:heavy')->name('sync-api');
 });
 
 // 7. Settings & Diagnostic Center
@@ -68,8 +68,8 @@ Route::prefix('settings')->name('settings.')->group(function () {
 // 8. Assistant IA Gemini (Appels Web & Diagnostics)
 Route::prefix('gemini')->name('gemini.')->group(function () {
     Route::get('/status', [GeminiController::class, 'status'])->name('status');
-    Route::post('/test', [GeminiController::class, 'testConnection'])->name('test');
-    Route::post('/explain', [GeminiController::class, 'explain'])->name('explain');
-    Route::post('/ask', [GeminiController::class, 'ask'])->name('ask');
+    Route::post('/test', [GeminiController::class, 'testConnection'])->middleware('throttle:heavy')->name('test');
+    Route::post('/explain', [GeminiController::class, 'explain'])->middleware('throttle:ai')->name('explain');
+    Route::post('/ask', [GeminiController::class, 'ask'])->middleware('throttle:ai')->name('ask');
     Route::get('/history', [GeminiController::class, 'history'])->name('history');
 });

@@ -181,10 +181,6 @@
                                     <span class="text-[#A2ACA3]">Les 2 Marquent</span>
                                     <strong id="market-btts-yes" class="text-[#88B69A]">--%</strong>
                                 </div>
-                                <div class="p-2.5 rounded bg-[#101513] border border-[#303A32]/50 flex justify-between items-center mono">
-                                    <span class="text-[#A2ACA3]">DNB (Remboursé Nul)</span>
-                                    <strong id="market-dnb-home" class="text-[#F0F0E8]">--%</strong>
-                                </div>
                             </div>
                         </div>
 
@@ -518,8 +514,6 @@
         document.getElementById('market-over-25').innerText = totals.over_2_5 ? Math.round(totals.over_2_5 * 100) + '%' : '52%';
         document.getElementById('market-under-25').innerText = totals.under_2_5 ? Math.round(totals.under_2_5 * 100) + '%' : '48%';
         document.getElementById('market-btts-yes').innerText = btts.yes ? Math.round(btts.yes * 100) + '%' : '54%';
-        const pDnb = pDraw < 0.99 ? Math.round((pHome / (1 - pDraw)) * 100) : 50;
-        document.getElementById('market-dnb-home').innerText = pDnb + '%';
 
         // Top Scores
         const topScoresList = document.getElementById('modal-top-scores-list');

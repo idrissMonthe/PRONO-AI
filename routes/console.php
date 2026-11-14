@@ -67,7 +67,10 @@ Schedule::command(SyncLiveScoresCommand::class)
 
 // API-Football : une requête live globale toutes les 30 minutes pour rester
 // sous le quota gratuit de 100 requêtes/jour.
-Schedule::command(SyncApiFootballCommand::class, ['--live' => true])
+// Option booléenne : passer un tableau associatif produisait `--live=1`,
+// que Symfony refuse (l'option n'accepte aucune valeur) → échec toutes les
+// 30 minutes. Un paramètre positionnel transmet bien le drapeau seul.
+Schedule::command(SyncApiFootballCommand::class, ['--live'])
     ->everyThirtyMinutes()
     ->timezone('Africa/Douala')
     ->withoutOverlapping(20)

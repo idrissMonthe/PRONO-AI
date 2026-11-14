@@ -10,13 +10,14 @@ use App\Services\AIExplanation\GeminiExplanationService;
  */
 class PredictionRevisionService
 {
-    public const POLICY_VERSION = 'hybrid_revision_v2';
+    public const POLICY_VERSION = 'hybrid_revision_v3';
 
     public function __construct(private readonly GeminiExplanationService $geminiService) {}
 
     public function review(array $result, array $context): array
     {
-        $candidates = $this->candidatesFromResult($result);
+        $oddsContext = $context['odds_context'] ?? [];
+        $candidates = $this->candidatesFromResult($result, $oddsContext);
         $initial = $this->initialCandidate($candidates);
         $quality = (float) ($context['quality_score'] ?? 0);
         $hybridMode = strtoupper((string) config('services.hybrid_prediction.mode', 'ASSISTED'));
@@ -86,7 +87,24 @@ class PredictionRevisionService
                 $candidate = $initial;
             }
             if (in_array($aiReview['decision'] ?? null, ['keep', 'replace'], true) && $candidate) {
-                return $this->aiDecision($aiReview, $initial, $candidate, $candidates);
+                $decision = $this->aiDecision($aiReview, $initial, $candidate, $candidates);
+
+                // Même validée par l'IA, la sélection initiale peut céder la
+                // place à un marché tournant fiable disposant d'une vraie cote.
+                if (($aiReview['decision'] ?? null) === 'keep') {
+                    $rotated = $this->rotationOverride($initial, $candidates, $context);
+                    if ($rotated) {
+                        $decision['decision'] = 'replace';
+                        $decision['final_candidate'] = $rotated;
+                        $decision['reasoning'] = trim(($decision['reasoning'] ?? '') . ' Rotation des marchés vers ' . $rotated['label'] . ' (cote bookmaker réelle).');
+                        $decision['risk_factors'] = array_values(array_unique(array_merge(
+                            $decision['risk_factors'] ?? [],
+                            ['market_rotation']
+                        )));
+                    }
+                }
+
+                return $decision;
             }
             if (in_array($aiReview['decision'] ?? null, ['reject', 'insufficient_data'], true)) {
                 if ($allowLimitedData) {
@@ -108,29 +126,80 @@ class PredictionRevisionService
             }
         }
 
+        $initialOdds = (float) ($initial['odds'] ?? 1.30);
+        $initialProb = (float) ($initial['probability'] ?? 0.50);
+        $initialTooLow = $initialOdds < 1.25;
+
         $alternatives = collect($candidates)
             ->reject(fn (array $candidate): bool => $candidate['candidate_key'] === $initial['candidate_key'])
-            ->filter(fn (array $candidate): bool => $candidate['probability'] >= 0.55)
+            ->filter(fn (array $candidate): bool => (float) ($candidate['probability'] ?? 0) >= 0.52)
             ->map(function (array $candidate) use ($context): array {
-                $marketBonus = in_array($candidate['market'], ['double_chance', 'totals', 'btts'], true) ? 0.02 : 0.0;
+                $prob = (float) $candidate['probability'];
+                $odds = (float) ($candidate['odds'] ?? 1.40);
+
+                // Diversification : on ne privilégie plus la double chance,
+                // qui écrasait tous les autres marchés à fiabilité comparable.
+                $marketBonus = $this->marketDiversityBonus((string) $candidate['market']);
+
                 $valueBonus = 0.0;
                 if (isset($context['market_probabilities'][$candidate['selection']]) && is_numeric($context['market_probabilities'][$candidate['selection']])) {
-                    $valueBonus = max(0.0, $candidate['probability'] - (float) $context['market_probabilities'][$candidate['selection']]) * 0.15;
+                    $valueBonus = max(0.0, $prob - (float) $context['market_probabilities'][$candidate['selection']]) * 0.15;
                 }
-                $candidate['review_score'] = $candidate['probability'] * 0.82 + $marketBonus + $valueBonus;
+
+                $candidate['review_score'] = $prob * 0.75 + $marketBonus + $valueBonus;
                 return $candidate;
             })
             ->sortByDesc('review_score')
             ->values();
         $bestAlternative = $alternatives->first();
 
-        if ($bestAlternative && $bestAlternative['review_score'] >= ($initial['probability'] * 0.82 + 0.055)) {
+        $initialScore = ($initialProb * 0.75) + $this->marketDiversityBonus((string) ($initial['market'] ?? ''));
+        $threshold = $initialTooLow ? 0.0 : 0.075;
+
+        // La double chance reste un repli, pas une sélection par défaut :
+        // dès qu'un autre marché offre une fiabilité proche, on le préfère.
+        if (($initial['market'] ?? null) === 'double_chance') {
+            $diverse = $alternatives->first(fn (array $candidate): bool => ($candidate['market'] ?? '') !== 'double_chance'
+                && (float) $candidate['probability'] >= max(0.52, $initialProb - 0.12));
+            if ($diverse) {
+                return $this->decision(
+                    'replace',
+                    $initial,
+                    $diverse,
+                    "La double chance était la sélection initiale ; le marché {$diverse['label']} offre une fiabilité équivalente avec une couverture de marchés plus variée.",
+                    ['market_diversification', 'comparable_reliability'],
+                    $candidates,
+                    'medium'
+                );
+            }
+        }
+
+        // Rotation de marché : à fiabilité proche, on préfère le marché tournant
+        // dès lors qu'il dispose d'une cote bookmaker réelle.
+        $rotated = $this->rotationOverride($initial, $candidates, $context);
+        if ($rotated) {
+            return $this->decision(
+                'replace',
+                $initial,
+                $rotated,
+                "Rotation des marchés : {$rotated['label']} offre une fiabilité proche de la sélection initiale avec une cote bookmaker réelle.",
+                ['market_rotation', 'comparable_reliability'],
+                $candidates,
+                'medium'
+            );
+        }
+
+        if ($bestAlternative && ($initialTooLow || $bestAlternative['review_score'] >= ($initialScore + $threshold))) {
+            $reason = $initialTooLow
+                ? "La sélection initiale présentait une cote bookmaker trop faible ({$initialOdds}) sans intérêt de coupon. L’alternative {$bestAlternative['label']} offre une cote abordable ({$bestAlternative['odds']}) avec une solidité statistique validée."
+                : 'Le marché alternatif calculé présente un meilleur compromis sécurité / cote selon les données disponibles.';
+
             return $this->decision(
                 'replace',
                 $initial,
                 $bestAlternative,
-                'Le marché alternatif calculé présente un meilleur compromis probabiliste selon les données disponibles.',
-                ['higher_validated_market_score'],
+                $reason,
+                ['higher_validated_market_score', $initialTooLow ? 'initial_odds_unbettable' : 'better_value_alternative'],
                 $candidates,
                 'medium'
             );
@@ -155,14 +224,45 @@ class PredictionRevisionService
         return $this->decision('keep', $initial, $initial, 'La sélection initiale reste la meilleure candidate validée.', ['initial_candidate_remains_best'], $candidates);
     }
 
-    public function candidatesFromResult(array $result): array
+    public function candidatesFromResult(array $result, array $oddsContext = []): array
     {
         $markets = $result['markets'] ?? [];
         $candidates = [];
-        $add = function (string $market, string $selection, string $label, $probability, ?float $line = null) use (&$candidates): void {
+        $add = function (string $market, string $selection, string $label, $probability, ?float $line = null, ?float $odds = null) use (&$candidates): void {
             if (! is_numeric($probability)) return;
             $probability = (float) $probability;
             if ($probability <= 0 || $probability >= 1) return;
+
+            // Exclusion stricte des lignes absurdes / sans valeur (ex: -5.5 buts à 95%, +0.5 buts à 94%)
+            if ($market === 'totals') {
+                if (in_array($selection, ['over_0_5', 'under_0_5', 'over_5_5', 'under_5_5', 'under_4_5'], true)) {
+                    return;
+                }
+            }
+
+            // Cote réelle si fournie, sinon estimation explicite (marquée
+            // comme telle : elle ne sera jamais affichée comme un prix bookmaker).
+            $isBookmakerOdds = $odds !== null && $odds > 1.01;
+            if (! $isBookmakerOdds) {
+                // Marge bookmaker de ~6% : cote décimale = (1 / prob) * 0.94
+                $odds = round(max(1.02, (1.0 / $probability) * 0.94), 2);
+            } else {
+                $odds = round($odds, 2);
+            }
+
+            // Pour le 1N2, on conserve l'issue pour identifier la sélection naturelle initiale.
+            // Pour tous les autres marchés alternatifs, les cotes < 1.18 n'ont aucune utilité de coupon.
+            if ($market !== '1N2' && $odds < 1.18) {
+                return;
+            }
+
+            // Garde-fou : quand le modèle et le bookmaker divergent fortement
+            // (ex. 91 % face à une cote de 2,04), la sélection est écartée
+            // plutôt que publiée comme une certitude.
+            if ($isBookmakerOdds && abs($probability - (1.0 / $odds)) > 0.22) {
+                return;
+            }
+
             $candidates[] = [
                 'candidate_key' => $market.':'.$selection.($line !== null ? ':'.$line : ''),
                 'market' => $market,
@@ -170,19 +270,172 @@ class PredictionRevisionService
                 'label' => $label,
                 'line' => $line,
                 'probability' => round($probability, 4),
+                'odds' => $odds,
+                'odds_source' => $isBookmakerOdds ? 'bookmaker' : 'estimated',
+                'expected_value' => round(($probability * $odds) - 1.0, 4),
             ];
         };
 
+        // 1N2
         foreach (['home' => 'Victoire domicile', 'draw' => 'Match nul', 'away' => 'Victoire extérieur'] as $key => $label) {
-            $add('1N2', $key, $label, $markets['1N2'][$key] ?? null);
+            $prob = $markets['1N2'][$key] ?? null;
+            $odd = $oddsContext['1N2'][$key] ?? null;
+            $add('1N2', $key, $label, $prob, null, $odd);
         }
-        foreach (($markets['double_chance'] ?? []) as $key => $probability) $add('double_chance', (string) $key, (string) $key, $probability);
+
+        // Double Chance
+        $oneN2Odds = $oddsContext['1N2'] ?? [];
+        $o1 = (float) ($oneN2Odds['home'] ?? 0);
+        $oX = (float) ($oneN2Odds['draw'] ?? 0);
+        $o2 = (float) ($oneN2Odds['away'] ?? 0);
+
+        foreach (($markets['double_chance'] ?? []) as $key => $probability) {
+            // Prix réel du bookmaker quand il existe, sinon prix dérivé du 1N2.
+            $odd = $oddsContext['double_chance'][(string) $key] ?? null;
+            if ($odd === null && $key === '1X' && $o1 > 1 && $oX > 1) {
+                $odd = 1.0 / ((1.0 / $o1) + (1.0 / $oX));
+            } elseif ($odd === null && $key === 'X2' && $oX > 1 && $o2 > 1) {
+                $odd = 1.0 / ((1.0 / $oX) + (1.0 / $o2));
+            } elseif ($odd === null && $key === '12' && $o1 > 1 && $o2 > 1) {
+                $odd = 1.0 / ((1.0 / $o1) + (1.0 / $o2));
+            }
+            $label = match ((string) $key) {
+                '1X' => 'Double chance 1X (Domicile ou Nul)',
+                'X2' => 'Double chance X2 (Nul ou Extérieur)',
+                '12' => 'Double chance 12 (Pas de nul)',
+                default => (string) $key,
+            };
+            $add('double_chance', (string) $key, $label, $probability, null, $odd);
+        }
+
+        // Totaux de buts (lignes 1.5, 2.5, 3.5 réalistes)
         foreach (($markets['totals'] ?? []) as $key => $probability) {
-            if (preg_match('/^(over|under)_(\d+)_(\d+)$/', (string) $key, $parts)) $add('totals', (string) $key, $parts[1].' '.$parts[2].','.$parts[3].' buts', $probability, (float) ($parts[2].'.'.$parts[3]));
+            if (preg_match('/^(over|under)_(\d+)_(\d+)$/', (string) $key, $parts)) {
+                $type = $parts[1];
+                $line = (float) ($parts[2].'.'.$parts[3]);
+                if (! in_array($line, [1.5, 2.5, 3.5], true)) {
+                    continue;
+                }
+                $odd = $oddsContext['totals'][(string) $line][$type] ?? null;
+                $label = ($type === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts';
+                $add('totals', (string) $key, $label, $probability, $line, $odd);
+            }
         }
-        foreach (['yes' => 'Les deux équipes marquent', 'no' => 'Au moins une équipe ne marque pas'] as $key => $label) $add('btts', $key, $label, $markets['btts'][$key] ?? null);
-        foreach (($markets['top_scores'] ?? $result['top_scores'] ?? []) as $score) $add('exact_score', (string) ($score['score'] ?? ''), 'Score exact '.($score['score'] ?? ''), $score['p'] ?? null);
+
+        $homeName = (string) ($oddsContext['home_team'] ?? 'Domicile');
+        $awayName = (string) ($oddsContext['away_team'] ?? 'Extérieur');
+
+        // Total de buts par équipe : seules les lignes cotées sont candidates.
+        foreach (($oddsContext['team_totals'] ?? []) as $key => $odd) {
+            if (! preg_match('/^(home|away)_(over|under)@(\d+(?:\.\d+)?)$/', (string) $key, $parts)) {
+                continue;
+            }
+            $side = $parts[1];
+            $direction = $parts[2];
+            $line = (float) $parts[3];
+            if (! in_array($line, [0.5, 1.5, 2.5, 3.5], true)) {
+                continue;
+            }
+            $teamKey = str_replace('.', '_', (string) $line);
+            $prob = $markets['team_totals'][$side][$direction.'_'.$teamKey] ?? null;
+            if ($prob === null) {
+                continue;
+            }
+            $team = $side === 'home' ? $homeName : $awayName;
+            $label = ($direction === 'over' ? 'Plus de ' : 'Moins de ') . str_replace('.', ',', (string) $line) . ' buts — ' . $team;
+            $add('team_totals', $side . '_' . strtoupper($direction) . '_' . $line, $label, $prob, $line, (float) $odd);
+        }
+
+        // BTTS (Les deux équipes marquent)
+        foreach (['yes' => 'Les deux équipes marquent', 'no' => 'Au moins une équipe ne marque pas'] as $key => $label) {
+            $prob = $markets['btts'][$key] ?? null;
+            $odd = $oddsContext['btts'][$key] ?? null;
+            $add('btts', $key, $label, $prob, null, $odd);
+        }
+
+        // Handicap asiatique : uniquement les lignes pour lesquelles une cote
+        // bookmaker réelle existe (aucune cote estimée sur ce marché).
+        foreach (($oddsContext['handicap'] ?? []) as $handicap) {
+            $side = $handicap['selection'] ?? null;
+            if (! in_array($side, ['HOME', 'AWAY'], true) || ! isset($handicap['line'])) {
+                continue;
+            }
+            $rawLine = (float) $handicap['line'];
+            $homeLine = $side === 'HOME' ? $rawLine : -$rawLine;
+            $entry = $markets['asian_handicap'][$this->handicapKey($homeLine)] ?? null;
+            if (! $entry) {
+                continue;
+            }
+            $sideKey = $side === 'HOME' ? 'home' : 'away';
+            $prob = (float) ($entry[$sideKey]['win'] ?? 0) + 0.5 * (float) ($entry[$sideKey]['half_win'] ?? 0);
+            $team = $side === 'HOME' ? $homeName : $awayName;
+            $lineLabel = ($rawLine > 0 ? '+' : '') . rtrim(rtrim(number_format($rawLine, 2, ',', ''), '0'), ',');
+            $add('asian_handicap', 'AH_' . $side . '_' . $rawLine, "{$team} handicap {$lineLabel}", $prob, $rawLine, (float) $handicap['odds']);
+        }
+
         return $candidates;
+    }
+
+    /**
+     * Favorise les marchés délaissés (BTTS, totaux, 1N2) sans jamais
+     * favoriser la double chance, trop facile à obtenir avec une forte
+     * probabilité et donc envahissante.
+     */
+    private function marketDiversityBonus(string $market): float
+    {
+        return match ($market) {
+            'btts' => 0.06,
+            'totals' => 0.05,
+            'asian_handicap' => 0.05,
+            'team_totals' => 0.05,
+            '1N2' => 0.03,
+            default => 0.0,
+        };
+    }
+
+    /**
+     * Choisit un marché tournant fiable, à cote bookmaker réelle, proche de
+     * la sélection initiale. Retourne null si aucun marché ne convient.
+     */
+    private function rotationOverride(array $initial, array $candidates, array $context): ?array
+    {
+        $preferredMarket = $this->rotatedMarket((string) ($context['match_id'] ?? ''));
+        if ($preferredMarket === '1N2' || $preferredMarket === ($initial['market'] ?? '')) {
+            return null;
+        }
+
+        $initialProb = (float) ($initial['probability'] ?? 0.50);
+
+        return collect($candidates)
+            ->reject(fn (array $candidate): bool => ($candidate['candidate_key'] ?? '') === ($initial['candidate_key'] ?? ''))
+            ->first(fn (array $candidate): bool => ($candidate['market'] ?? '') === $preferredMarket
+                && ($candidate['odds_source'] ?? '') === 'bookmaker'
+                && (float) ($candidate['probability'] ?? 0) >= max(0.52, $initialProb - 0.10));
+    }
+
+    /**
+     * Convertit une ligne de handicap côté domicile en clé du modèle.
+     */
+    private function handicapKey(float $line): string
+    {
+        $body = str_replace('.', '_', (string) abs($line));
+        if (! str_contains($body, '_')) {
+            $body .= '_0';
+        }
+
+        return $line < 0 ? 'm' . $body : $body;
+    }
+
+    /**
+     * Alternance déterministe des marchés pour éviter qu'un seul type
+     * (1N2 ou double chance) écrase l'affichage d'un match à l'autre.
+     */
+    private function rotatedMarket(string $matchId): string
+    {
+        $markets = ['btts', 'totals', 'team_totals', 'asian_handicap', '1N2'];
+        $seed = crc32($matchId);
+
+        return $markets[$seed % count($markets)];
     }
 
     private function initialCandidate(array $candidates): ?array

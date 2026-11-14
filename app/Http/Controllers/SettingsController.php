@@ -75,6 +75,19 @@ class SettingsController extends Controller
 
     public function update(Request $request)
     {
+        // Les valeurs alimentent des calculs (qualité, décote, gel des cotes) :
+        // elles sont validées au lieu d'être enregistrées telles quelles.
+        $request->validate([
+            'display_odds_format' => ['sometimes', 'in:decimal,fractional,american'],
+            'active_model_family' => ['sometimes', 'string', 'max:50'],
+            'time_decay_half_life_days' => ['sometimes', 'numeric', 'between:1,120'],
+            'freeze_time_minutes_before_kickoff' => ['sometimes', 'numeric', 'between:0,1440'],
+            'data_quality_min_score' => ['sometimes', 'numeric', 'between:0,100'],
+            'min_edge_alert_pct' => ['sometimes', 'numeric', 'between:0,100'],
+            'devig_method' => ['sometimes', 'in:proportional,shin,logarithmic'],
+            'analysis_only_mode' => ['sometimes', 'boolean'],
+        ]);
+
         $fields = [
             'display_odds_format',
             'active_model_family',
@@ -90,9 +103,11 @@ class SettingsController extends Controller
             if ($request->has($field)) {
                 $val = $request->input($field);
                 if ($field === 'analysis_only_mode') {
-                    $val = (bool)$val;
+                    $val = (bool) $val;
                 } elseif (is_numeric($val)) {
-                    $val = (float)$val;
+                    $val = (float) $val;
+                } elseif (is_string($val)) {
+                    $val = trim($val);
                 }
                 AppSetting::set($field, $val);
             }

@@ -245,7 +245,7 @@ class DashboardController extends Controller
                     'match' => $match,
                     'source' => $prediction->prediction_origin === 'AI_ESTIMATE'
                         ? 'Estimation IA'
-                        : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Hybride' : 'Révision Python'),
+                        : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Validé IA' : 'Statistiques Python'),
                 ]);
                 continue;
             }
@@ -257,8 +257,8 @@ class DashboardController extends Controller
             if (! $supportsScoreMarkets) {
                 $markets = array_intersect_key($markets, ['1N2' => true, 'double_chance' => true]);
             }
-            $home = $match->homeTeam->short_name;
-            $away = $match->awayTeam->short_name;
+            $home = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
+            $away = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
             $oneN2 = $markets['1N2'] ?? [
                 'home' => (float) $prediction->prob_home,
                 'draw' => (float) $prediction->prob_draw,
@@ -277,7 +277,7 @@ class DashboardController extends Controller
                     ['key' => '1X', 'label' => $home.' ou nul', 'prob' => $doubleChance['1X'] ?? null, 'market' => 'Double chance'],
                     ['key' => 'X2', 'label' => $away.' ou nul', 'prob' => $doubleChance['X2'] ?? null, 'market' => 'Double chance'],
                     ['key' => 'over_1_5', 'label' => 'Plus de 1,5 but', 'prob' => $totals['over_1_5'] ?? null, 'market' => 'Total buts'],
-                    ['key' => 'under_4_5', 'label' => 'Moins de 4,5 buts', 'prob' => $totals['under_4_5'] ?? null, 'market' => 'Total buts'],
+                    ['key' => 'under_3_5', 'label' => 'Moins de 3,5 buts', 'prob' => $totals['under_3_5'] ?? null, 'market' => 'Total buts'],
                 ],
                 'equilibre' => [
                     ['key' => 'home', 'label' => 'Victoire '.$home, 'prob' => $oneN2['home'] ?? null, 'market' => 'Résultat'],
@@ -400,26 +400,142 @@ class DashboardController extends Controller
         $selection = $prediction->published_selection;
         $probability = (float) ($prediction->published_probability ?? 0);
         if (! $market || ! $selection || $probability <= 0 || $probability >= 1) return null;
-        $home = $match->homeTeam->short_name;
-        $away = $match->awayTeam->short_name;
+
+        // Exclusion stricte des marchés triviaux/non rentables
+        if ($market === 'totals' && in_array($selection, ['over_0_5', 'under_0_5', 'over_5_5', 'under_5_5', 'under_4_5'], true)) {
+            return null;
+        }
+        $home = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
+        $away = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
         $label = match ($market) {
             '1N2' => ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$selection] ?? null,
             'double_chance' => ['1X' => $home.' ou nul', 'X2' => $away.' ou nul', '12' => 'Pas de match nul'][$selection] ?? null,
             'btts' => ['yes' => 'Les deux équipes marquent', 'no' => 'Au moins une équipe ne marque pas'][$selection] ?? null,
+            'team_totals' => preg_match('/^(HOME|AWAY)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', $selection, $parts)
+                ? (($parts[2] === 'OVER') ? 'Plus de ' : 'Moins de ').str_replace('.', ',', $parts[3]).' buts — '.($parts[1] === 'HOME' ? $home : $away)
+                : null,
+            'asian_handicap' => preg_match('/^AH_(HOME|AWAY)_(-?\d+(?:\.\d+)?)$/', $selection, $parts)
+                ? ($parts[1] === 'HOME' ? $home : $away).' handicap '.($parts[2] > 0 ? '+' : '').rtrim(rtrim($parts[2], '0'), '.')
+                : null,
             'exact_score' => 'Score exact '.$selection,
             'totals' => preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts' : null,
             default => null,
         };
         if (! $label) return null;
+
+        // Cote bookmaker réelle uniquement : une cote estimée depuis la
+        // probabilité n'est jamais affichée comme un prix de marché.
+        $odds = null;
+        $metrics = $prediction->market_metrics_json ?? [];
+        if (($metrics['published_odds_source'] ?? null) === 'bookmaker'
+            && isset($metrics['published_odds'])
+            && is_numeric($metrics['published_odds'])) {
+            $odds = (float) $metrics['published_odds'];
+        }
+        if (! $odds || $odds <= 1.01) {
+            $odds = $this->lookupOddFromSnapshot($match, $market, $selection, (float) ($prediction->published_line ?? 0));
+        }
+
+        if ($odds && $odds < 1.20) {
+            return null;
+        }
+
         return [
             'key' => $selection,
             'label' => $label,
             'prob' => $probability,
+            'odds' => $odds,
             'market' => match ($market) {
-                '1N2' => 'Résultat', 'double_chance' => 'Double chance', 'btts' => 'BTTS', 'totals' => 'Total buts', 'exact_score' => 'Score exact', default => $market,
+                '1N2' => 'Résultat', 'double_chance' => 'Double chance', 'btts' => 'BTTS', 'totals' => 'Total buts', 'asian_handicap' => 'Handicap', 'team_totals' => 'Total par équipe', 'exact_score' => 'Score exact', default => $market,
             },
         ];
+    }
+
+    private function lookupOddFromSnapshot(FootballMatch $match, string $market, string $selection, float $line = 0): ?float
+    {
+        // Les cotes sont lues par marché : « HOME » existe en 1N2 comme en
+        // handicap, et mélanger les deux fausse le prix affiché.
+        if ($market === '1N2') {
+            $selMap = ['home' => 'HOME', 'draw' => 'DRAW', 'away' => 'AWAY'];
+            $target = $selMap[$selection] ?? strtoupper($selection);
+            $odd = $this->oddsForMarket($match, '1N2')->firstWhere('selection', $target);
+            return $odd ? (float) $odd->decimal_odds : null;
+        }
+
+        if ($market === 'double_chance') {
+            $real = $this->oddsForMarket($match, 'double_chance')->firstWhere('selection', $selection);
+            if ($real) {
+                return (float) $real->decimal_odds;
+            }
+
+            $h2h = $this->oddsForMarket($match, '1N2');
+            $h = $h2h->firstWhere('selection', 'HOME');
+            $d = $h2h->firstWhere('selection', 'DRAW');
+            $a = $h2h->firstWhere('selection', 'AWAY');
+            $o1 = $h ? (float) $h->decimal_odds : 0;
+            $oX = $d ? (float) $d->decimal_odds : 0;
+            $o2 = $a ? (float) $a->decimal_odds : 0;
+            if ($selection === '1X' && $o1 > 1 && $oX > 1) {
+                return round(1.0 / ((1.0 / $o1) + (1.0 / $oX)), 2);
+            }
+            if ($selection === 'X2' && $oX > 1 && $o2 > 1) {
+                return round(1.0 / ((1.0 / $oX) + (1.0 / $o2)), 2);
+            }
+            if ($selection === '12' && $o1 > 1 && $o2 > 1) {
+                return round(1.0 / ((1.0 / $o1) + (1.0 / $o2)), 2);
+            }
+        }
+
+        if ($market === 'totals') {
+            $type = str_starts_with($selection, 'over') ? 'OVER' : 'UNDER';
+            $odd = $this->oddsForMarket($match, 'totals')->where('selection', $type)
+                ->first(fn ($o) => abs((float) $o->line - $line) < 0.01);
+            return $odd ? (float) $odd->decimal_odds : null;
+        }
+
+        if ($market === 'btts') {
+            $target = $selection === 'yes' ? 'YES' : 'NO';
+            $odd = $this->oddsForMarket($match, 'btts')->firstWhere('selection', $target);
+            return $odd ? (float) $odd->decimal_odds : null;
+        }
+
+        if ($market === 'team_totals' && preg_match('/^(HOME|AWAY)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', $selection, $parts)) {
+            $odd = $this->oddsForMarket($match, 'team_totals')
+                ->where('selection', $parts[1].'_'.$parts[2])
+                ->first(fn ($o) => abs((float) $o->line - (float) $parts[3]) < 0.01);
+            return $odd ? (float) $odd->decimal_odds : null;
+        }
+
+        if ($market === 'asian_handicap' && preg_match('/^AH_(HOME|AWAY)_(-?\d+(?:\.\d+)?)$/', $selection, $parts)) {
+            $odd = $this->oddsForMarket($match, 'asian_handicap')
+                ->where('selection', $parts[1])
+                ->first(fn ($o) => abs((float) $o->line - (float) $parts[2]) < 0.01);
+            return $odd ? (float) $odd->decimal_odds : null;
+        }
+
+        return null;
+    }
+
+    private function oddsForMarket(FootballMatch $match, string $code): Collection
+    {
+        static $cache = [];
+        if (! array_key_exists($code, $cache)) {
+            $cache[$code] = \App\Models\Market::where('code', $code)->value('id');
+        }
+        if ($cache[$code] === null) {
+            return collect();
+        }
+
+        return ($match->oddsSnapshots ?? collect())->where('market_id', $cache[$code]);
+    }
+
+    private function displayTeamName(?string $name): string
+    {
+        if (! $name) return '';
+        $cleaned = preg_replace('/\b(FC|CF|SSC|AC|US|SV\s*07|1\.\s*FSV|1\.\s*FC|RCD)\b/i', '', $name);
+        $cleaned = trim(preg_replace('/\s+/', ' ', $cleaned));
+        return $cleaned ?: $name;
     }
 
     /**
@@ -460,8 +576,8 @@ class DashboardController extends Controller
                 $markets = array_intersect_key($markets, ['1N2' => true, 'double_chance' => true]);
             }
 
-            $home = $match->homeTeam->short_name;
-            $away = $match->awayTeam->short_name;
+            $home = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
+            $away = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
             $oneN2 = $markets['1N2'] ?? [
                 'home' => (float) $prediction->prob_home,
                 'draw' => (float) $prediction->prob_draw,
@@ -487,9 +603,7 @@ class DashboardController extends Controller
 
             $safeOptions = array_merge($safeOptions, [
                     ['label' => 'Plus de 1,5 but', 'prob' => $totals['over_1_5'] ?? null, 'market' => 'Total buts'],
-                    ['label' => 'Moins de 4,5 buts', 'prob' => $totals['under_4_5'] ?? null, 'market' => 'Total buts'],
-                    ['label' => $home.' marque au moins 1 but', 'prob' => $teamTotals['home']['over_0_5'] ?? null, 'market' => 'Buts par équipe'],
-                    ['label' => $away.' marque au moins 1 but', 'prob' => $teamTotals['away']['over_0_5'] ?? null, 'market' => 'Buts par équipe'],
+                    ['label' => 'Moins de 3,5 buts', 'prob' => $totals['under_3_5'] ?? null, 'market' => 'Total buts'],
                     ['label' => $away.' ne marque pas', 'prob' => $cleanSheet['home'] ?? null, 'market' => 'Clean sheet'],
                     ['label' => $home.' ne marque pas', 'prob' => $cleanSheet['away'] ?? null, 'market' => 'Clean sheet'],
             ]);

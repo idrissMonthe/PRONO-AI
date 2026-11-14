@@ -9,6 +9,9 @@ use App\Services\Odds\OddsService;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
 use App\Services\Prediction\PredictionRevisionService;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -60,6 +63,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        // Les routes qui interrogent Gemini ou lancent un calcul lourd
+        // consomment du crédit fournisseur : on les borne par IP.
+        RateLimiter::for('ai', fn (Request $request) => Limit::perMinute(8)->by($request->ip()));
+        RateLimiter::for('heavy', fn (Request $request) => Limit::perMinute(4)->by($request->ip()));
+        RateLimiter::for('writes', fn (Request $request) => Limit::perMinute(30)->by($request->ip()));
     }
 }

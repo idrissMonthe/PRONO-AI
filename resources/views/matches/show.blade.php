@@ -273,24 +273,6 @@
                     </div>
                 </div>
 
-                <!-- Match nul remboursé -->
-                <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
-                    <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">En cas de match nul</span>
-                    @php
-                        $pDraw = $predData['probabilities']['draw']['p'];
-                        $pDnbHome = $pDraw < 0.99 ? $predData['probabilities']['home']['p'] / (1 - $pDraw) : 0.5;
-                    @endphp
-                    <div class="flex justify-between mono">
-                        <span>{{ $match->homeTeam->short_name }} :</span>
-                        <strong class="text-[#88B69A]">{{ round($pDnbHome * 100) }}%</strong>
-                    </div>
-                    <div class="flex justify-between mono">
-                        <span>{{ $match->awayTeam->short_name }} :</span>
-                        <strong class="text-[#D68D86]">{{ round((1 - $pDnbHome) * 100) }}%</strong>
-                    </div>
-                    <div class="text-[10px] text-[#A2ACA3] pt-0.5">Remboursé si nul</div>
-                </div>
-
                 <!-- Totaux de Buts -->
                 <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
                     <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Total Buts (Over / Under)</span>

@@ -40,20 +40,24 @@ class SyncMatchesCommand extends Command
         $tz       = 'Africa/Douala';
         $now      = Carbon::now($tz);
         $dateArg  = $this->option('date');
+        $daysBackOption  = $this->option('days-back');
+        $daysAheadOption = $this->option('days-ahead');
 
         if ($dateArg) {
             try {
                 $targetDate = Carbon::createFromFormat('Y-m-d', $dateArg, $tz);
-                $dateFrom   = $targetDate->copy()->toDateString();
-                $dateTo     = $targetDate->copy()->toDateString();
-                $this->info("Date cible : {$dateFrom}");
+                $daysBack   = $daysBackOption !== null ? (int) $daysBackOption : 0;
+                $daysAhead  = $daysAheadOption !== null ? (int) $daysAheadOption : 1;
+                $dateFrom   = $targetDate->copy()->subDays($daysBack)->toDateString();
+                $dateTo     = $targetDate->copy()->addDays($daysAhead)->toDateString();
+                $this->info("Date cible : {$dateArg} (Plage API : {$dateFrom} → {$dateTo})");
             } catch (Throwable $e) {
                 $this->error("Format de date invalide : {$dateArg}. Attendu : Y-m-d");
                 return self::FAILURE;
             }
         } else {
-            $daysBack   = (int) ($this->option('days-back') ?? 3);
-            $daysAhead  = (int) ($this->option('days-ahead') ?? 7);
+            $daysBack   = $daysBackOption !== null ? (int) $daysBackOption : 3;
+            $daysAhead  = $daysAheadOption !== null ? (int) $daysAheadOption : 6;
             $dateFrom   = $now->copy()->subDays($daysBack)->toDateString();
             $dateTo     = $now->copy()->addDays($daysAhead)->toDateString();
             $this->info("Plage : {$dateFrom} → {$dateTo}");

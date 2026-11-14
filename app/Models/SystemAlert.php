@@ -37,7 +37,15 @@ class SystemAlert extends Model
 
     public static function resolve(string $key): void
     {
-        static::where('key', $key)->where('status', 'open')->update([
+        $openAlert = static::where('key', $key)->where('status', 'open')->first();
+        if (! $openAlert) {
+            return;
+        }
+
+        // Supprimer toute ancienne entrée 'resolved' pour respecter unique(['key', 'status'])
+        static::where('key', $key)->where('status', 'resolved')->delete();
+
+        $openAlert->update([
             'status' => 'resolved',
             'resolved_at_utc' => now()->utc(),
             'updated_at' => now(),
