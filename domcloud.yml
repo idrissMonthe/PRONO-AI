@@ -17,9 +17,10 @@ features:
   - mysql
   - node 22
 
-root: public_html/public
-
 nginx:
+  # `root` se place sous `nginx:` (ou sous `features:`), jamais à la racine du
+  # script : le schéma officiel ne connaît que ces deux emplacements.
+  root: public_html/public
   fastcgi: "on"
   locations:
     - match: /

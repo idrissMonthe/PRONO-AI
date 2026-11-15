@@ -4,17 +4,19 @@
 # À créer comme SECOND site DOM Cloud, pointant sur le même dépôt GitHub.
 # À coller dans Setup → Deploy → Add a deployment task de ce site.
 #
-# `$PORT` est fourni par Passenger : Uvicorn doit écouter sur 127.0.0.1:$PORT.
+# Passenger fournit `$PORT` et exécute `app_start_command` dans le dossier
+# parent de `root`, c'est-à-dire ~/public_html ici. Uvicorn doit donc recevoir
+# explicitement `--app-dir` et écouter sur 127.0.0.1:$PORT (IPv4 loopback,
+# jamais `localhost` qui peut résoudre en ::1).
 # ─────────────────────────────────────────────────────────────────────────────
 
 features:
   - python 3.12
 
-# Le document root n'expose que le dossier du service ; aucun fichier source
-# n'est servi statiquement.
-root: public_html/ai-service
-
 nginx:
+  # Document root : aucun fichier source n'est servi statiquement, Passenger
+  # prend tous les chemins. `root` reste sous `nginx:` conformément au schéma.
+  root: public_html/ai-service
   passenger:
     enabled: "on"
     app_root: public_html/ai-service
@@ -22,14 +24,18 @@ nginx:
       env PORT=$PORT
       MODEL_STATE_PATH=$HOME/public_html/ai-service/data/dixon_coles_model.json
       PYTHONDONTWRITEBYTECODE=1
-      python -m uvicorn app.main:app --host 127.0.0.1 --port $PORT --workers 1
+      $HOME/.pyenv/shims/python -m uvicorn app.main:app
+      --app-dir $HOME/public_html/ai-service
+      --host 127.0.0.1 --port $PORT --workers 1
     env_var_list:
       - PYTHONDONTWRITEBYTECODE=1
       - PREDICTION_ALLOW_LIMITED_DATA_PREDICTIONS=true
 
 commands:
+  # Exécutées dans ~/public_html : les chemins relatifs partent de la racine du
+  # dépôt. Aucune erreur n'est masquée (la chaîne s'arrête au premier échec).
   - python -m pip install --no-cache-dir --upgrade pip
   - python -m pip install --no-cache-dir -r ai-service/requirements.txt
   # Le modèle est persisté dans ai-service/data (déjà présent dans le dépôt ;
-  # il est remplacé par `oracle:train-prediction-model` via l'API /v1/train).
+  # il est remplacé par l'entraînement déclenché depuis Laravel via /v1/train).
   - mkdir -p ai-service/data
