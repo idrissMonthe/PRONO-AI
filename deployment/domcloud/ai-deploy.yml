@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Déploiement FastAPI sur DOM Cloud *Free* (Passenger + Uvicorn, sans Docker).
+#
+# À créer comme SECOND site DOM Cloud, pointant sur le même dépôt GitHub.
+# À coller dans Setup → Deploy → Add a deployment task de ce site.
+#
+# `$PORT` est fourni par Passenger : Uvicorn doit écouter sur 127.0.0.1:$PORT.
+# ─────────────────────────────────────────────────────────────────────────────
+
+features:
+  - python 3.12
+
+# Le document root n'expose que le dossier du service ; aucun fichier source
+# n'est servi statiquement.
+root: public_html/ai-service
+
+nginx:
+  passenger:
+    enabled: "on"
+    app_root: public_html/ai-service
+    app_start_command: >-
+      env PORT=$PORT
+      MODEL_STATE_PATH=$HOME/public_html/ai-service/data/dixon_coles_model.json
+      PYTHONDONTWRITEBYTECODE=1
+      python -m uvicorn app.main:app --host 127.0.0.1 --port $PORT --workers 1
+    env_var_list:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PREDICTION_ALLOW_LIMITED_DATA_PREDICTIONS=true
+
+commands:
+  - python -m pip install --no-cache-dir --upgrade pip
+  - python -m pip install --no-cache-dir -r ai-service/requirements.txt
+  # Le modèle est persisté dans ai-service/data (déjà présent dans le dépôt ;
+  # il est remplacé par `oracle:train-prediction-model` via l'API /v1/train).
+  - mkdir -p ai-service/data

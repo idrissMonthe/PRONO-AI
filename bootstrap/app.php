@@ -12,6 +12,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Derrière le proxy NGINX/Passenger de DOM Cloud (et tout reverse proxy
+        // local), les en-têtes X-Forwarded-* portent le vrai schéma et l'IP.
+        $middleware->trustProxies(at: '*');
         $middleware->alias([
             'api.token' => \App\Http\Middleware\EnsureApiToken::class,
         ]);

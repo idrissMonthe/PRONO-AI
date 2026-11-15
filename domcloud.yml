@@ -1,0 +1,61 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Déploiement Laravel sur DOM Cloud *Free* (PHP-FPM natif, sans Docker).
+#
+# Site : application principale (Laravel 12).
+# À coller dans Setup → Deploy → Add a deployment task.
+# Les fichiers sont déjà clonés dans ~/public_html ; `source` est volontairement
+# absent pour ne pas écraser `.env`, `storage/` et les données à chaque deploy.
+#
+# Prérequis manuels (une seule fois, via SSH) :
+#   cd ~/public_html
+#   cp .env.domcloud.example .env     # puis renseigner les valeurs réelles
+#   php artisan key:generate          # écrit APP_KEY dans .env serveur
+# ─────────────────────────────────────────────────────────────────────────────
+
+features:
+  - php 8.3
+  - mysql
+  - node 22
+
+root: public_html/public
+
+nginx:
+  fastcgi: "on"
+  locations:
+    - match: /
+      try_files: $uri $uri/ /index.php$is_args$args
+    # FastCGI Safe : aucun fichier non-PHP n'est exécuté comme du PHP.
+    - match: "~ \\.[^\\/]+(?<!\\.php)$"
+      try_files: $uri =404
+
+commands:
+  # 1. Dépendances PHP de production.
+  - composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction --no-progress
+
+  # 2. Assets frontend compilés (Vite/Tailwind), puis suppression de node_modules
+  #    pour économiser le quota de 1,5 Go.
+  - npm ci --no-audit --no-fund
+  - npm run build
+  - rm -rf node_modules
+
+  # 3. Répertoires inscriptibles + lien public/storage.
+  - mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache
+  - php artisan storage:link
+  - chmod -R 0750 storage bootstrap/cache
+
+  # 4. Schéma de base : échoue explicitement si une migration casse.
+  - php artisan migrate --force
+
+  # 5. Caches de production.
+  - php artisan config:cache
+  - php artisan route:cache
+  - php artisan view:cache
+
+  # 6. Nettoyage d'un éventuel marqueur Vite de développement.
+  - rm -f public/hot
+
+  # 7. Contrôle de connectivité des fournisseurs (pare-feu sortant).
+  #    La commande affiche le résultat et retourne toujours 0 : un fournisseur
+  #    bloqué est signalé sans faire échouer le déploiement, et sans masquer
+  #    une véritable erreur d'exécution.
+  - php artisan oracle:check-providers

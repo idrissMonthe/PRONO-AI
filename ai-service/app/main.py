@@ -59,10 +59,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS restrictive to local origin only (CDC 15.4)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+# CORS restrictive aux origines connues (CDC 15.4). En production, la liste
+# peut être étendue par variable d'environnement sans toucher au code.
+def _allowed_origins() -> List[str]:
+    defaults = [
         "http://127.0.0.1:8000",
         "http://localhost:8000",
         "http://127.0.0.1:8001",
@@ -70,7 +70,18 @@ app.add_middleware(
         "http://web",
         "http://web:80",
         "http://web:8000",
-    ],
+    ]
+    extra = [
+        origin.strip()
+        for origin in os.getenv("AI_SERVICE_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    return list(dict.fromkeys(defaults + extra))
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],

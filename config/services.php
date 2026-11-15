@@ -41,6 +41,12 @@ return [
         'token' => env('API_TOKEN'),
     ],
 
+    // Planification : certains hébergeurs mutualisés tuent les processus
+    // détachés, il faut alors exécuter les tâches dans le processus courant.
+    'scheduler' => [
+        'run_in_background' => (bool) env('SCHEDULER_RUN_IN_BACKGROUND', true),
+    ],
+
     'gemini' => [
         'api_key' => env('GEMINI_API_KEY'),
         'model' => env('GEMINI_MODEL', 'gemini-2.5-flash'),

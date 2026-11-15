@@ -34,7 +34,13 @@ if [ -f "$APP_DIR/artisan" ] && [ -n "$DB_HOST" ]; then
     # (« Table 'cache' already exists »).
     if [ "${RUN_MIGRATIONS:-0}" = "1" ]; then
         echo "[pronoia-entrypoint] Exécution des migrations..."
-        php "$APP_DIR/artisan" migrate --force || true
+        # Une migration échouée doit empêcher le démarrage : servir une
+        # application dont le schéma est incomplet produit des erreurs plus
+        # difficiles à diagnostiquer qu'un conteneur qui refuse de démarrer.
+        if ! php "$APP_DIR/artisan" migrate --force; then
+            echo "[pronoia-entrypoint] ERREUR: les migrations ont échoué, arrêt du conteneur." >&2
+            exit 1
+        fi
     fi
 
     # Libération des verrous sans chevauchement orphelins
