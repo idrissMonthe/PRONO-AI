@@ -799,6 +799,18 @@ class ParlayService
         array $selections,
         bool $modelPriced = false
     ): Parlay {
+        $leagueCounts = [];
+        foreach ($selections as $sel) {
+            $league = (string) ($sel['league'] ?? '');
+            if ($league !== '') {
+                $leagueCounts[$league] = ($leagueCounts[$league] ?? 0) + 1;
+            }
+        }
+        $sharedLeagues = array_keys(array_filter($leagueCounts, fn (int $count): bool => $count > 1));
+        $independence = $sharedLeagues === []
+            ? 'Produit des probabilités sous hypothèse d’indépendance. Aucune ligue n’est répétée.'
+            : 'Produit des probabilités sous hypothèse d’indépendance, pas une probabilité jointe exacte : sélections partageant une ligue ('.implode(', ', $sharedLeagues).').';
+
         // Calculs probabilistes stricts sous hypothèse d'indépendance conditionnelle
         $combinedProb = 1.0;
         $combinedOdds = 1.0;
@@ -830,7 +842,7 @@ class ParlayService
                 : round($expectedValue * 100, 2) . '%',
             'pricing_basis'           => $modelPriced ? 'cotes justes indicatives du modèle' : 'cotes bookmaker réelles',
             'selections'              => $selections,
-            'independence_assumption' => 'Matchs issus de ligues ou créneaux distincts, indépendance conditionnelle standard',
+            'independence_assumption' => $independence,
         ];
 
         $aiResult = $this->geminiService->explainParlay($context);

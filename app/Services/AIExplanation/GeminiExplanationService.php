@@ -63,12 +63,14 @@ class GeminiExplanationService
             'double_chance' => ['1X', 'X2', '12'],
             'btts' => ['yes', 'no'],
             'totals' => ['over_1_5', 'under_1_5', 'over_2_5', 'under_2_5', 'over_3_5', 'under_3_5'],
+            'dnb' => ['home', 'away'],
+            'team_totals' => ['home_OVER_0.5', 'home_OVER_1.5', 'away_OVER_0.5', 'away_OVER_1.5', 'home_UNDER_0.5', 'away_UNDER_0.5'],
         ];
         $systemInstruction = implode("\n", [
             'Tu es un analyste football complémentaire, pas un bookmaker.',
             'Tu utilises uniquement les faits présents dans le JSON fourni.',
             'Tu ne dois jamais inventer une statistique, une blessure, une cote, une composition ou un résultat.',
-            'Si les informations sont insuffisantes, réponds avec decision=no_prediction et candidate=null.',
+            'Si les informations sont insuffisantes, propose quand même une sélection prudente parmi allowed_markets, avec confidence=low. N’invente aucune statistique. decision=no_prediction n’est réservé qu’à un JSON vide.',
             'Une probabilité proposée doit être une estimation IA non calibrée, jamais une probabilité Python.',
             'Tu ne peux choisir qu’un marché et une sélection dans allowed_markets.',
             'Réponds uniquement avec un objet JSON valide.',
@@ -456,6 +458,9 @@ class GeminiExplanationService
             . "CANDIDATES DISPONIBLES (avec probabilités calculées et cotes réelles) :\n"
             . json_encode($context['candidates'] ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n\n"
             . "Consigne : Analyse la sélection initiale et ses alternatives. Si la cote initiale est trop faible (< 1.25) ou manque de valeur, sélectionne une alternative fiable avec une cote plus abordable (1.30 - 1.85) et solide selon les xG. Justifie ton choix dans 'reasoning'.";
+        if (is_string($context['correction_request'] ?? null) && $context['correction_request'] !== '') {
+            $prompt .= "\n\nCORRECTION : ".$context['correction_request'];
+        }
         $contextHash = hash('sha256', json_encode($context));
         $apiKey = $this->getApiKey();
         $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
@@ -544,7 +549,7 @@ class GeminiExplanationService
             . "Tu analyses un combiné généré à partir de calculs mathématiques réels (Dixon-Coles). "
             . "Règles strictes : "
             . "1. Ne promets JAMAIS de gain ni de 'pari sûr' ou 'garantie'. "
-            . "2. Rappelle que le produit des probabilités diminue rapidement la probabilité conjointe. "
+            . "2. Rappelle que le produit des probabilités est une hypothèse d'indépendance, pas une probabilité jointe exacte si des sélections partagent une ligue. "
             . "3. Identifie clairement la sélection qui présente la plus forte incertitude. "
             . "4. Si pricing_basis indique des cotes justes indicatives du modèle, précise qu'il ne s'agit pas de cotes bookmaker et que l'EV n'est pas calculée ; sinon, mentionne la source réelle des cotes. "
             . "5. Ne cite AUCUN chiffre absent du contexte JSON fourni. "
@@ -617,8 +622,8 @@ class GeminiExplanationService
             : 'Les cotes répertoriées proviennent des relevés des bookmakers indiqués.';
 
         return "### Analyse Statistique du Combiné ({$count} sélections)\n\n"
-            . "Ce combiné présente une cote totale cumulée de **{$combOdds}** pour une probabilité conjointe estimée à **{$combProb}%** par le modèle Dixon-Coles (indice de risque : **{$riskScore}/10**).\n\n"
-            . "**Règle de multiplication des probabilités** : Même si chaque rencontre individuelle possède une probabilité dominante, l'accumulation de plusieurs événements indépendants divise la chance globale de réussite. À titre indicatif, une probabilité conjointe de {$combProb}% signifie que la combinaison échoue dans plus de " . round(100 - $combProb) . "% des cas théoriques.\n\n"
+            . "Ce combiné présente une cote totale cumulée de **{$combOdds}** pour une probabilité produit de **{$combProb}%** (hypothèse d’indépendance, indice de risque : **{$riskScore}/10**).\n\n"
+            . "**Hypothèse d’indépendance** : ce pourcentage est le produit des probabilités, pas une probabilité jointe exacte lorsque des sélections partagent une ligue ou un même week-end. " . ($context['independence_assumption'] ?? '') . "\n\n"
             . "> **Transparence éthique** : {$pricingNote} Ce combiné est un outil d'observation statistique pédagogique sans garantie de résultat.";
     }
 }

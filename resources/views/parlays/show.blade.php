@@ -27,6 +27,7 @@
             <div class="p-3 rounded bg-[#141A17] border border-[#303A32]">
                 <div class="text-[10px] text-[#A2ACA3]">Chances modèle</div>
                 <div class="text-lg font-extrabold mono text-[#88B69A]">{{ round($parlay->combined_prob * 100, 1) }}%</div>
+                <div class="text-[10px] text-[#A2ACA3]">Produit sous hypothèse d'indépendance</div>
             </div>
             <div class="p-3 rounded bg-[#141A17] border border-[#303A32]">
                 <div class="text-[10px] text-[#A2ACA3]">Indice risque</div>

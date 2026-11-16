@@ -280,4 +280,15 @@ class TheOddsApiSyncTest extends TestCase
             'source' => 'the-odds-api',
         ]);
     }
+
+    public function test_outcome_names_do_not_match_a_different_club_by_substring(): void
+    {
+        $service = app(TheOddsApiService::class);
+        $method = new \ReflectionMethod($service, 'nameMatches');
+
+        $this->assertTrue($method->invoke($service, 'Paris Saint-Germain Over', 'Paris Saint-Germain'));
+        $this->assertFalse($method->invoke($service, 'Paris Saint-Germain', 'Paris'));
+        $this->assertFalse($method->invoke($service, 'Inter Milan', 'AC Milan'));
+        $this->assertTrue($method->invoke($service, 'AC Milan', 'AC Milan'));
+    }
 }

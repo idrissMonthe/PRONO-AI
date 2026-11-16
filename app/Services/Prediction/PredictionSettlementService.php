@@ -47,9 +47,11 @@ class PredictionSettlementService
         $resultLabels = ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away];
         if ($prediction->published_market && $prediction->published_selection && $prediction->published_probability !== null) {
             $published = $this->publishedOutcome($prediction, $homeGoals, $awayGoals, $actualResult, $home, $away);
-            if ($published) {
-                $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], $published['hit'] ? 'WON' : 'LOST');
-            }
+        if (! empty($published['push'])) {
+            $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], 'PUSH');
+        } elseif ($published) {
+            $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], $published['hit'] ? 'WON' : 'LOST');
+        }
         }
         $oneN2 = $markets['1N2'] ?? [
             'home' => (float) $prediction->prob_home,
@@ -66,7 +68,22 @@ class PredictionSettlementService
             $threshold = ((int) $parts[2]) . ',' . $parts[3];
             $actual = $totalGoals > ((int) $parts[2] . '.' . $parts[3]) ? 'over' : 'under';
             $labels = ['over' => 'Plus de '.$threshold.' but', 'under' => 'Moins de '.$threshold.' buts'];
-            $this->addSelected($rows, $prediction, $match, $key, 'Total buts', [$parts[1] => (float) $probability], $labels, $actual, true);
+            $selectedSide = $parts[1] === $actual;
+            $isRecordedPick = $prediction->published_market === 'totals'
+                && $prediction->published_selection === (string) $key;
+            $this->addEvaluation(
+                $rows,
+                $prediction,
+                $match,
+                $isRecordedPick ? 'Total buts' : 'Calibration totaux',
+                (string) $key,
+                (float) $probability,
+                $labels[$parts[1]] ?? (string) $key,
+                $labels[$actual] ?? $actual,
+                $isRecordedPick
+                    ? ($selectedSide ? 'WON' : 'LOST')
+                    : ($selectedSide ? 'HIT' : 'MISS')
+            );
         }
 
         $btts = $markets['btts'] ?? [];
@@ -82,8 +99,22 @@ class PredictionSettlementService
             if (! is_numeric($probability)) {
                 continue;
             }
-            $actual = $this->comboHit((string) $key, $homeGoals, $awayGoals) ? 'hit' : 'miss';
-            $this->addEvaluation($rows, $prediction, $match, 'Combiné', (string) $key, (float) $probability, (string) $key, $actual, $actual === 'hit' ? 'WON' : 'LOST');
+            $actual = $this->comboHit((string) $key, $homeGoals, $awayGoals);
+            $isRecordedPick = $prediction->published_market === 'combos'
+                && $prediction->published_selection === (string) $key;
+            $this->addEvaluation(
+                $rows,
+                $prediction,
+                $match,
+                $isRecordedPick ? 'Combiné' : 'Calibration combiné',
+                (string) $key,
+                (float) $probability,
+                (string) $key,
+                $actual ? 'hit' : 'miss',
+                $isRecordedPick
+                    ? ($actual ? 'WON' : 'LOST')
+                    : ($actual ? 'HIT' : 'MISS')
+            );
         }
 
         $teamTotals = $markets['team_totals'] ?? [];
@@ -197,6 +228,14 @@ class PredictionSettlementService
             $hit = $selection === '1X' ? in_array($actualResult, ['home', 'draw'], true) : ($selection === 'X2' ? in_array($actualResult, ['draw', 'away'], true) : $actualResult !== 'draw');
             $label = $selection;
             $actualLabel = $actualResult;
+        } elseif ($market === 'dnb') {
+            if ($homeGoals === $awayGoals) {
+                return ['hit' => false, 'label' => 'Draw No Bet '.$selection, 'actual_label' => 'Remboursé (nul)', 'push' => true];
+            }
+            $winner = $homeGoals > $awayGoals ? 'home' : 'away';
+            $hit = $selection === $winner;
+            $label = 'Draw No Bet '.($selection === 'home' ? $home : $away);
+            $actualLabel = 'Victoire '.($winner === 'home' ? $home : $away);
         } elseif ($market === 'btts') {
             $btts = $homeGoals > 0 && $awayGoals > 0;
             $hit = $selection === 'yes' ? $btts : ! $btts;
@@ -208,6 +247,13 @@ class PredictionSettlementService
             $hit = $parts[1] === 'over' ? $total > $threshold : $total <= $threshold;
             $label = ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').str_replace('.', ',', (string) $threshold).' buts';
             $actualLabel = 'Total réel '.$total;
+        } elseif ($market === 'team_totals' && preg_match('/^(home|away)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', (string) $selection, $parts)) {
+            $goals = $parts[1] === 'home' ? $homeGoals : $awayGoals;
+            $line = (float) $parts[3];
+            $hit = strtoupper($parts[2]) === 'OVER' ? $goals > $line : $goals <= $line;
+            $teamName = $parts[1] === 'home' ? $home : $away;
+            $label = $teamName.' '.($parts[2] === 'OVER' ? 'plus de ' : 'moins de ').str_replace('.', ',', $parts[3]);
+            $actualLabel = $teamName.' a marqué '.$goals;
         } elseif ($market === 'exact_score') {
             $actualScore = $homeGoals.'-'.$awayGoals;
             $hit = $selection === $actualScore;
@@ -260,7 +306,7 @@ class PredictionSettlementService
     private function addEvaluation(array &$rows, Prediction $prediction, FootballMatch $match, string $group, string $key, float $probability, string $predictedLabel, string $actualLabel, string $status): void
     {
         $probability = max(0.0001, min(0.9999, $probability));
-        $hit = $status === 'WON';
+        $hit = in_array($status, ['WON', 'HIT'], true);
         $rows[] = [
             'match_id' => $match->id,
             'market_group' => $group,

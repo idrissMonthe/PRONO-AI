@@ -81,6 +81,42 @@ def compute_score_matrix(
     return matrix, residual_mass, n
 
 
+def rescale_outcome_regions(matrix: np.ndarray, p_home: float, p_draw: float, p_away: float) -> np.ndarray:
+    """Reweights home, draw and away cells so every derived market stays on one matrix."""
+    target = np.array([p_home, p_draw, p_away], dtype=float)
+    total = float(target.sum())
+    if total <= 0:
+        raise ValueError("Outcome probabilities must be positive.")
+    target /= total
+    home_mask = np.tril(np.ones(matrix.shape, dtype=bool), -1)
+    draw_mask = np.eye(matrix.shape[0], dtype=bool)
+    away_mask = np.triu(np.ones(matrix.shape, dtype=bool), 1)
+    scaled = matrix.astype(float, copy=True)
+    for mask, mass in zip((home_mask, draw_mask, away_mask), target):
+        current = float(matrix[mask].sum())
+        if current > 0:
+            scaled[mask] *= float(mass) / current
+    scaled_sum = float(scaled.sum())
+    if scaled_sum <= 0:
+        raise ValueError("Score matrix collapsed during outcome rescaling.")
+    return scaled / scaled_sum
+
+
+def reconcile_score_matrices(base: np.ndarray, components: Dict[str, np.ndarray], weights: Dict[str, float]) -> np.ndarray:
+    """Mixes specialist matrices back into one normalized score distribution."""
+    mixed = np.zeros_like(base, dtype=float)
+    for key, weight in weights.items():
+        component = components.get(key, base)
+        if component.shape != base.shape:
+            component = base
+        mixed += float(weight) * np.asarray(component, dtype=float)
+    mixed = np.clip(mixed, 0.0, None)
+    total = float(mixed.sum())
+    if total <= 0:
+        return base / max(float(base.sum()), 1e-12)
+    return mixed / total
+
+
 def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
     """
     Extracts all primary and derived markets from the score matrix (CDC Section 25.2 & 29.1).

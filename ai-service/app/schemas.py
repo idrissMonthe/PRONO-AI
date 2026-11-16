@@ -53,6 +53,8 @@ class PredictRequest(BaseModel):
     absence_penalty_away: float = Field(default=0.0, ge=0.0, le=0.5)
     rest_days_home: float = Field(default=7.0, ge=0.0, le=60.0)
     rest_days_away: float = Field(default=7.0, ge=0.0, le=60.0)
+    is_international: bool = False
+    competition_goals_per_match: Optional[float] = Field(default=None, ge=0.4, le=6.0)
 
     @field_validator("home_team", "away_team")
     @classmethod

@@ -28,13 +28,14 @@ class PredictionPerformanceController extends Controller
         }
 
         $evaluations = $query->paginate(30)->withQueryString();
-        $all = PredictionEvaluation::query();
-        $total = (clone $all)->count();
+        $all = PredictionEvaluation::query()->whereIn('status', ['WON', 'LOST', 'PUSH']);
+        $total = (clone $all)->whereIn('status', ['WON', 'LOST'])->count();
         $won = (clone $all)->where('status', 'WON')->count();
         $lost = (clone $all)->where('status', 'LOST')->count();
         $rate = $total > 0 ? round(($won / $total) * 100, 1) : null;
 
         $marketStats = PredictionEvaluation::query()
+            ->whereIn('status', ['WON', 'LOST'])
             ->selectRaw("market_group, COUNT(*) as total, SUM(CASE WHEN status = 'WON' THEN 1 ELSE 0 END) as won")
             ->groupBy('market_group')
             ->orderByDesc('total')

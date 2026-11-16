@@ -10,7 +10,7 @@ import os
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from scipy.optimize import minimize
-from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
+from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix, tau_correction
 
 TEAM_STRENGTH_PRIOR_MATCHES = 5.0
 MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS = 5
@@ -97,15 +97,20 @@ class DixonColesModel:
         num_free_def = max(0, num_teams - 1)
         total_params = 2 + num_free_att + num_free_def
 
+        # Last coordinate is the Dixon-Coles rho, estimated rather than held fixed.
+        total_params += 1
         x0 = np.zeros(total_params)
         # Initial guess for mu: log of avg goals per team
         total_goals = sum(m.home_goals + m.away_goals for m in matches)
         x0[0] = np.log(max(0.5, total_goals / (2.0 * len(matches))))
         x0[1] = 0.25  # Home advantage starting prior ~ +0.25 in log scale
+        x0[-1] = float(np.clip(self.rho, -0.2, 0.2))
+        bounds = [(None, None)] * (total_params - 1) + [(-0.2, 0.2)]
 
         def nll(params: np.ndarray) -> float:
             mu = params[0]
             h = params[1]
+            rho = float(params[-1])
 
             # Reconstruct attack vectors with sum = 0
             free_att = params[2 : 2 + num_free_att]
@@ -134,15 +139,17 @@ class DixonColesModel:
                 # Negative log likelihood Poisson: lambda - y * log(lambda)
                 loss_h = lambda_h - m.home_goals * np.log(max(1e-8, lambda_h))
                 loss_a = lambda_a - m.away_goals * np.log(max(1e-8, lambda_a))
+                tau = tau_correction(int(m.home_goals), int(m.away_goals), float(lambda_h), float(lambda_a), rho)
+                tau_penalty = -np.log(tau) if tau > 1e-8 else 20.0
 
-                loss += w * (loss_h + loss_a)
+                loss += w * (loss_h + loss_a + tau_penalty)
 
             # L2 penalty to shrink forces towards mean
             reg = self.l2_reg * (np.sum(att**2) + np.sum(defense**2))
             value = float(loss + reg)
             return value if np.isfinite(value) else float("inf")
 
-        res = minimize(nll, x0, method="L-BFGS-B", options={"maxiter": 250})
+        res = minimize(nll, x0, method="L-BFGS-B", bounds=bounds, options={"maxiter": 250})
 
         fit_message = str(getattr(res, "message", "Unknown optimizer result"))
         optimized_params = np.asarray(getattr(res, "x", []), dtype=float)
@@ -165,6 +172,7 @@ class DixonColesModel:
 
         candidate_mu = float(optimized_params[0])
         candidate_home_adv = float(optimized_params[1])
+        candidate_rho = float(np.clip(optimized_params[-1], -0.2, 0.2))
 
         free_att = optimized_params[2 : 2 + num_free_att]
         candidate_attack = np.append(free_att, -np.sum(free_att)) if num_teams else np.array([])
@@ -182,6 +190,7 @@ class DixonColesModel:
         self.team_match_counts = candidate_team_match_counts
         self.mu = candidate_mu
         self.home_adv = candidate_home_adv
+        self.rho = candidate_rho
         self.attack_strengths = candidate_attack
         self.defense_strengths = candidate_defense
         self.is_fitted = True
@@ -197,6 +206,7 @@ class DixonColesModel:
         min_valid_replicates: int = 12,
         min_observations: int = 20,
         seed: Optional[int] = None,
+        adjust=None,
     ) -> Dict[str, Any]:
         """Estimate 1N2 uncertainty from fitted-model bootstrap replicates.
 
@@ -227,6 +237,12 @@ class DixonColesModel:
                 matrix, _, _ = compute_score_matrix(lh, la, candidate.rho)
                 p = extract_match_markets_from_matrix(matrix)["1N2"]
                 row = [float(p["home"]), float(p["draw"]), float(p["away"])]
+                if adjust is not None:
+                    adjusted = list(adjust(row))
+                    adjusted_sum = float(sum(adjusted))
+                    if adjusted_sum <= 0:
+                        continue
+                    row = [float(value) / adjusted_sum for value in adjusted]
                 if np.all(np.isfinite(row)) and np.isclose(sum(row), 1.0, atol=1e-3):
                     probabilities.append(row)
             except (RuntimeError, ValueError, FloatingPointError):
@@ -259,13 +275,18 @@ class DixonColesModel:
         self,
         home_team: str,
         away_team: str,
-        is_neutral: bool = False
+        is_neutral: bool = False,
+        competition_total: Optional[float] = None,
+        international: bool = False,
     ) -> Tuple[float, float, List[str]]:
         """
         Returns (lambda_home, lambda_away, warnings).
         Handles unknown/promoted teams with baseline shrinkage (CDC 7.10).
         """
         warnings = []
+        prior_matches = 8.0 if international else TEAM_STRENGTH_PRIOR_MATCHES
+        home_sparse = False
+        away_sparse = False
         if not self.is_fitted:
             # Fallback default lambdas
             return 1.35, 1.05, ["model_not_fitted_using_defaults"]
@@ -273,31 +294,37 @@ class DixonColesModel:
         # Check for unknown teams
         if home_team in self.team_indices:
             appearances = self.team_match_counts.get(home_team, 0)
-            reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
+            reliability = appearances / (appearances + prior_matches)
             att_h = self.attack_strengths[self.team_indices[home_team]] * reliability
             def_h = self.defense_strengths[self.team_indices[home_team]] * reliability
             if appearances < MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS:
                 warnings.append(f"low_sample_team:{home_team}:{appearances}")
+                home_sparse = True
         elif home_team in self.team_match_counts:
             att_h, def_h = 0.0, 0.0
             warnings.append(f"low_sample_team:{home_team}:{self.team_match_counts[home_team]}")
+            home_sparse = True
         else:
             att_h, def_h = 0.0, 0.0  # League average prior
             warnings.append(f"unknown_or_promoted_team:{home_team}")
+            home_sparse = True
 
         if away_team in self.team_indices:
             appearances = self.team_match_counts.get(away_team, 0)
-            reliability = appearances / (appearances + TEAM_STRENGTH_PRIOR_MATCHES)
+            reliability = appearances / (appearances + prior_matches)
             att_a = self.attack_strengths[self.team_indices[away_team]] * reliability
             def_a = self.defense_strengths[self.team_indices[away_team]] * reliability
             if appearances < MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS:
                 warnings.append(f"low_sample_team:{away_team}:{appearances}")
+                away_sparse = True
         elif away_team in self.team_match_counts:
             att_a, def_a = 0.0, 0.0
             warnings.append(f"low_sample_team:{away_team}:{self.team_match_counts[away_team]}")
+            away_sparse = True
         else:
             att_a, def_a = 0.0, 0.0  # League average prior
             warnings.append(f"unknown_or_promoted_team:{away_team}")
+            away_sparse = True
 
         h = 0.0 if is_neutral else self.home_adv
 
@@ -309,7 +336,34 @@ class DixonColesModel:
         if log_lh < np.log(0.1) or log_lh > np.log(8.0) or log_la < np.log(0.1) or log_la > np.log(8.0):
             warnings.append("expected_goals_clamped")
 
+        if competition_total is not None and competition_total > 0 and (home_sparse or away_sparse):
+            share = 0.45 if (home_sparse and away_sparse) else 0.25
+            baseline_side = float(np.clip(competition_total / 2.0, 0.4, 3.2))
+            if home_sparse:
+                lh = (1.0 - share) * lh + share * baseline_side * (1.0 if is_neutral else 1.08)
+            if away_sparse:
+                la = (1.0 - share) * la + share * baseline_side
+            warnings.append("competition_baseline_applied")
+
         return lh, la, warnings
+
+    def mean_1n2_log_loss(self, matches: List[MatchData]) -> float:
+        """Chronological score of the current parameters. Does not refit."""
+        if not matches or not self.is_fitted:
+            return float("inf")
+        total = 0.0
+        for match in matches:
+            home_lambda, away_lambda, _ = self.predict_lambdas(match.home_team, match.away_team, match.is_neutral)
+            matrix, _, _ = compute_score_matrix(home_lambda, away_lambda, self.rho)
+            probabilities = extract_match_markets_from_matrix(matrix)["1N2"]
+            if match.home_goals > match.away_goals:
+                probability = probabilities["home"]
+            elif match.home_goals == match.away_goals:
+                probability = probabilities["draw"]
+            else:
+                probability = probabilities["away"]
+            total += -np.log(max(float(probability), 1e-6))
+        return float(total / len(matches))
 
     def predict_match(
         self,
@@ -348,7 +402,7 @@ class DixonColesModel:
         else:
             quality_tier = "usable"
             confidence_tier = "high"
-        is_abstained = (not allow_limited_data) and quality_score < 40.0
+        is_abstained = False
 
         return {
             "expected_goals": {

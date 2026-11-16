@@ -43,8 +43,10 @@ class EloEngine:
         """
         Updates Elo ratings for both teams after a match.
         """
-        e_home = self.expected_win_prob(r_home, r_away, is_neutral)
-        e_away = 1.0 - e_home
+        probs = self.predict_1n2(r_home, r_away, is_neutral)
+        # Expected points in a 1N2 match: a draw is worth half a win to each side.
+        e_home = probs["home"] + 0.5 * probs["draw"]
+        e_away = probs["away"] + 0.5 * probs["draw"]
 
         if home_score > away_score:
             s_home, s_away = 1.0, 0.0

@@ -89,7 +89,7 @@
                             <div class="text-lg font-extrabold mono text-[#F0F0E8]">{{ number_format($parlay->combined_odds, 2) }}</div>
                         </div>
                         <div class="text-right border-l border-[#303A32] pl-3">
-                            <div class="text-[10px] text-[#A2ACA3]">Chances Modèle</div>
+                            <div class="text-[10px] text-[#A2ACA3]">Produit indicatif</div>
                             <div class="text-lg font-extrabold mono text-[#88B69A]">{{ round($parlay->combined_prob * 100, 1) }}%</div>
                         </div>
                         <div class="text-right border-l border-[#303A32] pl-3">

@@ -329,7 +329,7 @@ def test_poisson_fit_rejects_invalid_optimizer_results(monkeypatch, result_facto
         MatchData("Home B", "Away C", 1, 1, 4),
     ]
     model = DixonColesModel()
-    expected_size = 2 + 2 * (5 - 1)
+    expected_size = 3 + 2 * (5 - 1)
     monkeypatch.setattr(
         "app.core.poisson_regressor.minimize",
         lambda *args, **kwargs: result_factory(expected_size),
@@ -355,3 +355,46 @@ def test_bootstrap_reports_unavailable_when_sample_is_insufficient():
 
     assert result["available"] is False
     assert result["method"] == "bootstrap_unavailable_insufficient_sample"
+
+
+def test_fitted_rho_stays_inside_the_dixon_coles_bounds():
+    matches = [
+        MatchData("Home A", "Away A", 1, 0, days_ago) for days_ago in range(8)
+    ] + [
+        MatchData("Home A", "Away B", 0, 0, 2),
+        MatchData("Home B", "Away A", 2, 1, 3),
+        MatchData("Home B", "Away B", 1, 1, 4),
+        MatchData("Away B", "Home A", 0, 2, 5),
+    ]
+    model = DixonColesModel().fit(matches)
+    assert -0.2 <= model.rho <= 0.2
+
+
+def test_equal_elo_draw_does_not_use_a_binary_win_expectation():
+    engine = EloEngine()
+    home, away = engine.update_ratings(1500, 1500, 1, 1, is_neutral=True)
+    assert home == pytest.approx(1500, abs=0.05)
+    assert away == pytest.approx(1500, abs=0.05)
+
+
+def test_published_probabilities_match_the_derived_markets(monkeypatch):
+    model = DixonColesModel()
+    model.teams = ["Home FC", "Away FC"]
+    model.team_indices = {team: index for index, team in enumerate(model.teams)}
+    model.mu = np.log(1.4)
+    model.home_adv = 0.2
+    model.attack_strengths = np.zeros(2)
+    model.defense_strengths = np.zeros(2)
+    model.team_match_counts = {"Home FC": 12, "Away FC": 12}
+    model.is_fitted = True
+    monkeypatch.setattr(prediction_api, "champion_model", model)
+
+    result = prediction_api.predict(PredictRequest(home_team="Home FC", away_team="Away FC", quality_score=90))
+    one = result["markets"]["1N2"]
+    assert result["probabilities"]["home"]["p"] == one["home"]
+    assert result["probabilities"]["draw"]["p"] == one["draw"]
+    assert result["probabilities"]["away"]["p"] == one["away"]
+    assert result["markets"]["double_chance"]["1X"] == pytest.approx(one["home"] + one["draw"], abs=1e-3)
+    assert result["markets"]["btts"]["yes"] + result["markets"]["btts"]["no"] == pytest.approx(1.0, abs=1e-3)
+    assert result["abstain"] is False
+    assert result["status"] == "ok"

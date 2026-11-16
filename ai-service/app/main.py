@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.devig import devig_odds
-from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
+from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix, reconcile_score_matrices, rescale_outcome_regions
 from app.core.metrics import (
     calculate_brier_multiclass,
     calculate_multiclass_ece,
@@ -117,6 +117,7 @@ def load_model_state() -> None:
         champion_model.home_adv = float(state["home_adv"])
         champion_model.attack_strengths = np.array(state["attack_strengths"], dtype=float)
         champion_model.defense_strengths = np.array(state["defense_strengths"], dtype=float)
+        champion_model.rho = float(state.get("rho", champion_model.rho))
         champion_model.team_match_counts = {team: int(count) for team, count in team_match_counts.items()}
         champion_model.training_hash = state.get("training_hash", "")
         champion_model.is_fitted = bool(state.get("is_fitted", False))
@@ -150,6 +151,7 @@ def save_model_state() -> None:
         "model_version": MODEL_VERSION,
         "mu": champion_model.mu,
         "home_adv": champion_model.home_adv,
+        "rho": champion_model.rho,
         "attack_strengths": champion_model.attack_strengths.tolist(),
         "defense_strengths": champion_model.defense_strengths.tolist(),
         "team_match_counts": champion_model.team_match_counts,
@@ -175,6 +177,24 @@ def save_model_state() -> None:
 
 
 load_model_state()
+
+
+def blend_published_1n2(model_probs, elo_probs, form_probs, market_probabilities, market_weight):
+    """Applies the fixed Elo, form and market weights, then renormalizes."""
+    blended = [
+        0.65 * model_probs[0] + 0.25 * elo_probs["home"] + 0.10 * form_probs[0],
+        0.65 * model_probs[1] + 0.25 * elo_probs["draw"] + 0.10 * form_probs[1],
+        0.65 * model_probs[2] + 0.25 * elo_probs["away"] + 0.10 * form_probs[2],
+    ]
+    if market_probabilities is not None:
+        model_weight = 1.0 - market_weight
+        blended = [
+            model_weight * blended[index] + market_weight * market_probabilities[index]
+            for index in range(3)
+        ]
+    total = sum(blended)
+    return [value / total for value in blended]
+
 
 def require_internal_secret(x_service_secret: Optional[str] = Header(default=None)) -> None:
     expected_secret = os.getenv("AI_SERVICE_SECRET")
@@ -235,7 +255,29 @@ def train(req: TrainRequest):
         for item in req.matches
     ]
     try:
-        champion_model.fit(training_rows)
+        ordered = sorted(training_rows, key=lambda row: row.days_ago)
+        accepted = True
+        if champion_model.is_fitted and len(ordered) >= 25:
+            split = max(5, len(ordered) // 5)
+            recent, older = ordered[:split], ordered[split:]
+            if len(older) >= 5:
+                probe = DixonColesModel(
+                    xi=champion_model.xi,
+                    l2_reg=champion_model.l2_reg,
+                    rho=champion_model.rho,
+                )
+                try:
+                    probe.fit(older)
+                    probe_loss = probe.mean_1n2_log_loss(recent)
+                    baseline_loss = champion_model.mean_1n2_log_loss(recent)
+                    accepted = probe_loss <= baseline_loss + 0.03
+                except RuntimeError:
+                    accepted = True
+        if accepted:
+            champion_model.fit(training_rows)
+        else:
+            champion_model.fit_success = True
+            champion_model.fit_message = "Chronological holdout did not improve log loss; previous parameters kept"
     except RuntimeError as exc:
         # The model keeps its previous valid state; expose the real failure to
         # the caller instead of claiming that retraining succeeded.
@@ -297,7 +339,11 @@ def predict(req: PredictRequest):
         warnings = ["custom_lambdas_override"]
     else:
         lh, la, warnings = champion_model.predict_lambdas(
-            req.home_team, req.away_team, req.is_neutral_ground
+            req.home_team,
+            req.away_team,
+            req.is_neutral_ground,
+            competition_total=req.competition_goals_per_match,
+            international=req.is_international,
         )
 
     # Availability and schedule adjustments are applied only when sourced data exists.
@@ -312,33 +358,22 @@ def predict(req: PredictRequest):
             la *= 0.95
         warnings.append("short_rest_adjustment_applied")
 
-    # Compute score matrix
+    # One score matrix is the source of every published market. Specialists
+    # tilt that matrix, then Elo, form and the market move only its 1N2 regions.
     matrix, residual_mass, n = compute_score_matrix(lh, la, champion_model.rho)
+    dc_1n2 = extract_match_markets_from_matrix(matrix)["1N2"]
     specialist_matrices = market_specialists.predict(matrix, req.home_team, req.away_team)
-    outcome_markets = extract_match_markets_from_matrix(specialist_matrices["outcome"])
-    goals_markets = extract_match_markets_from_matrix(specialist_matrices["goals"])
-    btts_markets = extract_match_markets_from_matrix(specialist_matrices["btts"])
-    exact_markets = extract_match_markets_from_matrix(specialist_matrices["exact_score"])
-    markets = {
-        **outcome_markets,
-        "totals": goals_markets["totals"],
-        "btts": btts_markets["btts"],
-        "combos": goals_markets["combos"],
-        "goal_margin": goals_markets["goal_margin"],
-        "team_totals": goals_markets["team_totals"],
-        "clean_sheet": btts_markets["clean_sheet"],
-        "top_scores": exact_markets["top_scores"],
-        "other_scores_mass": exact_markets["other_scores_mass"],
-    }
-    warnings.append("specialized_market_models_applied")
+    reconciled = reconcile_score_matrices(
+        matrix,
+        specialist_matrices,
+        {"outcome": 0.15, "goals": 0.15, "btts": 0.10, "exact_score": 0.05},
+    )
+    # The weights above sum to 0.45; the Dixon-Coles matrix keeps the remaining mass.
+    reconciled = 0.55 * matrix + 0.45 * reconciled
+    reconciled = reconciled / max(float(reconciled.sum()), 1e-12)
+    structural = extract_match_markets_from_matrix(reconciled)
+    warnings.append("reconciled_score_distribution_applied")
 
-    p_home = markets["1N2"]["home"]
-    p_draw = markets["1N2"]["draw"]
-    p_away = markets["1N2"]["away"]
-
-    # Blend only with a complete, already de-vigged market snapshot.
-    # The model remains dominant; the market is a controlled sanity check.
-    model_probs = [p_home, p_draw, p_away]
     elo_probs = elo_engine.predict_1n2(
         elo_ratings.get(req.home_team, elo_engine.default_elo),
         elo_ratings.get(req.away_team, elo_engine.default_elo),
@@ -349,30 +384,41 @@ def predict(req: PredictRequest):
     form_delta = float(np.clip(home_form - away_form, -1.0, 1.0))
     form_home = float(np.clip(0.33 + 0.18 * form_delta, 0.10, 0.70))
     form_away = float(np.clip(0.33 - 0.18 * form_delta, 0.10, 0.70))
-    form_probs = [form_home, max(0.10, 1.0 - form_home - form_away), form_away]
-    p_home = round(0.65 * model_probs[0] + 0.25 * elo_probs["home"] + 0.10 * form_probs[0], 4)
-    p_draw = round(0.65 * model_probs[1] + 0.25 * elo_probs["draw"] + 0.10 * form_probs[1], 4)
-    p_away = round(0.65 * model_probs[2] + 0.25 * elo_probs["away"] + 0.10 * form_probs[2], 4)
-    warnings.append("elo_form_ensemble_applied")
+    form_draw = max(0.0, 1.0 - form_home - form_away)
+    form_total = form_home + form_draw + form_away
+    form_probs = [form_home / form_total, form_draw / form_total, form_away / form_total]
     has_unknown_team = any(w.startswith("unknown_or_promoted_team:") for w in warnings)
     has_low_sample_team = any(w.startswith("low_sample_team:") for w in warnings)
     has_sparse_team_history = has_unknown_team or has_low_sample_team
+    market_weight = 0.0
     if req.market_probabilities is not None:
         market_weight = 0.60 if has_sparse_team_history else 0.25
-        model_weight = 1.0 - market_weight
-        p_home = round(model_weight * p_home + market_weight * req.market_probabilities[0], 4)
-        p_draw = round(model_weight * p_draw + market_weight * req.market_probabilities[1], 4)
-        p_away = round(model_weight * p_away + market_weight * req.market_probabilities[2], 4)
-        total = p_home + p_draw + p_away
-        p_home, p_draw, p_away = [round(p / total, 4) for p in (p_home, p_draw, p_away)]
-        markets["1N2"].update({"home": p_home, "draw": p_draw, "away": p_away})
         warnings.append("market_sanity_blend_applied")
         if has_sparse_team_history:
             warnings.append("market_weight_increased_due_to_sparse_history")
+    published = blend_published_1n2(
+        [structural["1N2"]["home"], structural["1N2"]["draw"], structural["1N2"]["away"]],
+        elo_probs,
+        form_probs,
+        req.market_probabilities,
+        market_weight,
+    )
+    warnings.append("elo_form_ensemble_applied")
+    matrix = rescale_outcome_regions(reconciled, published[0], published[1], published[2])
+    markets = extract_match_markets_from_matrix(matrix)
+    p_home = markets["1N2"]["home"]
+    p_draw = markets["1N2"]["draw"]
+    p_away = markets["1N2"]["away"]
+
+    dc_point = [float(dc_1n2["home"]), float(dc_1n2["draw"]), float(dc_1n2["away"])]
+
+    def shift_bootstrap_row(row):
+        shifted = [max(1e-4, published[index] + (float(row[index]) - dc_point[index])) for index in range(3)]
+        return shifted
 
     bootstrap_replicates = int(os.getenv("PREDICTION_BOOTSTRAP_REPLICATES", "0"))
     bootstrap_min_observations = int(os.getenv("PREDICTION_BOOTSTRAP_MIN_OBSERVATIONS", "20"))
-    bootstrap_key = f"{champion_model.training_hash}:{req.home_team}:{req.away_team}:{req.is_neutral_ground}:{bootstrap_replicates}"
+    bootstrap_key = f"{champion_model.training_hash}:{req.home_team}:{req.away_team}:{req.is_neutral_ground}:{bootstrap_replicates}:{round(p_home, 4)}"
     intervals = bootstrap_cache.get(bootstrap_key)
     if intervals is None:
         intervals = champion_model.bootstrap_1n2_intervals(
@@ -382,6 +428,7 @@ def predict(req: PredictRequest):
             replicates=bootstrap_replicates,
             min_observations=bootstrap_min_observations,
             seed=abs(hash(bootstrap_key)) % (2**32),
+            adjust=shift_bootstrap_row if bootstrap_replicates > 0 else None,
         )
         bootstrap_cache[bootstrap_key] = intervals
     if intervals.get("available"):
@@ -389,7 +436,7 @@ def predict(req: PredictRequest):
         ci80_home, ci95_home = interval_values["home"]["ci80"], interval_values["home"]["ci95"]
         ci80_draw, ci95_draw = interval_values["draw"]["ci80"], interval_values["draw"]["ci95"]
         ci80_away, ci95_away = interval_values["away"]["ci80"], interval_values["away"]["ci95"]
-        warnings.append("dixon_coles_bootstrap_intervals_available")
+        warnings.append("published_probability_bootstrap_intervals_available")
     else:
         ci80_home = ci95_home = ci80_draw = ci95_draw = ci80_away = ci95_away = None
         warnings.append(f"uncertainty_not_estimable:{intervals.get('method', 'unknown')}")
@@ -398,11 +445,8 @@ def predict(req: PredictRequest):
     max_probability = ordered_probs[0]
     probability_margin = ordered_probs[0] - ordered_probs[1]
 
-    # Chaque garde ci-dessous continue d'étiqueter la prédiction. Seules les
-    # limites techniques et l'option de configuration peuvent encore produire
-    # une abstention : un manque d'historique ou une compétition inconnue ne
-    # suffisent plus.
-    limited_data_mode = ALLOW_LIMITED_DATA_PREDICTIONS
+    # A missing history lowers the displayed confidence. It never removes the pick.
+    limited_data_mode = True
     limited_data_reasons: List[str] = []
 
     if not champion_model.is_fitted:
@@ -444,11 +488,9 @@ def predict(req: PredictRequest):
         if confidence_tier == "high":
             confidence_tier = "medium"
 
-    is_abstained = bool(limited_data_reasons) and not limited_data_mode
-    if limited_data_reasons and limited_data_mode:
+    is_abstained = False
+    if limited_data_reasons:
         warnings.extend(f"limited_data:{reason}" for reason in limited_data_reasons)
-    elif limited_data_reasons:
-        warnings.extend(f"abstain_due_to_{reason}" for reason in limited_data_reasons)
     abstain_reason = limited_data_reasons[0] if limited_data_reasons else None
 
     duration_ms = int((time.perf_counter() - t0) * 1000)
@@ -459,10 +501,10 @@ def predict(req: PredictRequest):
 
     return {
         "match_id": req.match_id or "match-sim",
-        "status": "insufficient_data" if is_abstained else "ok",
-        "availability_status": "LIMITED_DATA" if is_abstained else "PYTHON_READY",
+        "status": "ok",
+        "availability_status": "PYTHON_READY",
         "data_quality": req.quality_score,
-        "available_markets": list(markets.keys()) if not is_abstained else [],
+        "available_markets": list(markets.keys()),
         "missing_data": [warning for warning in warnings if any(token in warning for token in ("unknown", "low_sample", "insufficient", "abstain", "untrained", "limited_data", "reference_distribution"))],
         "uncertainty": (
             {"low": "high", "medium": "medium", "high": "low"}.get(confidence_tier, "high")

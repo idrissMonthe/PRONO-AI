@@ -32,7 +32,7 @@ class GeneratePredictionsCommand extends Command
 
         // Les deux fournisseurs alimentent le même pipeline : une rencontre
         // découverte via API-Football doit être prédite comme les autres.
-        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'oddsSnapshots.market', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
+        $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'oddsSnapshots.market', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
             ->whereNotNull('external_id')
             ->whereIn('data_source', ['football-data.org', 'api-football'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
@@ -104,6 +104,26 @@ class GeneratePredictionsCommand extends Command
                         'score' => [$recent->home_score, $recent->away_score],
                     ])->values()->all();
 
+                $leagueBaselines ??= [];
+                $leagueId = (int) $match->league_id;
+                if (! array_key_exists($leagueId, $leagueBaselines)) {
+                    $leagueBaselines[$leagueId] = FootballMatch::query()
+                        ->where('league_id', $leagueId)
+                        ->where('status', 'FINISHED')
+                        ->whereNotNull('home_score')
+                        ->whereNotNull('away_score')
+                        ->avg(DB::raw('home_score + away_score'));
+                }
+                $leagueName = strtolower((string) ($match->league?->name ?? ''));
+                $leagueCode = strtoupper((string) ($match->league?->code ?? ''));
+                $isInternational = in_array($leagueCode, ['WC', 'EC', 'CLI', 'NL', 'UNL', 'AFCON', 'CAN', 'INT', 'FIFA'], true)
+                    || str_contains($leagueName, 'nation')
+                    || str_contains($leagueName, 'friendly')
+                    || str_contains($leagueName, 'amical')
+                    || str_contains($leagueName, 'qualif')
+                    || str_contains($leagueName, 'coupe d\'afrique')
+                    || str_contains($leagueName, 'africa cup');
+
                 $result = $client->predict([
                     'match_id' => (string) $match->id,
                     'home_team' => $match->homeTeam->name,
@@ -115,6 +135,10 @@ class GeneratePredictionsCommand extends Command
                     'absence_penalty_away' => $absencePenalty['away'],
                     'rest_days_home' => $homeRestDays,
                     'rest_days_away' => $awayRestDays,
+                    'is_international' => $isInternational,
+                    'competition_goals_per_match' => is_numeric($leagueBaselines[$leagueId] ?? null) && (float) $leagueBaselines[$leagueId] >= 0.4
+                        ? round((float) $leagueBaselines[$leagueId], 3)
+                        : null,
                 ]);
 
                 // Sélections plutôt qu'identifiants de marché : ces ids sont
@@ -143,7 +167,7 @@ class GeneratePredictionsCommand extends Command
                 $teamTotalsOdds = $match->oddsSnapshots
                     ->whereNotNull('line')
                     ->when($teamTotalsMarketId !== null, fn ($collection) => $collection->where('market_id', $teamTotalsMarketId))
-                    ->mapWithKeys(fn ($o) => [strtolower(str_replace('_', '.', $o->selection)).'@'.(float) $o->line => (float) $o->decimal_odds])
+                    ->mapWithKeys(fn ($o) => [strtolower((string) $o->selection).'@'.(float) $o->line => (float) $o->decimal_odds])
                     ->all();
 
                 $doubleChanceOdds = $match->oddsSnapshots
@@ -288,11 +312,7 @@ class GeneratePredictionsCommand extends Command
                     $finalCandidate = $review['final_candidate'] ?? null;
                     $decision = $review['decision'] ?? 'insufficient_data';
                     $finalOrigin = $review['prediction_origin'] ?? 'PYTHON_ESTIMATE';
-                    $aiAccepted = $finalOrigin === 'AI_ESTIMATE'
-                        && in_array(strtoupper((string) config('services.hybrid_prediction.mode', 'ASSISTED')), ['ASSISTED', 'ACTIVE'], true);
-                    $finalIsAbstained = ((bool) ($result['abstain'] ?? true) && ! $aiAccepted)
-                        || in_array($decision, ['reject', 'insufficient_data'], true)
-                        || ! is_array($finalCandidate);
+                    $finalIsAbstained = ! is_array($finalCandidate);
                     // Une seule prédiction officielle par rencontre : les
                     // précédentes restent en base comme historique, mais sont
                     // démises avant l'enregistrement de la nouvelle.

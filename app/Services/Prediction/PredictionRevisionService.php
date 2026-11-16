@@ -21,9 +21,6 @@ class PredictionRevisionService
         $initial = $this->initialCandidate($candidates);
         $quality = (float) ($context['quality_score'] ?? 0);
         $hybridMode = strtoupper((string) config('services.hybrid_prediction.mode', 'ASSISTED'));
-        // En phase de test, une donnée limitée ne doit plus supprimer la
-        // sélection : elle est conservée et explicitement signalée.
-        $allowLimitedData = (bool) config('services.prediction.allow_limited_data', true);
 
         // En mode ASSISTED/ACTIVE, l’IA peut prendre le relais quand Python
         // s’abstient. La proposition reste marquée AI_ESTIMATE et n’est pas
@@ -51,15 +48,11 @@ class PredictionRevisionService
             return $this->decision('insufficient_data', $initial, null, 'Aucun marché calculable n’est disponible.', ['no_calculable_market'], $candidates);
         }
         if ($quality < 58) {
-            if (! $allowLimitedData) {
-                return $this->decision('reject', $initial, null, 'La qualité des données est insuffisante pour publier une sélection.', ['data_quality_below_validation_threshold'], $candidates);
-            }
-
             return $this->decision(
                 'keep',
                 $initial,
                 $initial,
-                'Qualité de données limitée : la meilleure sélection calculée est conservée et signalée comme telle.',
+                'Qualité de données limitée : la meilleure sélection calculée est publiée avec une confiance basse.',
                 ['data_quality_below_validation_threshold', 'limited_data_mode'],
                 $candidates,
                 'low'
@@ -87,42 +80,39 @@ class PredictionRevisionService
                 $candidate = $initial;
             }
             if (in_array($aiReview['decision'] ?? null, ['keep', 'replace'], true) && $candidate) {
-                $decision = $this->aiDecision($aiReview, $initial, $candidate, $candidates);
-
-                // Même validée par l'IA, la sélection initiale peut céder la
-                // place à un marché tournant fiable disposant d'une vraie cote.
-                if (($aiReview['decision'] ?? null) === 'keep') {
-                    $rotated = $this->rotationOverride($initial, $candidates, $context);
-                    if ($rotated) {
-                        $decision['decision'] = 'replace';
-                        $decision['final_candidate'] = $rotated;
-                        $decision['reasoning'] = trim(($decision['reasoning'] ?? '') . ' Rotation des marchés vers ' . $rotated['label'] . ' (cote bookmaker réelle).');
-                        $decision['risk_factors'] = array_values(array_unique(array_merge(
-                            $decision['risk_factors'] ?? [],
-                            ['market_rotation']
-                        )));
+                return $this->aiDecision($aiReview, $initial, $candidate, $candidates);
+            }
+            if (in_array($aiReview['decision'] ?? null, ['reject', 'insufficient_data'], true)) {
+                $retry = $this->geminiService->reviewPrediction(array_merge($context, [
+                    'initial_candidate' => $initial,
+                    'candidates' => $candidates,
+                    'python_result' => [
+                        'expected_goals' => $result['expected_goals'] ?? [],
+                        'probabilities' => $result['probabilities'] ?? [],
+                        'warnings' => $result['warnings'] ?? [],
+                        'quality' => $result['quality'] ?? [],
+                    ],
+                    'correction_request' => 'Choisis obligatoirement decision=keep ou decision=replace avec une candidate_key existante. Ne réponds pas reject ni insufficient_data : un match traité doit recevoir un pronostic.',
+                ]));
+                if (! ($retry['fallback'] ?? true)) {
+                    $retried = collect($candidates)->firstWhere('candidate_key', $retry['candidate_key'] ?? null);
+                    if (($retry['decision'] ?? null) === 'keep') {
+                        $retried = $initial;
+                    }
+                    if (in_array($retry['decision'] ?? null, ['keep', 'replace'], true) && $retried) {
+                        return $this->aiDecision($retry, $initial, $retried, $candidates);
                     }
                 }
 
-                return $decision;
-            }
-            if (in_array($aiReview['decision'] ?? null, ['reject', 'insufficient_data'], true)) {
-                if ($allowLimitedData) {
-                    return $this->decision(
-                        'keep',
-                        $initial,
-                        $initial,
-                        'La révision externe proposait de rejeter la sélection ; elle est conservée en mode données limitées.',
-                        array_values(array_unique(array_merge(
-                            $aiReview['risk_factors'] ?? [],
-                            ['external_review_rejected_candidate', 'limited_data_mode']
-                        ))),
-                        $candidates,
-                        'low'
-                    );
-                }
-
-                return $this->aiDecision($aiReview, $initial, null, $candidates);
+                return $this->decision(
+                    'keep',
+                    $initial,
+                    $initial,
+                    'Gemini n’a pas retenu de sélection exploitable. Mode dégradé : la sélection statistique initiale est publiée et explicitement signalée.',
+                    array_values(array_unique(array_merge($aiReview['risk_factors'] ?? [], ['degraded_mode', 'gemini_declined_selection']))),
+                    $candidates,
+                    'low'
+                );
             }
         }
 
@@ -206,19 +196,15 @@ class PredictionRevisionService
         }
 
         if ($initial['probability'] < 0.40) {
-            if ($allowLimitedData) {
-                return $this->decision(
-                    'keep',
-                    $initial,
-                    $initial,
-                    'La sélection initiale a une probabilité faible ; elle est conservée et signalée en mode données limitées.',
-                    ['low_initial_probability', 'limited_data_mode'],
-                    $candidates,
-                    'low'
-                );
-            }
-
-            return $this->decision('reject', $initial, null, 'La sélection initiale ne franchit pas le seuil de solidité et aucune alternative ne la dépasse.', ['low_initial_probability'], $candidates);
+            return $this->decision(
+                'keep',
+                $initial,
+                $initial,
+                'La sélection initiale a une probabilité faible ; elle est publiée avec une confiance basse.',
+                ['low_initial_probability', 'limited_data_mode'],
+                $candidates,
+                'low'
+            );
         }
 
         return $this->decision('keep', $initial, $initial, 'La sélection initiale reste la meilleure candidate validée.', ['initial_candidate_remains_best'], $candidates);
@@ -325,25 +311,26 @@ class PredictionRevisionService
         $homeName = (string) ($oddsContext['home_team'] ?? 'Domicile');
         $awayName = (string) ($oddsContext['away_team'] ?? 'Extérieur');
 
-        // Total de buts par équipe : seules les lignes cotées sont candidates.
-        foreach (($oddsContext['team_totals'] ?? []) as $key => $odd) {
-            if (! preg_match('/^(home|away)_(over|under)@(\d+(?:\.\d+)?)$/', (string) $key, $parts)) {
-                continue;
+        foreach (['home' => $homeName, 'away' => $awayName] as $side => $team) {
+            $prob = $markets['dnb'][$side] ?? null;
+            $label = $side === 'home'
+                ? "Draw No Bet {$team}"
+                : "Draw No Bet {$team}";
+            $add('dnb', $side, $label, $prob);
+        }
+
+        foreach (['home' => $homeName, 'away' => $awayName] as $side => $team) {
+            foreach (['over', 'under'] as $direction) {
+                foreach ([0.5, 1.5, 2.5] as $line) {
+                    $teamKey = str_replace('.', '_', (string) $line);
+                    $prob = $markets['team_totals'][$side][$direction.'_'.$teamKey] ?? null;
+                    $oddsKey = $side.'_'.$direction.'@'.$line;
+                    $legacyKey = $side.'.'.$direction.'@'.$line;
+                    $odd = $oddsContext['team_totals'][$oddsKey] ?? $oddsContext['team_totals'][$legacyKey] ?? null;
+                    $label = ($direction === 'over' ? 'Plus de ' : 'Moins de ').str_replace('.', ',', (string) $line).' buts — '.$team;
+                    $add('team_totals', $side.'_'.strtoupper($direction).'_'.$line, $label, $prob, $line, $odd !== null ? (float) $odd : null);
+                }
             }
-            $side = $parts[1];
-            $direction = $parts[2];
-            $line = (float) $parts[3];
-            if (! in_array($line, [0.5, 1.5, 2.5, 3.5], true)) {
-                continue;
-            }
-            $teamKey = str_replace('.', '_', (string) $line);
-            $prob = $markets['team_totals'][$side][$direction.'_'.$teamKey] ?? null;
-            if ($prob === null) {
-                continue;
-            }
-            $team = $side === 'home' ? $homeName : $awayName;
-            $label = ($direction === 'over' ? 'Plus de ' : 'Moins de ') . str_replace('.', ',', (string) $line) . ' buts — ' . $team;
-            $add('team_totals', $side . '_' . strtoupper($direction) . '_' . $line, $label, $prob, $line, (float) $odd);
         }
 
         // BTTS (Les deux équipes marquent)

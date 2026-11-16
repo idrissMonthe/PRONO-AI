@@ -110,13 +110,15 @@ class PredictionRevisionServiceTest extends TestCase
         $this->assertContains('limited_data_mode', $review['risk_factors']);
     }
 
-    public function test_low_quality_is_rejected_when_limited_data_mode_is_disabled(): void
+    public function test_low_quality_is_published_with_low_confidence_even_when_the_old_flag_is_off(): void
     {
         config()->set('services.prediction.allow_limited_data', false);
 
         $review = $this->service()->review($this->predictionResult(['1N2' => ['home' => 0.66, 'draw' => 0.20, 'away' => 0.14]]), ['quality_score' => 40]);
 
-        $this->assertSame('reject', $review['decision']);
+        $this->assertSame('keep', $review['decision']);
+        $this->assertSame('1N2', $review['final_candidate']['market']);
+        $this->assertContains('limited_data_mode', $review['risk_factors']);
     }
 
     public function test_insufficient_data_decision_when_no_market_is_calculable(): void

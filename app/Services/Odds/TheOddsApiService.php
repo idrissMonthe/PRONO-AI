@@ -350,13 +350,45 @@ class TheOddsApiService
 
     private function nameMatches(string $candidate, string $team): bool
     {
-        $candidate = strtolower(trim(\Illuminate\Support\Str::ascii($candidate)));
-        $team = strtolower(trim(\Illuminate\Support\Str::ascii($team)));
-        if ($candidate === '' || $team === '') {
+        $ignore = ['over', 'under', 'yes', 'no', 'draw', 'nul', 'home', 'away', 'plus', 'moins'];
+        $candidateTokens = $this->distinctiveTokens($candidate, $ignore);
+        $teamTokens = $this->distinctiveTokens($team, $ignore);
+        if ($candidateTokens === [] || $teamTokens === []) {
             return false;
         }
 
-        return str_contains($candidate, $team) || str_contains($team, $candidate);
+        sort($candidateTokens);
+        sort($teamTokens);
+        if ($candidateTokens === $teamTokens) {
+            return true;
+        }
+
+        // The outcome text may only add ignored betting words. Any extra
+        // distinctive token means another club, so "Milan" must not match
+        // "Inter Milan" and "Paris" must not match "Paris Saint-Germain".
+        return array_diff($teamTokens, $candidateTokens) === []
+            && array_diff($candidateTokens, $teamTokens) === [];
+    }
+
+    /**
+     * @param  array<int, string>  $ignore
+     * @return array<int, string>
+     */
+    private function distinctiveTokens(string $value, array $ignore): array
+    {
+        $trans = strtr(strtolower(trim(\Illuminate\Support\Str::ascii($value))), [
+            'á' => 'a', 'à' => 'a', 'â' => 'a', 'ä' => 'a', 'ã' => 'a',
+            'é' => 'e', 'è' => 'e', 'ê' => 'e', 'ë' => 'e', 'í' => 'i',
+            'ó' => 'o', 'ô' => 'o', 'ö' => 'o', 'ú' => 'u', 'ü' => 'u',
+            'ç' => 'c', 'ñ' => 'n',
+        ]);
+        $words = preg_split('/[^a-z0-9]+/', $trans) ?: [];
+        $stopWords = ['fc', 'cf', 'afc', 'sc', 'ac', 'as', 'club', 'de', 'the'];
+
+        return array_values(array_unique(array_filter(
+            $words,
+            fn (string $word): bool => $word !== '' && strlen($word) >= 3 && ! in_array($word, $stopWords, true) && ! in_array($word, $ignore, true)
+        )));
     }
 
     private function redactSecrets(string $message): string
