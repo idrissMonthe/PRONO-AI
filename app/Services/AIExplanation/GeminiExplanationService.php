@@ -303,7 +303,8 @@ class GeminiExplanationService
             . "2. Tu ne dois JAMAIS utiliser de termes incitatifs comme 'pari sûr', 'à jouer', 'bonne affaire' ou donner des conseils de mise financière.\n"
             . "3. Rappelle systématiquement l'incertitude inhérente au football (par exemple : une probabilité de 65% signifie que dans 35% des cas, l'événement ne se produit pas).\n"
             . "4. Tout écart avec les cotes du marché peut refléter une information manquante au modèle (compositions tardives, météo, dynamique interne).\n"
-            . "5. Cite UNIQUEMENT les chiffres et pourcentages exacts fournis dans le document JSON de contexte.";
+            . "5. Cite UNIQUEMENT les chiffres et pourcentages exacts fournis dans le document JSON de contexte.\n"
+            . "6. Si une donnée est absente ou nulle, indique qu'elle est indisponible. N'invente aucun chiffre pour la remplacer.";
 
         if ($mode === 'expert') {
             $base .= "\nMode EXPERT : Analyse technique approfondie, détaille les lambdas (buts attendus Poisson/Dixon-Coles), la calibration, les intervalles de crédibilité (ci80, ci95) et le retrait de marge.";
@@ -386,31 +387,66 @@ class GeminiExplanationService
     {
         $home = $context['home_team'] ?? 'Équipe domicile';
         $away = $context['away_team'] ?? 'Équipe extérieur';
-        $pHome = round(($context['probabilities']['home']['p'] ?? 0.45) * 100, 1);
-        $pDraw = round(($context['probabilities']['draw']['p'] ?? 0.27) * 100, 1);
-        $pAway = round(($context['probabilities']['away']['p'] ?? 0.28) * 100, 1);
-        $xGHome = $context['expected_goals']['home'] ?? 1.45;
-        $xGAway = $context['expected_goals']['away'] ?? 1.10;
-        $qScore = $context['quality']['score'] ?? 85;
-        $scoreModal = $context['top_scores'][0]['score'] ?? '1-1';
+        $pHome = $this->contextUnitProbability($context['probabilities']['home']['p'] ?? null);
+        $pDraw = $this->contextUnitProbability($context['probabilities']['draw']['p'] ?? null);
+        $pAway = $this->contextUnitProbability($context['probabilities']['away']['p'] ?? null);
+        $xGHome = $this->contextNonNegative($context['expected_goals']['home'] ?? null);
+        $xGAway = $this->contextNonNegative($context['expected_goals']['away'] ?? null);
+        $qScore = $this->contextNonNegative($context['quality']['score'] ?? null);
+        $scoreModal = is_string($context['top_scores'][0]['score'] ?? null) ? $context['top_scores'][0]['score'] : null;
 
-        if ($mode === 'expert') {
-            return "### Analyse Statistique Approfondie (Mode Expert)\n\n"
-                . "- **Buts attendus (Dixon-Coles)** : $\\lambda_{\\text{dom}} = {$xGHome}$ contre $\\lambda_{\\text{ext}} = {$xGAway}$. Le volume offensif modélisé accorde l'ascendant à {$home}.\n"
-                . "- **Distribution 1N2** : Victoire {$home} : **{$pHome}%** | Nul : **{$pDraw}%** | Victoire {$away} : **{$pAway}%**.\n"
-                . "- **Score modal** : `{$scoreModal}` avec une probabilité résiduelle de queue inférieure à $10^{-6}$.\n"
-                . "- **Indice de données** : Complétude estimée à **{$qScore}/100**. Les intervalles de crédibilité à 95% encadrent l'incertitude épistémique.\n"
-                . "- **Avertissement méthodologique** : Tout décalage avec la cote de clôture du bookmaker peut résulter de paramètres non quantifiés (compositions de dernière minute, fatigue cumulée).";
+        $missing = array_values(array_filter([
+            ($pHome === null || $pDraw === null || $pAway === null) ? 'les probabilités 1N2' : null,
+            ($xGHome === null || $xGAway === null) ? 'les buts attendus' : null,
+            $scoreModal === null ? 'le score le plus probable' : null,
+            $qScore === null ? 'l’indice de qualité des données' : null,
+        ]));
+
+        $lines = ["### Synthèse Analytique du Match", ''];
+        if ($pHome !== null && $pDraw !== null && $pAway !== null) {
+            $lines[] = "Victoire {$home} : **{$this->percentLabel($pHome)}**. Match nul : **{$this->percentLabel($pDraw)}**. Victoire {$away} : **{$this->percentLabel($pAway)}**.";
         }
+        if ($xGHome !== null && $xGAway !== null) {
+            $lines[] = "Buts attendus fournis par le modèle : **{$xGHome}** pour {$home} et **{$xGAway}** pour {$away}.";
+        }
+        if ($scoreModal !== null) {
+            $lines[] = "Score le plus probable enregistré : **{$scoreModal}**.";
+        }
+        if ($qScore !== null) {
+            $lines[] = "Indice de données enregistré : **{$qScore}/100**.";
+        }
+        if ($missing !== []) {
+            $lines[] = 'Informations indisponibles : '.implode(', ', $missing).'. Aucun chiffre de remplacement n’est affiché.';
+        }
+        $lines[] = '';
+        $lines[] = '> **Rappel de prudence** : ces chiffres décrivent le modèle lorsqu’ils sont présents. Ils ne garantissent pas le résultat.';
 
-        $fav = $pHome >= $pAway ? $home : $away;
-        $favProb = max($pHome, $pAway);
+        return implode("\n", $lines);
+    }
 
-        return "### Synthèse Analytique du Match\n\n"
-            . "Le modèle statistique attribue un avantage à **{$fav}** avec une probabilité estimée à **{$favProb}%** "
-            . "(contre **{$pDraw}%** pour le match nul et **" . min($pHome, $pAway) . "%** pour l'adversaire).\n\n"
-            . "En termes d'espérance de buts, la modélisation Poisson prévoit environ **{$xGHome}** but(s) pour {$home} et **{$xGAway}** pour {$away}. Le score le plus probable selon la matrice est **{$scoreModal}**.\n\n"
-            . "> **Rappel de prudence** : Une probabilité de {$favProb}% implique que le résultat inverse ou nul survient dans plus d'un tiers des situations similaires. Les statistiques reflètent une tendance probabiliste, non une certitude sportive.";
+    private function contextUnitProbability(mixed $value): ?float
+    {
+        if (! is_numeric($value)) {
+            return null;
+        }
+        $number = (float) $value;
+
+        return ($number >= 0.0 && $number <= 1.0) ? $number : null;
+    }
+
+    private function contextNonNegative(mixed $value): ?float
+    {
+        if (! is_numeric($value)) {
+            return null;
+        }
+        $number = (float) $value;
+
+        return $number >= 0.0 ? $number : null;
+    }
+
+    private function percentLabel(float $probability): string
+    {
+        return rtrim(rtrim(number_format($probability * 100, 1, '.', ''), '0'), '.').' %';
     }
 
     /**

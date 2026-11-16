@@ -140,19 +140,19 @@ class GeminiController extends Controller
         // Cas 3 : paramètres individuels
         else {
             $context = [
-                'home_team' => $data['home_team'] ?? 'Équipe A',
-                'away_team' => $data['away_team'] ?? 'Équipe B',
+                'home_team' => $data['home_team'] ?? null,
+                'away_team' => $data['away_team'] ?? null,
                 'expected_goals' => [
-                    'home' => (float)($data['xg_home'] ?? 1.45),
-                    'away' => (float)($data['xg_away'] ?? 1.10),
+                    'home' => is_numeric($data['xg_home'] ?? null) ? (float) $data['xg_home'] : null,
+                    'away' => is_numeric($data['xg_away'] ?? null) ? (float) $data['xg_away'] : null,
                 ],
                 'probabilities' => [
-                    'home' => ['p' => (float)($data['prob_home'] ?? 0.46)],
-                    'draw' => ['p' => (float)($data['prob_draw'] ?? 0.27)],
-                    'away' => ['p' => (float)($data['prob_away'] ?? 0.27)],
+                    'home' => ['p' => is_numeric($data['prob_home'] ?? null) ? (float) $data['prob_home'] : null],
+                    'draw' => ['p' => is_numeric($data['prob_draw'] ?? null) ? (float) $data['prob_draw'] : null],
+                    'away' => ['p' => is_numeric($data['prob_away'] ?? null) ? (float) $data['prob_away'] : null],
                 ],
-                'top_scores' => $data['top_scores'] ?? [['score' => '1-1', 'p' => 0.12]],
-                'quality' => ['score' => (float)($data['quality_score'] ?? 90.0)],
+                'top_scores' => is_array($data['top_scores'] ?? null) ? $data['top_scores'] : [],
+                'quality' => ['score' => is_numeric($data['quality_score'] ?? null) ? (float) $data['quality_score'] : null],
             ];
         }
 
@@ -261,8 +261,8 @@ class GeminiController extends Controller
                 ],
                 'top_scores' => $pred->top_scores_json ?? [],
                 'quality' => [
-                    'score' => (float)($pred->quality_score ?? $match->quality_score ?? 85.0),
-                    'tier' => $pred->quality_tier ?? $match->quality_tier ?? 'usable',
+                    'score' => is_numeric($pred->quality_score) ? (float) $pred->quality_score : (is_numeric($match->quality_score) ? (float) $match->quality_score : null),
+                    'tier' => $pred->quality_tier ?? $match->quality_tier,
                 ],
             ];
         }
@@ -274,7 +274,7 @@ class GeminiController extends Controller
                 'home_team' => $match->homeTeam->name,
                 'away_team' => $match->awayTeam->name,
                 'is_neutral_ground' => (bool)$match->is_neutral_ground,
-                'quality_score' => (float)($match->quality_score ?? 85.0),
+                'quality_score' => is_numeric($match->quality_score) ? (float) $match->quality_score : null,
             ]);
 
             return [
@@ -291,14 +291,15 @@ class GeminiController extends Controller
                 'match_id' => (string)$match->id,
                 'home_team' => $match->homeTeam->name,
                 'away_team' => $match->awayTeam->name,
-                'expected_goals' => ['home' => 1.45, 'away' => 1.10, 'total' => 2.55],
+                'expected_goals' => ['home' => null, 'away' => null, 'total' => null],
                 'probabilities' => [
-                    'home' => ['p' => 0.46, 'ci80' => [0.41, 0.51]],
-                    'draw' => ['p' => 0.27, 'ci80' => [0.23, 0.31]],
-                    'away' => ['p' => 0.27, 'ci80' => [0.22, 0.32]],
+                    'home' => ['p' => null],
+                    'draw' => ['p' => null],
+                    'away' => ['p' => null],
                 ],
-                'top_scores' => [['score' => '1-1', 'p' => 0.12], ['score' => '1-0', 'p' => 0.11]],
-                'quality' => ['score' => 85.0, 'tier' => 'usable'],
+                'top_scores' => [],
+                'quality' => ['score' => is_numeric($match->quality_score) ? (float) $match->quality_score : null, 'tier' => $match->quality_tier],
+                'missing_data' => ['prediction'],
             ];
         }
     }
@@ -306,16 +307,17 @@ class GeminiController extends Controller
     protected function fallbackContext(): array
     {
         return [
-            'home_team' => 'Équipe Domicile',
-            'away_team' => 'Équipe Extérieur',
-            'expected_goals' => ['home' => 1.5, 'away' => 1.1, 'total' => 2.6],
+            'home_team' => null,
+            'away_team' => null,
+            'expected_goals' => ['home' => null, 'away' => null, 'total' => null],
             'probabilities' => [
-                'home' => ['p' => 0.47, 'ci80' => [0.42, 0.52]],
-                'draw' => ['p' => 0.27, 'ci80' => [0.23, 0.31]],
-                'away' => ['p' => 0.26, 'ci80' => [0.21, 0.31]],
+                'home' => ['p' => null],
+                'draw' => ['p' => null],
+                'away' => ['p' => null],
             ],
-            'top_scores' => [['score' => '1-1', 'p' => 0.12], ['score' => '2-1', 'p' => 0.10]],
-            'quality' => ['score' => 90.0, 'tier' => 'usable'],
+            'top_scores' => [],
+            'quality' => ['score' => null, 'tier' => null],
+            'missing_data' => ['match', 'prediction'],
         ];
     }
 }

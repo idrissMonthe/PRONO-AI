@@ -36,6 +36,23 @@ class GeminiExplanationIntegrityTest extends TestCase
         $this->assertDatabaseHas('llm_interactions', ['verification_passed' => false]);
     }
 
+    public function test_deterministic_explanation_does_not_invent_missing_statistics(): void
+    {
+        $text = app(GeminiExplanationService::class)->generateDeterministicExplanation([
+            'home_team' => 'Paris FC',
+            'away_team' => 'Lyon',
+            'expected_goals' => ['home' => null, 'away' => null],
+            'probabilities' => ['home' => ['p' => null], 'draw' => ['p' => null], 'away' => ['p' => null]],
+            'top_scores' => [],
+            'quality' => ['score' => null],
+        ]);
+
+        $this->assertStringContainsString('indisponibles', $text);
+        $this->assertStringNotContainsString('45', $text);
+        $this->assertStringNotContainsString('1-1', $text);
+        $this->assertStringNotContainsString('1.45', $text);
+    }
+
     public function test_numbers_supported_by_the_context_are_kept(): void
     {
         Http::fake([

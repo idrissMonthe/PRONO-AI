@@ -424,6 +424,41 @@
         });
     }
 
+    function unitProbability(value) {
+        if (value === null || value === undefined || value === '') return null;
+        const number = Number(value);
+        if (!Number.isFinite(number) || number < 0 || number > 1) return null;
+        return number;
+    }
+
+    function formatProbability(value) {
+        return value === null ? '—' : Math.round(value * 100) + '%';
+    }
+
+    function formatAvailableNumber(value) {
+        if (value === null || value === undefined || value === '') return '—';
+        const number = Number(value);
+        return Number.isFinite(number) ? String(number) : '—';
+    }
+
+    function formatRecordedScore(home, away) {
+        const homeKnown = home !== null && home !== undefined && home !== '' && Number.isFinite(Number(home));
+        const awayKnown = away !== null && away !== undefined && away !== '' && Number.isFinite(Number(away));
+        return homeKnown && awayKnown ? `${Number(home)} - ${Number(away)}` : null;
+    }
+
+    function sumProbabilities(left, right) {
+        return left === null || right === null ? null : left + right;
+    }
+
+    function renderProbabilityCard(side, probability) {
+        document.getElementById('card-prob-' + side).innerText = formatProbability(probability);
+        document.getElementById('card-fair-' + side).innerText = probability !== null && probability > 0
+            ? '@' + (1 / probability).toFixed(2)
+            : 'Non disponible';
+        document.getElementById('card-bar-' + side).style.width = probability === null ? '0%' : (probability * 100) + '%';
+    }
+
     function renderModalData(data) {
         const info = data.match_info;
         const pronostic = data.pronostic;
@@ -443,16 +478,18 @@
         document.getElementById('card-label-home').innerText = '1 · ' + info.home_short;
         document.getElementById('card-label-away').innerText = '2 · ' + info.away_short;
 
-        document.getElementById('modal-home-xg').innerText = pronostic.expected_goals ? pronostic.expected_goals.home : '--';
-        document.getElementById('modal-away-xg').innerText = pronostic.expected_goals ? pronostic.expected_goals.away : '--';
+        document.getElementById('modal-home-xg').innerText = formatAvailableNumber(pronostic.expected_goals ? pronostic.expected_goals.home : null);
+        document.getElementById('modal-away-xg').innerText = formatAvailableNumber(pronostic.expected_goals ? pronostic.expected_goals.away : null);
+
+        const recordedScore = formatRecordedScore(info.home_score, info.away_score);
 
         // Score ou Statut
-        if (info.status === 'FINISHED' && info.home_score !== null) {
-            document.getElementById('modal-score-badge').innerText = `${info.home_score} - ${info.away_score}`;
+        if (info.status === 'FINISHED') {
+            document.getElementById('modal-score-badge').innerText = recordedScore || 'Score indisponible';
             document.getElementById('modal-status-text').innerText = 'TERMINÉ';
             document.getElementById('modal-status-text').className = 'text-[10px] text-[#C3A16A] mono mt-1 font-bold';
-        } else if (info.status === 'IN_PLAY' || info.status === 'PAUSED') {
-            document.getElementById('modal-score-badge').innerText = `${info.home_score ?? 0} - ${info.away_score ?? 0}`;
+        } else if (info.status === 'IN_PLAY' || info.status === 'PAUSED' || info.status === 'LIVE') {
+            document.getElementById('modal-score-badge').innerText = recordedScore || 'Score indisponible';
             document.getElementById('modal-status-text').innerText = 'EN DIRECT';
             document.getElementById('modal-status-text').className = 'text-[10px] text-[#88B69A] mono mt-1 font-bold animate-pulse';
         } else {
@@ -481,21 +518,13 @@
 
         // ────────────────── TAB 1: PRONOSTIC ──────────────────
         const probs = pronostic.probabilities || {};
-        const pHome = probs.home ? probs.home.p : 0.45;
-        const pDraw = probs.draw ? probs.draw.p : 0.28;
-        const pAway = probs.away ? probs.away.p : 0.27;
+        const pHome = unitProbability(probs.home ? probs.home.p : null);
+        const pDraw = unitProbability(probs.draw ? probs.draw.p : null);
+        const pAway = unitProbability(probs.away ? probs.away.p : null);
 
-        document.getElementById('card-prob-home').innerText = Math.round(pHome * 100) + '%';
-        document.getElementById('card-prob-draw').innerText = Math.round(pDraw * 100) + '%';
-        document.getElementById('card-prob-away').innerText = Math.round(pAway * 100) + '%';
-
-        document.getElementById('card-fair-home').innerText = '@' + (1 / Math.max(0.01, pHome)).toFixed(2);
-        document.getElementById('card-fair-draw').innerText = '@' + (1 / Math.max(0.01, pDraw)).toFixed(2);
-        document.getElementById('card-fair-away').innerText = '@' + (1 / Math.max(0.01, pAway)).toFixed(2);
-
-        document.getElementById('card-bar-home').style.width = (pHome * 100) + '%';
-        document.getElementById('card-bar-draw').style.width = (pDraw * 100) + '%';
-        document.getElementById('card-bar-away').style.width = (pAway * 100) + '%';
+        renderProbabilityCard('home', pHome);
+        renderProbabilityCard('draw', pDraw);
+        renderProbabilityCard('away', pAway);
 
         const geminiReview = pronostic.gemini_review || null;
         const geminiBox = document.getElementById('modal-gemini-review');
@@ -558,6 +587,11 @@
             }
         } else {
             geminiBox.classList.add('hidden');
+            geminiPython.replaceChildren();
+            geminiAlternative.replaceChildren();
+            geminiAlternative.classList.add('hidden');
+            document.getElementById('modal-gemini-status').textContent = '';
+            document.getElementById('modal-gemini-explanation').textContent = '';
         }
 
         if (probs.home && probs.home.ci80 && probs.home.ci80.length === 2) {
@@ -583,41 +617,53 @@
         const totals = markets.totals || {};
         const btts = markets.btts || {};
 
-        document.getElementById('market-dc-1x').innerText = Math.round((pHome + pDraw) * 100) + '%';
-        document.getElementById('market-dc-x2').innerText = Math.round((pDraw + pAway) * 100) + '%';
-        document.getElementById('market-over-25').innerText = totals.over_2_5 ? Math.round(totals.over_2_5 * 100) + '%' : '52%';
-        document.getElementById('market-under-25').innerText = totals.under_2_5 ? Math.round(totals.under_2_5 * 100) + '%' : '48%';
-        document.getElementById('market-btts-yes').innerText = btts.yes ? Math.round(btts.yes * 100) + '%' : '54%';
+        const storedDoubleChance = markets.double_chance || {};
+        document.getElementById('market-dc-1x').innerText = formatProbability(
+            unitProbability(storedDoubleChance['1X']) ?? sumProbabilities(pHome, pDraw)
+        );
+        document.getElementById('market-dc-x2').innerText = formatProbability(
+            unitProbability(storedDoubleChance['X2']) ?? sumProbabilities(pDraw, pAway)
+        );
+        document.getElementById('market-over-25').innerText = formatProbability(unitProbability(totals.over_2_5));
+        document.getElementById('market-under-25').innerText = formatProbability(unitProbability(totals.under_2_5));
+        document.getElementById('market-btts-yes').innerText = formatProbability(unitProbability(btts.yes));
 
         // Top Scores
         const topScoresList = document.getElementById('modal-top-scores-list');
         topScoresList.innerHTML = '';
-        const topScores = pronostic.top_scores || [
-            {score: '1-1', p: 0.12}, {score: '2-1', p: 0.10}, {score: '1-0', p: 0.09}, {score: '2-0', p: 0.08}, {score: '0-1', p: 0.07}
-        ];
-        topScores.slice(0, 5).forEach((item, idx) => {
-            const pPct = Math.round(item.p * 100);
+        const topScores = Array.isArray(pronostic.top_scores) ? pronostic.top_scores : [];
+        const recordedScores = topScores.filter((item) => item && item.score && unitProbability(item.p) !== null).slice(0, 5);
+        if (recordedScores.length === 0) {
+            topScoresList.innerHTML = '<div class="text-[11px] text-[#A2ACA3] p-2">Scores indisponibles</div>';
+        }
+        recordedScores.forEach((item, idx) => {
+            const pPct = formatProbability(unitProbability(item.p));
             topScoresList.innerHTML += `
                 <div class="flex items-center justify-between p-1.5 rounded bg-[#101513] border border-[#303A32]/50">
                     <span class="flex items-center gap-2">
                         <span class="text-[10px] text-[#A2ACA3]">#${idx + 1}</span>
                         <strong class="text-[#F0F0E8]">${item.score}</strong>
                     </span>
-                    <span class="text-[#C3A16A] font-bold">${pPct}%</span>
+                    <span class="text-[#C3A16A] font-bold">${pPct}</span>
                 </div>
             `;
         });
 
         // Heatmap Matrix
         const heatmap = document.getElementById('modal-heatmap-table');
-        if (data.score_matrix && data.score_matrix.length > 0) {
+        heatmap.innerHTML = '';
+        if (Array.isArray(data.score_matrix) && data.score_matrix.length > 0) {
             let html = '<thead><tr><th class="p-1 text-[#A2ACA3] text-[9px]">D \\ E</th>';
             for (let j = 0; j <= 5; j++) html += `<th class="p-1 text-[#A2ACA3] w-10">${j}</th>`;
             html += '</tr></thead><tbody>';
             for (let i = 0; i <= 5; i++) {
                 html += `<tr><th class="p-1 text-[#A2ACA3] text-right pr-2">${i}</th>`;
                 for (let j = 0; j <= 5; j++) {
-                    const val = data.score_matrix[i][j] || 0;
+                    const val = unitProbability(data.score_matrix[i] ? data.score_matrix[i][j] : null);
+                    if (val === null) {
+                        html += '<td class="p-0.5"><div class="w-10 h-8 rounded flex items-center justify-center text-[10px] border border-[#303A32] text-[#A2ACA3]">—</div></td>';
+                        continue;
+                    }
                     const pct = Math.round(val * 100);
                     const opacity = Math.min(1.0, val / 0.12);
                     html += `
@@ -634,6 +680,8 @@
             }
             html += '</tbody>';
             heatmap.innerHTML = html;
+        } else {
+            heatmap.innerHTML = '<tbody><tr><td class="p-3 text-xs text-[#A2ACA3]">Matrice indisponible</td></tr></tbody>';
         }
 
         // ────────────────── TAB 2: SIGNAUX IA GEMINI ──────────────────
@@ -646,8 +694,12 @@
         oddsTable.innerHTML = '';
 
         if (cotes.has_odds && cotes.summary) {
-            const overround = cotes.devig_analysis ? (cotes.devig_analysis.overround * 100).toFixed(2) + '%' : '4.8%';
-            document.getElementById('modal-odds-overround').innerText = 'Marge bookmaker : ' + overround;
+            const overround = cotes.devig_analysis && Number.isFinite(Number(cotes.devig_analysis.overround))
+                ? (Number(cotes.devig_analysis.overround) * 100).toFixed(2) + '%'
+                : null;
+            document.getElementById('modal-odds-overround').innerText = overround
+                ? 'Marge bookmaker : ' + overround
+                : 'Marge bookmaker : non calculée';
 
             const rows = [
                 {label: 'Victoire ' + info.home_short, item: cotes.summary.home},
@@ -657,14 +709,16 @@
 
             rows.forEach(r => {
                 if (r.item) {
-                    const evColor = r.item.ev_pct > 0 ? 'text-[#88B69A]' : 'text-[#A2ACA3]';
-                    const evSign = r.item.ev_pct > 0 ? '+' : '';
+                    const evKnown = Number.isFinite(Number(r.item.ev_pct));
+                    const fairKnown = Number.isFinite(Number(r.item.fair_odds));
+                    const evColor = evKnown && r.item.ev_pct > 0 ? 'text-[#88B69A]' : 'text-[#A2ACA3]';
+                    const evSign = evKnown && r.item.ev_pct > 0 ? '+' : '';
                     oddsTable.innerHTML += `
                         <tr class="hover:bg-[#141A17]">
                             <td class="py-2.5 px-3 font-bold text-[#F0F0E8]">${r.label}</td>
-                            <td class="py-2.5 px-3 text-center font-bold text-[#F0F0E8]">${r.item.bookmaker_odds.toFixed(2)}</td>
-                            <td class="py-2.5 px-3 text-center text-[#88B69A]">${r.item.fair_odds.toFixed(2)}</td>
-                            <td class="py-2.5 px-3 text-center font-bold ${evColor}">${evSign}${r.item.ev_pct}%</td>
+                            <td class="py-2.5 px-3 text-center font-bold text-[#F0F0E8]">${Number(r.item.bookmaker_odds).toFixed(2)}</td>
+                            <td class="py-2.5 px-3 text-center text-[#88B69A]">${fairKnown ? Number(r.item.fair_odds).toFixed(2) : 'Non calculable'}</td>
+                            <td class="py-2.5 px-3 text-center font-bold ${evColor}">${evKnown ? evSign + r.item.ev_pct + '%' : 'Non calculable'}</td>
                             <td class="py-2.5 px-3 text-right text-[10px] text-[#A2ACA3]">
                                 <div>${r.item.bookmaker}</div>
                                 <div class="text-[9px] text-[#A2ACA3]/70">${r.item.updated_at || 'Récent'}</div>

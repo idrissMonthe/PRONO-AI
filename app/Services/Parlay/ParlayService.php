@@ -108,7 +108,7 @@ class ParlayService
 
         foreach ($matches as $match) {
             $pred = $match->officialPrediction;
-            if (! $pred) {
+            if (! $pred || ! $this->revisionService->pythonPickEligibleForParlay($pred)) {
                 continue;
             }
 

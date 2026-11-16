@@ -198,9 +198,14 @@
                     <h3 class="text-sm font-bold text-[#F0F0E8]">Scores possibles</h3>
                     <p class="text-[11px] text-[#A2ACA3]">Chaque cellule indique la chance d’un score exact.</p>
                 </div>
-                <span class="text-[10px] mono px-2 py-0.5 rounded bg-[#222B25] text-[#A2ACA3]">Masse résiduelle &lt; 1e-6</span>
+                @if(! empty($scoreMatrix))
+                    <span class="text-[10px] mono px-2 py-0.5 rounded bg-[#222B25] text-[#A2ACA3]">Grille fournie par le modèle</span>
+                @endif
             </div>
 
+            @if(empty($scoreMatrix))
+                <p class="text-xs text-[#A2ACA3]">Matrice des scores indisponible : le moteur ne l’a pas fournie.</p>
+            @else
             <!-- Heatmap Grid -->
             <div class="overflow-x-auto">
                 <table class="border-collapse text-center mx-auto">
@@ -218,14 +223,16 @@
                                 <th class="p-1 text-[11px] font-bold mono text-[#A2ACA3] text-right pr-2">{{ $i }}</th>
                                 @for($j = 0; $j <= 5; $j++)
                                     @php
-                                        $val = $scoreMatrix[$i][$j] ?? 0.0;
-                                        $intensity = min(1.0, $val / 0.12); // Normalize color scale
+                                        $raw = $scoreMatrix[$i][$j] ?? null;
+                                        $known = is_numeric($raw);
+                                        $val = $known ? (float) $raw : null;
+                                        $intensity = $known ? min(1.0, $val / 0.12) : 0.0;
                                     @endphp
                                     <td class="p-1">
                                         <div class="w-12 h-10 rounded flex flex-col items-center justify-center text-[11px] mono font-semibold cursor-pointer transition-transform hover:scale-110 border border-[#303A32]"
-                                             style="background-color: rgba(195, 161, 106, {{ max(0.08, $intensity * 0.75) }}); color: {{ $intensity > 0.4 ? '#F0F0E8' : '#A2ACA3' }};"
-                                             title="Score {{ $i }}-{{ $j }} : {{ round($val * 100, 2) }}%">
-                                            <span>{{ round($val * 100, 1) }}%</span>
+                                             style="background-color: rgba(195, 161, 106, {{ $known ? max(0.08, $intensity * 0.75) : 0.04 }}); color: {{ $intensity > 0.4 ? '#F0F0E8' : '#A2ACA3' }};"
+                                             title="Score {{ $i }}-{{ $j }} : {{ $known ? round($val * 100, 2).'%' : 'Non disponible' }}">
+                                            <span>{{ $known ? round($val * 100, 1).'%' : '—' }}</span>
                                         </div>
                                     </td>
                                 @endfor
@@ -239,6 +246,7 @@
                 <span>Lignes : Buts {{ $match->homeTeam->short_name }}</span>
                 <span>Colonnes : Buts {{ $match->awayTeam->short_name }}</span>
             </div>
+            @endif
         </div>
 
         <!-- Marchés Dérivés Cohérents (CDC 25.2) -->

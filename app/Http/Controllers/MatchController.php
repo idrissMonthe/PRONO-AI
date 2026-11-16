@@ -291,23 +291,25 @@ class MatchController extends Controller
         } else {
             $predData = [
                 'expected_goals' => [
-                    'home'  => (float) $prediction->home_lambda,
-                    'away'  => (float) $prediction->away_lambda,
-                    'total' => round((float) $prediction->home_lambda + (float) $prediction->away_lambda, 3),
+                    'home'  => $this->nonNegativeNumber($prediction->home_lambda),
+                    'away'  => $this->nonNegativeNumber($prediction->away_lambda),
+                    'total' => ($this->nonNegativeNumber($prediction->home_lambda) !== null && $this->nonNegativeNumber($prediction->away_lambda) !== null)
+                        ? round((float) $prediction->home_lambda + (float) $prediction->away_lambda, 3)
+                        : null,
                 ],
                 'probabilities' => [
                     'home' => [
-                        'p'    => (float) $prediction->prob_home,
+                        'p'    => $this->unitProbability($prediction->prob_home),
                         'ci80' => $prediction->intervals_json['ci80']['home'] ?? [],
                         'ci95' => $prediction->intervals_json['ci95']['home'] ?? [],
                     ],
                     'draw' => [
-                        'p'    => (float) $prediction->prob_draw,
+                        'p'    => $this->unitProbability($prediction->prob_draw),
                         'ci80' => $prediction->intervals_json['ci80']['draw'] ?? [],
                         'ci95' => $prediction->intervals_json['ci95']['draw'] ?? [],
                     ],
                     'away' => [
-                        'p'    => (float) $prediction->prob_away,
+                        'p'    => $this->unitProbability($prediction->prob_away),
                         'ci80' => $prediction->intervals_json['ci80']['away'] ?? [],
                         'ci95' => $prediction->intervals_json['ci95']['away'] ?? [],
                     ],
@@ -331,26 +333,9 @@ class MatchController extends Controller
             ];
         }
 
-        // Matrice de score Poisson / Dixon-Coles (grille 0 à 5 buts)
-        $scoreMatrix = [];
-        $lh = (float) ($predData['expected_goals']['home'] ?? 1.4);
-        $la = (float) ($predData['expected_goals']['away'] ?? 1.1);
-
-        for ($i = 0; $i <= 5; $i++) {
-            $row = [];
-            for ($j = 0; $j <= 5; $j++) {
-                $pI = (exp(-$lh) * pow($lh, $i)) / max(1, self::factorial($i));
-                $pJ = (exp(-$la) * pow($la, $j)) / max(1, self::factorial($j));
-                $cellP = $pI * $pJ;
-                // Correction tau Dixon-Coles pour les scores bas
-                if ($i === 0 && $j === 0)      $cellP *= (1.0 - $lh * $la * (-0.04));
-                elseif ($i === 0 && $j === 1)  $cellP *= (1.0 + $lh * (-0.04));
-                elseif ($i === 1 && $j === 0)  $cellP *= (1.0 + $la * (-0.04));
-                elseif ($i === 1 && $j === 1)  $cellP *= (1.0 - (-0.04));
-                $row[] = round(max(0, $cellP), 4);
-            }
-            $scoreMatrix[] = $row;
-        }
+        // La grille n'est affichée que si le moteur l'a réellement fournie.
+        // Aucun xG de repli et aucun rho inventé ne servent à la reconstruire.
+        $scoreMatrix = $this->providedScoreMatrix($predData);
 
         // ─────────────────────────────────────────────────────────────────────
         // TAB 2: SIGNAUX IA GEMINI (Contextuel, contrôlé et sourcé)
@@ -392,32 +377,14 @@ class MatchController extends Controller
             ];
             $devigAnalysis = $oddsService->removeMargin($decimalOdds, 'shin');
 
-            $pHomeMod = (float) ($predData['probabilities']['home']['p'] ?? 0.45);
-            $pDrawMod = (float) ($predData['probabilities']['draw']['p'] ?? 0.28);
-            $pAwayMod = (float) ($predData['probabilities']['away']['p'] ?? 0.27);
+            $pHomeMod = $this->unitProbability($predData['probabilities']['home']['p'] ?? null);
+            $pDrawMod = $this->unitProbability($predData['probabilities']['draw']['p'] ?? null);
+            $pAwayMod = $this->unitProbability($predData['probabilities']['away']['p'] ?? null);
 
             $oddsSummary = [
-                'home' => [
-                    'bookmaker_odds' => (float) $homeOdds->decimal_odds,
-                    'fair_odds'      => round(1.0 / max(0.01, $pHomeMod), 2),
-                    'ev_pct'         => round(($pHomeMod * (float) $homeOdds->decimal_odds - 1.0) * 100, 2),
-                    'bookmaker'      => $homeOdds->source === 'the-odds-api' ? ($homeOdds->bookmaker?->name ?? 'The Odds API') : 'Historique local',
-                    'updated_at'     => $homeOdds->snapshot_time_utc ? Carbon::parse($homeOdds->snapshot_time_utc)->timezone($tz)->format('d/m/Y H:i') : null,
-                ],
-                'draw' => [
-                    'bookmaker_odds' => (float) $drawOdds->decimal_odds,
-                    'fair_odds'      => round(1.0 / max(0.01, $pDrawMod), 2),
-                    'ev_pct'         => round(($pDrawMod * (float) $drawOdds->decimal_odds - 1.0) * 100, 2),
-                    'bookmaker'      => $drawOdds->source === 'the-odds-api' ? ($drawOdds->bookmaker?->name ?? 'The Odds API') : 'Historique local',
-                    'updated_at'     => $drawOdds->snapshot_time_utc ? Carbon::parse($drawOdds->snapshot_time_utc)->timezone($tz)->format('d/m/Y H:i') : null,
-                ],
-                'away' => [
-                    'bookmaker_odds' => (float) $awayOdds->decimal_odds,
-                    'fair_odds'      => round(1.0 / max(0.01, $pAwayMod), 2),
-                    'ev_pct'         => round(($pAwayMod * (float) $awayOdds->decimal_odds - 1.0) * 100, 2),
-                    'bookmaker'      => $awayOdds->source === 'the-odds-api' ? ($awayOdds->bookmaker?->name ?? 'The Odds API') : 'Historique local',
-                    'updated_at'     => $awayOdds->snapshot_time_utc ? Carbon::parse($awayOdds->snapshot_time_utc)->timezone($tz)->format('d/m/Y H:i') : null,
-                ],
+                'home' => $this->oddsComparison($homeOdds, $pHomeMod, $tz),
+                'draw' => $this->oddsComparison($drawOdds, $pDrawMod, $tz),
+                'away' => $this->oddsComparison($awayOdds, $pAwayMod, $tz),
             ];
         }
 
@@ -561,16 +528,24 @@ class MatchController extends Controller
             'home_team'      => $match->homeTeam->name,
             'away_team'      => $match->awayTeam->name,
             'expected_goals' => [
-                'home' => (float) ($pred->home_lambda ?? 1.45),
-                'away' => (float) ($pred->away_lambda ?? 1.10),
+                'home' => $this->nonNegativeNumber($pred?->home_lambda),
+                'away' => $this->nonNegativeNumber($pred?->away_lambda),
             ],
             'probabilities' => [
-                'home' => ['p' => (float) ($pred->prob_home ?? 0.46)],
-                'draw' => ['p' => (float) ($pred->prob_draw ?? 0.27)],
-                'away' => ['p' => (float) ($pred->prob_away ?? 0.27)],
+                'home' => ['p' => $this->unitProbability($pred?->prob_home)],
+                'draw' => ['p' => $this->unitProbability($pred?->prob_draw)],
+                'away' => ['p' => $this->unitProbability($pred?->prob_away)],
             ],
-            'top_scores' => $pred->top_scores_json ?? [['score' => '1-1', 'p' => 0.12]],
-            'quality'    => ['score' => (float) ($pred->quality_score ?? 85.0)],
+            'top_scores' => is_array($pred?->top_scores_json) ? $pred->top_scores_json : [],
+            'quality'    => ['score' => $this->nonNegativeNumber($pred?->quality_score)],
+            'missing_data' => array_values(array_filter([
+                $this->nonNegativeNumber($pred?->home_lambda) === null ? 'expected_goals_home' : null,
+                $this->nonNegativeNumber($pred?->away_lambda) === null ? 'expected_goals_away' : null,
+                $this->unitProbability($pred?->prob_home) === null ? 'probability_home' : null,
+                $this->unitProbability($pred?->prob_draw) === null ? 'probability_draw' : null,
+                $this->unitProbability($pred?->prob_away) === null ? 'probability_away' : null,
+                ! is_array($pred?->top_scores_json) || $pred->top_scores_json === [] ? 'top_scores' : null,
+            ])),
         ];
 
         $mode = $data['mode'] ?? 'beginner';
@@ -606,8 +581,58 @@ class MatchController extends Controller
         return response()->json($simResult);
     }
 
-    private static function factorial(int $n): int
+    private function providedScoreMatrix(array $predData): ?array
     {
-        return $n <= 1 ? 1 : $n * self::factorial($n - 1);
+        $matrix = $predData['score_matrix'] ?? null;
+        if (! is_array($matrix) || $matrix === []) {
+            return null;
+        }
+
+        foreach ($matrix as $row) {
+            if (! is_array($row)) {
+                return null;
+            }
+            foreach ($row as $cell) {
+                if (! is_numeric($cell)) {
+                    return null;
+                }
+            }
+        }
+
+        return $matrix;
+    }
+
+    private function unitProbability(mixed $value): ?float
+    {
+        if (! is_numeric($value)) {
+            return null;
+        }
+        $number = (float) $value;
+
+        return ($number >= 0.0 && $number <= 1.0) ? $number : null;
+    }
+
+    private function nonNegativeNumber(mixed $value): ?float
+    {
+        if (! is_numeric($value)) {
+            return null;
+        }
+        $number = (float) $value;
+
+        return $number >= 0.0 ? $number : null;
+    }
+
+    private function oddsComparison(object $odd, ?float $modelProbability, string $timezone): array
+    {
+        $bookmakerOdds = (float) $odd->decimal_odds;
+        $comparable = $modelProbability !== null && $modelProbability > 0.0 && $bookmakerOdds > 1.0;
+
+        return [
+            'bookmaker_odds' => $bookmakerOdds,
+            'fair_odds' => $comparable ? round(1.0 / $modelProbability, 2) : null,
+            'ev_pct' => $comparable ? round(($modelProbability * $bookmakerOdds - 1.0) * 100, 2) : null,
+            'bookmaker' => $odd->source === 'the-odds-api' ? ($odd->bookmaker?->name ?? 'The Odds API') : 'Historique local',
+            'updated_at' => $odd->snapshot_time_utc ? Carbon::parse($odd->snapshot_time_utc)->timezone($timezone)->format('d/m/Y H:i') : null,
+        ];
     }
 }
