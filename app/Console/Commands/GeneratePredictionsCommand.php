@@ -260,7 +260,7 @@ class GeneratePredictionsCommand extends Command
                     continue;
                 }
 
-                $prediction = DB::transaction(function () use ($match, $model, $result, $review, $chain, $quality, $marketProbabilities, $snapshotVariables, $snapshotHash, $latestPredictionId, $probabilityMargin) {
+                $prediction = DB::transaction(function () use ($match, $model, $result, $review, $chain, $quality, $marketProbabilities, $snapshotVariables, $snapshotHash, $latestPredictionId, $probabilityMargin, $revisionService) {
                     $probabilities = $result['probabilities'];
                     $initialPrediction = Prediction::create([
                         'match_id' => $match->id,
@@ -309,10 +309,13 @@ class GeneratePredictionsCommand extends Command
                         'snapshot_hash' => $snapshotHash,
                         'missing_indicators' => $quality['missing'] ?? [],
                     ]);
-                    $finalCandidate = $review['final_candidate'] ?? null;
-                    $decision = $review['decision'] ?? 'insufficient_data';
-                    $finalOrigin = $review['prediction_origin'] ?? 'PYTHON_ESTIMATE';
+                    $pythonCandidate = $review['python_candidate'] ?? $review['initial_candidate'] ?? null;
+                    $alternative = $review['alternative'] ?? null;
+                    $finalCandidate = is_array($pythonCandidate) ? $pythonCandidate : null;
+                    $decision = $review['gemini_status'] ?? PredictionRevisionService::STATUS_FAILED;
+                    $finalOrigin = 'PYTHON_ESTIMATE';
                     $finalIsAbstained = ! is_array($finalCandidate);
+                    $storedReview = $revisionService->storedReview($review);
                     // Une seule prédiction officielle par rencontre : les
                     // précédentes restent en base comme historique, mais sont
                     // démises avant l'enregistrement de la nouvelle.
@@ -325,8 +328,8 @@ class GeneratePredictionsCommand extends Command
                         'is_official' => true,
                         'prediction_stage' => 'final',
                         'prediction_origin' => $finalOrigin,
-                        'source_model' => $review['source_model'] ?? $result['model']['version'] ?? 'python',
-                        'ai_estimate_json' => $review['ai_estimate'] ?? null,
+                        'source_model' => $result['model']['version'] ?? 'python',
+                        'ai_estimate_json' => ($alternative['origin'] ?? null) === 'AI_ESTIMATE' ? $alternative : null,
                         'missing_data_json' => array_values(array_unique(array_merge($quality['missing'] ?? [], $review['missing_data'] ?? []))),
                         'uncertainty_tier' => $review['confidence_in_revision'] ?? ($result['confidence_tier'] ?? 'low'),
                         'supersedes_id' => $initialPrediction->id,
@@ -343,6 +346,7 @@ class GeneratePredictionsCommand extends Command
                         'warnings_json' => array_values(array_unique(array_merge($result['warnings'] ?? [], ['revision_'.$decision]))),
                         'market_metrics_json' => array_merge($initialPrediction->market_metrics_json ?? [], [
                             'revision' => ['decision' => $decision, 'provider' => $review['provider'] ?? 'local_revision_rules'],
+                            'gemini_review' => $storedReview,
                             'published_odds' => isset($finalCandidate['odds']) ? (float) $finalCandidate['odds'] : null,
                             // Sans provenance bookmaker, le prix ne doit jamais
                             // être présenté comme une cote de marché.
@@ -372,22 +376,30 @@ class GeneratePredictionsCommand extends Command
                         'provider' => $review['provider'] ?? 'local_revision_rules',
                         'ai_model' => $review['model'] ?? PredictionRevisionService::POLICY_VERSION,
                         'initial_candidate' => $review['initial_candidate'] ?? null,
-                        'ai_recommendation' => $review['ai_response'] ?? $review['final_candidate'] ?? null,
-                        'recalculated_candidate' => $review['final_candidate'] ?? null,
+                        'ai_recommendation' => $alternative,
+                        'recalculated_candidate' => ($alternative['origin'] ?? null) === 'PYTHON' ? $alternative : null,
                         'final_candidate' => $finalCandidate,
                         'reasoning' => $review['reasoning'] ?? null,
                         'supporting_factors' => $review['supporting_factors'] ?? [],
                         'risk_factors' => $review['risk_factors'] ?? [],
-                        'validation' => ['accepted' => ! $finalIsAbstained, 'policy' => PredictionRevisionService::POLICY_VERSION],
+                        'validation' => [
+                            'accepted' => $decision === PredictionRevisionService::STATUS_VALIDATED,
+                            'gemini_status' => $decision,
+                            'python_preserved' => is_array($pythonCandidate),
+                            'alternative_origin' => $alternative['origin'] ?? null,
+                            'published_selection' => $storedReview['published_selection'] ?? null,
+                            'policy' => PredictionRevisionService::POLICY_VERSION,
+                        ],
                         'reviewed_at_utc' => now()->utc(),
                     ]);
                     return $finalPrediction;
                 });
+                $geminiStatus = $review['gemini_status'] ?? PredictionRevisionService::STATUS_FAILED;
                 $analysisStatus = $prediction->is_abstained
                     ? 'LIMITED_DATA'
-                    : ($prediction->prediction_origin === 'AI_ESTIMATE'
-                        ? 'AI_ASSISTED'
-                        : (($review['provider'] ?? '') === 'google_gemini' ? 'HYBRID_READY' : 'PYTHON_READY'));
+                    : ($geminiStatus === PredictionRevisionService::STATUS_VALIDATED
+                        ? 'HYBRID_READY'
+                        : 'PYTHON_READY');
                 $match->forceFill([
                     'analysis_status' => $analysisStatus,
                     'analysis_source' => $prediction->prediction_origin,

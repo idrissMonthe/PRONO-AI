@@ -55,6 +55,9 @@ return [
     'hybrid_prediction' => [
         'mode' => env('PREDICTION_HYBRID_MODE', 'ASSISTED'),
         'allow_ai_in_parlays' => env('PREDICTION_ALLOW_AI_IN_PARLAYS', true),
+        // Une alternative Gemini n'entre dans un combiné que si ce réglage est actif
+        // et après les contrôles de marché. Elle ne remplace pas le pronostic Python.
+        'allow_gemini_alternative_in_parlays' => env('PREDICTION_ALLOW_GEMINI_ALTERNATIVE_IN_PARLAYS', false),
     ],
 
     'prediction' => [

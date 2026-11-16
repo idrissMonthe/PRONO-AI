@@ -95,6 +95,8 @@
             <p class="text-xs text-[#C3A16A]" role="status">Cette estimation provient de l’IA complémentaire. Elle n’est pas une probabilité statistique Python calibrée.</p>
         @endif
 
+        @include('partials.gemini-review', ['review' => $predData['gemini_review'] ?? null])
+
         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
             <!-- Victoire Domicile -->
             <div class="lab-panel p-4 space-y-3">

@@ -417,15 +417,16 @@ class GeminiExplanationService
      * Analyse et évaluation du risque d'un combiné multi-sélections (CDC Section 9 & 28).
      */
     /**
-     * Révision décisionnelle. Gemini choisit uniquement une candidate
-     * calculée par Python et ne fournit jamais de probabilité.
+     * Gemini examine le pronostic Python. Il peut le valider, le refuser
+     * avec ou sans alternative, ou déclarer que l'information manque.
+     * Il ne calcule aucune probabilité.
      */
     public function reviewPrediction(array $context): array
     {
         $fallback = [
-            'decision' => 'keep',
-            'candidate_key' => $context['initial_candidate']['candidate_key'] ?? null,
-            'reasoning' => 'Révision externe indisponible : la sélection statistique initiale est conservée.',
+            'decision' => 'review_failed',
+            'candidate_key' => null,
+            'reasoning' => 'La validation Gemini n’a pas pu être effectuée. L’absence de réponse n’est pas une validation.',
             'supporting_factors' => [],
             'risk_factors' => ['ai_review_unavailable'],
             'required_recalculation' => false,
@@ -438,29 +439,27 @@ class GeminiExplanationService
         if (! $this->isConfigured()) return $fallback;
 
         $systemInstruction = implode("\n", [
-            "Tu es un expert analyste et réviseur critique de pronostics football pour un outil d'aide aux parieurs.",
+            "Tu es un réviseur critique de pronostics football.",
             "Tu ne calcules aucune probabilité et tu n'en inventes jamais.",
-            "Tu peux uniquement choisir une candidate_key présente dans candidates.",
-            "RÈGLES CRUCIALES DE SÉLECTION (Inspirées de bookmakers type 1xBet / Pinnacle) :",
-            "1. COTE MINIMALE UTILE : Ne JAMAIS choisir une candidate dont la cote est inférieure à 1.25 (ex: -5,5 buts ou +0,5 buts à 1.03, ou favori écrasant à 1.12), car ces cotes n'ont aucune valeur financière sur un ticket de pari.",
-            "2. DIVERSITÉ DES MARCHÉS : La double chance ne doit pas être choisie par défaut. Si la sélection initiale est une double chance, préfère une alternative de fiabilité comparable parmi BTTS, totaux de buts, handicap ou 1N2. Ne retiens la double chance que si aucun autre marché n'atteint une probabilité proche.",
-            "3. RECHERCHE D'ALTERNATIVE RENTABLE ET SÛRE : Si la sélection initiale a une cote trop faible (< 1.25) ou présente un rapport risque/gain insuffisant, cherche parmi les candidates une ALTERNATIVE FIABLE avec une cote abordable (idéalement 1.30 à 1.85) tout en conservant une forte probabilité statistique.",
-            "4. Si la sélection initiale est solide, a une cote >= 1.25, n'est pas une double chance et présente le meilleur équilibre sécurité/cote, conserve-la avec decision=keep.",
-            "5. Si tu remplaces la sélection par une alternative plus rentable, plus diversifiée et tout aussi fiable, utilise decision=replace et spécifie la candidate_key.",
+            "Le pronostic Python initial reste conservé quoi que tu décides. Tu ne le remplaces pas.",
+            "Tu n'es pas obligé de valider ce pronostic, ni de proposer une alternative.",
+            "Si tu proposes une alternative, candidate_key doit être une clé présente dans candidates, ou bien market et selection doivent décrire un marché réel. N'invente pas de probabilité.",
+            "value_analysis vaut true seulement si tu compares le pronostic à une cote bookmaker réelle présente dans les candidates.",
             "Réponds UNIQUEMENT avec un objet JSON valide.",
-            "Champs : decision (keep|replace|reject|insufficient_data), candidate_key (clé existante ou null), reasoning (ton explication claire en français de l'arbitrage cote / fiabilité), supporting_factors (tableau), risk_factors (tableau), required_recalculation (booléen), confidence_in_revision (low|medium|high).",
+            "decision : validated | not_validated | insufficient_information.",
+            "validated : le pronostic Python est cohérent avec les données fournies.",
+            "not_validated : tu ne valides pas le pronostic. candidate_key peut être null si tu n'as pas d'alternative suffisamment justifiée.",
+            "insufficient_information : les données ne permettent pas de trancher. Ce n'est pas une validation.",
+            "Champs : decision, candidate_key (clé existante ou null), reasoning (français, court), supporting_factors (tableau), risk_factors (tableau), confidence_in_revision (low|medium|high), value_analysis (booléen).",
         ]);
 
         $prompt = "DOCUMENT STATISTIQUE DU MATCH (Source de vérité) :\n"
             . "Rencontre : " . ($context['home_team'] ?? 'Domicile') . " vs " . ($context['away_team'] ?? 'Extérieur') . "\n"
             . "Espérance de buts (xG Dixon-Coles) : Domicile = " . ($context['python_result']['expected_goals']['home'] ?? 'N/A') . ", Extérieur = " . ($context['python_result']['expected_goals']['away'] ?? 'N/A') . "\n"
-            . "Sélection initiale proposée : " . json_encode($context['initial_candidate'] ?? [], JSON_UNESCAPED_UNICODE) . "\n\n"
-            . "CANDIDATES DISPONIBLES (avec probabilités calculées et cotes réelles) :\n"
+            . "Sélection initiale proposée par Python : " . json_encode($context['initial_candidate'] ?? [], JSON_UNESCAPED_UNICODE) . "\n\n"
+            . "CANDIDATES DISPONIBLES (marchés calculés par Python, avec cotes lorsqu'elles existent) :\n"
             . json_encode($context['candidates'] ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n\n"
-            . "Consigne : Analyse la sélection initiale et ses alternatives. Si la cote initiale est trop faible (< 1.25) ou manque de valeur, sélectionne une alternative fiable avec une cote plus abordable (1.30 - 1.85) et solide selon les xG. Justifie ton choix dans 'reasoning'.";
-        if (is_string($context['correction_request'] ?? null) && $context['correction_request'] !== '') {
-            $prompt .= "\n\nCORRECTION : ".$context['correction_request'];
-        }
+            . "Consigne : examine la cohérence du pronostic Python. Valide-le, refuse-le, ou indique que l'information est insuffisante. Une alternative est facultative.";
         $contextHash = hash('sha256', json_encode($context));
         $apiKey = $this->getApiKey();
         $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
@@ -486,17 +485,23 @@ class GeminiExplanationService
                 if (! is_array($decoded)) continue;
                 $decision = $decoded['decision'] ?? null;
                 $candidateKey = $decoded['candidate_key'] ?? null;
-                $candidateKeys = collect($context['candidates'] ?? [])->pluck('candidate_key')->filter()->all();
-                if (! in_array($decision, ['keep', 'replace', 'reject', 'insufficient_data'], true)) continue;
-                if ($decision === 'replace' && ! in_array($candidateKey, $candidateKeys, true)) continue;
+                $allowed = [
+                    'validated', 'not_validated', 'insufficient_information',
+                    'keep', 'replace', 'reject', 'insufficient_data',
+                    'not_validated_with_alternative', 'not_validated_without_alternative',
+                ];
+                if (! in_array($decision, $allowed, true)) continue;
 
                 $normalized = [
                     'decision' => $decision,
-                    'candidate_key' => $decision === 'keep' ? ($context['initial_candidate']['candidate_key'] ?? $candidateKey) : $candidateKey,
+                    'candidate_key' => $candidateKey,
+                    'alternative_market' => is_string($decoded['alternative_market'] ?? null) ? $decoded['alternative_market'] : null,
+                    'alternative_selection' => is_string($decoded['alternative_selection'] ?? null) ? $decoded['alternative_selection'] : null,
                     'reasoning' => is_string($decoded['reasoning'] ?? null) ? substr($decoded['reasoning'], 0, 2000) : '',
                     'supporting_factors' => array_values(array_filter((array) ($decoded['supporting_factors'] ?? []), 'is_string')),
                     'risk_factors' => array_values(array_filter((array) ($decoded['risk_factors'] ?? []), 'is_string')),
-                    'required_recalculation' => (bool) ($decoded['required_recalculation'] ?? $decision === 'replace'),
+                    'value_analysis' => (bool) ($decoded['value_analysis'] ?? false),
+                    'required_recalculation' => false,
                     'confidence_in_revision' => in_array(($decoded['confidence_in_revision'] ?? 'low'), ['low', 'medium', 'high'], true) ? $decoded['confidence_in_revision'] : 'low',
                     'provider' => 'google_gemini',
                     'model' => $currentModel,

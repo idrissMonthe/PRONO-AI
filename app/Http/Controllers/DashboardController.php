@@ -10,6 +10,7 @@ use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
+use App\Services\Prediction\PredictionRevisionService;
 use App\Services\Prediction\LiveFlashPickService;
 use Carbon\Carbon;
 use Illuminate\Support\Collection;
@@ -235,6 +236,12 @@ class DashboardController extends Controller
                 continue;
             }
 
+            // Un refus, un manque d'information ou un échec Gemini n'est pas
+            // présenté comme un pronostic validé dans les sélections du jour.
+            if (! PredictionRevisionService::presentsAsValidated($prediction->review_decision)) {
+                continue;
+            }
+
             // Une prédiction abstentionniste reste affichée : elle utilise ses
             // marchés calculés et porte une étiquette de fiabilité limitée.
             if ($prediction->published_market && ! $prediction->is_abstained) {
@@ -245,7 +252,9 @@ class DashboardController extends Controller
                     'match' => $match,
                     'source' => $prediction->prediction_origin === 'AI_ESTIMATE'
                         ? 'Estimation IA'
-                        : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Validé IA' : 'Statistiques Python'),
+                        : ($prediction->review_decision === PredictionRevisionService::STATUS_VALIDATED
+                            ? 'Statistiques Python · revue Gemini : validé'
+                            : ($prediction->prediction_origin === 'AI_ASSISTED_PYTHON' ? 'Hybride' : 'Statistiques Python')),
                 ]);
                 continue;
             }

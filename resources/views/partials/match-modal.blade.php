@@ -151,6 +151,17 @@
                         </div>
                     </div>
 
+                    <section id="modal-gemini-review" class="hidden p-4 rounded-lg bg-[#141A17] border border-[#303A32] space-y-3" aria-label="Décision Gemini">
+                        <div id="modal-gemini-python" class="space-y-1"></div>
+                        <div class="space-y-1 pt-2 border-t border-[#303A32]/60">
+                            <h3 class="text-xs font-bold uppercase tracking-wider text-[#F0F0E8]">Décision Gemini</h3>
+                            <p id="modal-gemini-status" class="text-sm text-[#C3A16A]"></p>
+                            <p id="modal-gemini-explanation" class="text-xs text-[#A2ACA3] leading-relaxed"></p>
+                            <p class="text-[11px] text-[#A2ACA3]">Une validation Gemini n’est pas une garantie de résultat.</p>
+                        </div>
+                        <div id="modal-gemini-alternative" class="hidden space-y-1 pt-2 border-t border-[#303A32]/60"></div>
+                    </section>
+
                     <!-- Grille Marchés Dérivés & Top Scores -->
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <!-- Marchés Dérivés Mathématiques -->
@@ -485,6 +496,69 @@
         document.getElementById('card-bar-home').style.width = (pHome * 100) + '%';
         document.getElementById('card-bar-draw').style.width = (pDraw * 100) + '%';
         document.getElementById('card-bar-away').style.width = (pAway * 100) + '%';
+
+        const geminiReview = pronostic.gemini_review || null;
+        const geminiBox = document.getElementById('modal-gemini-review');
+        const geminiPython = document.getElementById('modal-gemini-python');
+        const geminiAlternative = document.getElementById('modal-gemini-alternative');
+        if (geminiReview && geminiReview.status) {
+            geminiBox.classList.remove('hidden');
+            geminiPython.replaceChildren();
+            if (geminiReview.python) {
+                const title = document.createElement('h3');
+                title.className = 'text-xs font-bold uppercase tracking-wider text-[#F0F0E8]';
+                title.textContent = 'Pronostic Python';
+                const pick = document.createElement('p');
+                pick.className = 'text-sm text-[#F0F0E8]';
+                pick.textContent = geminiReview.python.label || geminiReview.python.selection || '';
+                const meta = document.createElement('p');
+                meta.className = 'text-[11px] text-[#A2ACA3] mono';
+                meta.textContent = 'Marché ' + (geminiReview.python.market || '—')
+                    + ' · sélection ' + (geminiReview.python.selection || '—')
+                    + ' · probabilité ' + (geminiReview.python.probability_label || 'Non calculée')
+                    + ' · origine ' + (geminiReview.python.origin_label || 'Python');
+                geminiPython.append(title, pick, meta);
+            }
+            document.getElementById('modal-gemini-status').textContent = geminiReview.status_label || 'Validation non effectuée';
+            document.getElementById('modal-gemini-explanation').textContent = geminiReview.explanation || '';
+            geminiAlternative.replaceChildren();
+            if (geminiReview.alternative) {
+                geminiAlternative.classList.remove('hidden');
+                const title = document.createElement('h3');
+                title.className = 'text-xs font-bold uppercase tracking-wider text-[#F0F0E8]';
+                title.textContent = 'Proposition de Gemini';
+                const pick = document.createElement('p');
+                pick.className = 'text-sm text-[#F0F0E8]';
+                pick.textContent = geminiReview.alternative.label || geminiReview.alternative.selection || '';
+                const probability = geminiReview.alternative.origin === 'PYTHON'
+                    ? (geminiReview.alternative.probability_label || 'Non calculée par Python')
+                    : (geminiReview.alternative.ai_probability_label || 'probabilité non calculée');
+                const meta = document.createElement('p');
+                meta.className = 'text-[11px] text-[#A2ACA3] mono';
+                meta.textContent = 'Marché ' + (geminiReview.alternative.market || '—')
+                    + ' · sélection ' + (geminiReview.alternative.selection || '—')
+                    + ' · ' + (geminiReview.alternative.origin === 'PYTHON' ? 'probabilité Python ' : 'estimation IA ')
+                    + probability
+                    + ' · origine ' + (geminiReview.alternative.origin_label || 'Estimation IA');
+                geminiAlternative.append(title, pick, meta);
+                if (geminiReview.alternative.justification) {
+                    const reason = document.createElement('p');
+                    reason.className = 'text-xs text-[#A2ACA3] leading-relaxed';
+                    reason.textContent = geminiReview.alternative.justification;
+                    geminiAlternative.append(reason);
+                }
+                if (Array.isArray(geminiReview.alternative.risks) && geminiReview.alternative.risks.length) {
+                    const risks = document.createElement('p');
+                    risks.className = 'text-[11px] text-[#A2ACA3]';
+                    risks.textContent = 'Risques : ' + geminiReview.alternative.risks.join(', ');
+                    geminiAlternative.append(risks);
+                }
+            } else {
+                geminiAlternative.classList.add('hidden');
+            }
+        } else {
+            geminiBox.classList.add('hidden');
+        }
 
         if (probs.home && probs.home.ci80 && probs.home.ci80.length === 2) {
             document.getElementById('card-ci80-home').innerText = `${Math.round(probs.home.ci80[0]*100)}% – ${Math.round(probs.home.ci80[1]*100)}%`;

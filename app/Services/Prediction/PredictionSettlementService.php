@@ -53,6 +53,21 @@ class PredictionSettlementService
             $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], $published['hit'] ? 'WON' : 'LOST');
         }
         }
+        $alternative = data_get($prediction->market_metrics_json, 'gemini_review.alternative');
+        if (is_array($alternative) && is_string($alternative['market'] ?? null) && is_string($alternative['selection'] ?? null)) {
+            $alternativeProbability = ($alternative['origin'] ?? null) === 'PYTHON'
+                ? ($alternative['probability'] ?? null)
+                : ($alternative['ai_probability'] ?? null);
+            $alternativeOutcome = $this->selectionOutcome($alternative['market'], $alternative['selection'], $homeGoals, $awayGoals, $actualResult, $home, $away);
+            if ($alternativeOutcome && is_numeric($alternativeProbability)) {
+                $group = ($alternative['origin'] ?? null) === 'AI_ESTIMATE' ? 'GEMINI_ALT_IA' : 'GEMINI_ALT';
+                if (! empty($alternativeOutcome['push'])) {
+                    $this->addEvaluation($rows, $prediction, $match, $group, 'gemini_alternative', (float) $alternativeProbability, $alternativeOutcome['label'], $alternativeOutcome['actual_label'], 'PUSH');
+                } else {
+                    $this->addEvaluation($rows, $prediction, $match, $group, 'gemini_alternative', (float) $alternativeProbability, $alternativeOutcome['label'], $alternativeOutcome['actual_label'], $alternativeOutcome['hit'] ? 'WON' : 'LOST');
+                }
+            }
+        }
         $oneN2 = $markets['1N2'] ?? [
             'home' => (float) $prediction->prob_home,
             'draw' => (float) $prediction->prob_draw,
@@ -215,8 +230,11 @@ class PredictionSettlementService
 
     private function publishedOutcome(Prediction $prediction, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away): ?array
     {
-        $market = $prediction->published_market;
-        $selection = $prediction->published_selection;
+        return $this->selectionOutcome((string) $prediction->published_market, (string) $prediction->published_selection, $homeGoals, $awayGoals, $actualResult, $home, $away);
+    }
+
+    private function selectionOutcome(string $market, string $selection, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away): ?array
+    {
         $hit = false;
         $label = $market.' '.$selection;
         $actualLabel = $actualResult;

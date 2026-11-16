@@ -2,15 +2,35 @@
 
 namespace App\Services\Prediction;
 
+use App\Models\Prediction;
 use App\Services\AIExplanation\GeminiExplanationService;
 
 /**
- * Réviseur local sans appel externe. Il ne fabrique jamais de probabilité :
- * toutes les candidates viennent des marchés calculés par Python.
+ * Gemini examine le pronostic Python. Il peut le valider ou proposer une
+ * alternative distincte. Il ne remplace jamais le pronostic initial et ne
+ * fabrique pas de probabilité Python.
  */
 class PredictionRevisionService
 {
-    public const POLICY_VERSION = 'hybrid_revision_v3';
+    public const POLICY_VERSION = 'hybrid_revision_v4';
+
+    public const STATUS_VALIDATED = 'VALIDATED';
+
+    public const STATUS_WITH_ALTERNATIVE = 'NOT_VALIDATED_WITH_ALTERNATIVE';
+
+    public const STATUS_WITHOUT_ALTERNATIVE = 'NOT_VALIDATED_WITHOUT_ALTERNATIVE';
+
+    public const STATUS_INSUFFICIENT = 'INSUFFICIENT_INFORMATION';
+
+    public const STATUS_FAILED = 'REVIEW_FAILED';
+
+    /** Statuts qui ne doivent jamais être présentés comme une validation. */
+    public const UNVALIDATED_STATUSES = [
+        self::STATUS_WITH_ALTERNATIVE,
+        self::STATUS_WITHOUT_ALTERNATIVE,
+        self::STATUS_INSUFFICIENT,
+        self::STATUS_FAILED,
+    ];
 
     public function __construct(private readonly GeminiExplanationService $geminiService) {}
 
@@ -22,9 +42,8 @@ class PredictionRevisionService
         $quality = (float) ($context['quality_score'] ?? 0);
         $hybridMode = strtoupper((string) config('services.hybrid_prediction.mode', 'ASSISTED'));
 
-        // En mode ASSISTED/ACTIVE, l’IA peut prendre le relais quand Python
-        // s’abstient. La proposition reste marquée AI_ESTIMATE et n’est pas
-        // transformée en probabilité statistique Python.
+        // Python s'abstient : une proposition IA reste une estimation distincte.
+        // Elle ne devient pas le pronostic Python.
         if (($result['abstain'] ?? true) && in_array($hybridMode, ['ASSISTED', 'ACTIVE'], true)) {
             $aiAnalysis = $this->geminiService->analyzeSparseMatch(array_merge($context, [
                 'python_status' => 'insufficient_data',
@@ -39,23 +58,23 @@ class PredictionRevisionService
                     $result['warnings'] ?? []
                 ))),
             ]));
-            if (($aiAnalysis['decision'] ?? null) === 'propose' && is_array($aiAnalysis['candidate'] ?? null)) {
-                return $this->aiEstimateDecision($aiAnalysis, $initial, $candidates);
+            if (is_array($aiAnalysis) && ($aiAnalysis['decision'] ?? null) === 'propose' && is_array($aiAnalysis['candidate'] ?? null)) {
+                return $this->fromSparseProposal($aiAnalysis, $initial, $candidates, $quality);
             }
         }
 
         if (! $initial || count($candidates) === 0) {
-            return $this->decision('insufficient_data', $initial, null, 'Aucun marché calculable n’est disponible.', ['no_calculable_market'], $candidates);
-        }
-        if ($quality < 58) {
-            return $this->decision(
-                'keep',
+            return $this->assemble(
+                self::STATUS_INSUFFICIENT,
                 $initial,
-                $initial,
-                'Qualité de données limitée : la meilleure sélection calculée est publiée avec une confiance basse.',
-                ['data_quality_below_validation_threshold', 'limited_data_mode'],
+                null,
+                'Aucun marché calculable n’est disponible. La validation Gemini n’a pas pu être effectuée.',
+                ['no_calculable_market'],
                 $candidates,
-                'low'
+                'low',
+                'local_revision_rules',
+                self::POLICY_VERSION,
+                null
             );
         }
 
@@ -69,145 +88,185 @@ class PredictionRevisionService
                 'quality' => $result['quality'] ?? [],
             ],
         ]));
-        if (! ($aiReview['fallback'] ?? true)) {
-            $candidate = collect($candidates)->firstWhere('candidate_key', $aiReview['candidate_key'] ?? null);
-            if (($aiReview['decision'] ?? null) === 'replace' && ! $candidate) {
-                $aiReview['decision'] = 'insufficient_data';
-                $aiReview['risk_factors'][] = 'invalid_ai_candidate_rejected';
-            }
-            if (($aiReview['decision'] ?? null) === 'replace' && $candidate && $candidate['candidate_key'] === $initial['candidate_key']) {
-                $aiReview['decision'] = 'keep';
-                $candidate = $initial;
-            }
-            if (in_array($aiReview['decision'] ?? null, ['keep', 'replace'], true) && $candidate) {
-                return $this->aiDecision($aiReview, $initial, $candidate, $candidates);
-            }
-            if (in_array($aiReview['decision'] ?? null, ['reject', 'insufficient_data'], true)) {
-                $retry = $this->geminiService->reviewPrediction(array_merge($context, [
-                    'initial_candidate' => $initial,
-                    'candidates' => $candidates,
-                    'python_result' => [
-                        'expected_goals' => $result['expected_goals'] ?? [],
-                        'probabilities' => $result['probabilities'] ?? [],
-                        'warnings' => $result['warnings'] ?? [],
-                        'quality' => $result['quality'] ?? [],
-                    ],
-                    'correction_request' => 'Choisis obligatoirement decision=keep ou decision=replace avec une candidate_key existante. Ne réponds pas reject ni insufficient_data : un match traité doit recevoir un pronostic.',
-                ]));
-                if (! ($retry['fallback'] ?? true)) {
-                    $retried = collect($candidates)->firstWhere('candidate_key', $retry['candidate_key'] ?? null);
-                    if (($retry['decision'] ?? null) === 'keep') {
-                        $retried = $initial;
-                    }
-                    if (in_array($retry['decision'] ?? null, ['keep', 'replace'], true) && $retried) {
-                        return $this->aiDecision($retry, $initial, $retried, $candidates);
-                    }
-                }
 
-                return $this->decision(
-                    'keep',
-                    $initial,
-                    $initial,
-                    'Gemini n’a pas retenu de sélection exploitable. Mode dégradé : la sélection statistique initiale est publiée et explicitement signalée.',
-                    array_values(array_unique(array_merge($aiReview['risk_factors'] ?? [], ['degraded_mode', 'gemini_declined_selection']))),
-                    $candidates,
-                    'low'
-                );
-            }
-        }
-
-        $initialOdds = (float) ($initial['odds'] ?? 1.30);
-        $initialProb = (float) ($initial['probability'] ?? 0.50);
-        $initialTooLow = $initialOdds < 1.25;
-
-        $alternatives = collect($candidates)
-            ->reject(fn (array $candidate): bool => $candidate['candidate_key'] === $initial['candidate_key'])
-            ->filter(fn (array $candidate): bool => (float) ($candidate['probability'] ?? 0) >= 0.52)
-            ->map(function (array $candidate) use ($context): array {
-                $prob = (float) $candidate['probability'];
-                $odds = (float) ($candidate['odds'] ?? 1.40);
-
-                // Diversification : on ne privilégie plus la double chance,
-                // qui écrasait tous les autres marchés à fiabilité comparable.
-                $marketBonus = $this->marketDiversityBonus((string) $candidate['market']);
-
-                $valueBonus = 0.0;
-                if (isset($context['market_probabilities'][$candidate['selection']]) && is_numeric($context['market_probabilities'][$candidate['selection']])) {
-                    $valueBonus = max(0.0, $prob - (float) $context['market_probabilities'][$candidate['selection']]) * 0.15;
-                }
-
-                $candidate['review_score'] = $prob * 0.75 + $marketBonus + $valueBonus;
-                return $candidate;
-            })
-            ->sortByDesc('review_score')
-            ->values();
-        $bestAlternative = $alternatives->first();
-
-        $initialScore = ($initialProb * 0.75) + $this->marketDiversityBonus((string) ($initial['market'] ?? ''));
-        $threshold = $initialTooLow ? 0.0 : 0.075;
-
-        // La double chance reste un repli, pas une sélection par défaut :
-        // dès qu'un autre marché offre une fiabilité proche, on le préfère.
-        if (($initial['market'] ?? null) === 'double_chance') {
-            $diverse = $alternatives->first(fn (array $candidate): bool => ($candidate['market'] ?? '') !== 'double_chance'
-                && (float) $candidate['probability'] >= max(0.52, $initialProb - 0.12));
-            if ($diverse) {
-                return $this->decision(
-                    'replace',
-                    $initial,
-                    $diverse,
-                    "La double chance était la sélection initiale ; le marché {$diverse['label']} offre une fiabilité équivalente avec une couverture de marchés plus variée.",
-                    ['market_diversification', 'comparable_reliability'],
-                    $candidates,
-                    'medium'
-                );
-            }
-        }
-
-        // Rotation de marché : à fiabilité proche, on préfère le marché tournant
-        // dès lors qu'il dispose d'une cote bookmaker réelle.
-        $rotated = $this->rotationOverride($initial, $candidates, $context);
-        if ($rotated) {
-            return $this->decision(
-                'replace',
+        if (! is_array($aiReview) || ($aiReview['fallback'] ?? true)) {
+            return $this->assemble(
+                self::STATUS_FAILED,
                 $initial,
-                $rotated,
-                "Rotation des marchés : {$rotated['label']} offre une fiabilité proche de la sélection initiale avec une cote bookmaker réelle.",
-                ['market_rotation', 'comparable_reliability'],
+                null,
+                'La validation Gemini n’a pas pu être effectuée. L’absence de réponse n’est pas une validation.',
+                array_values(array_unique(array_merge(
+                    $aiReview['risk_factors'] ?? [],
+                    ['ai_review_unavailable'],
+                    $this->qualityRisks($quality)
+                ))),
                 $candidates,
-                'medium'
+                'low',
+                $aiReview['provider'] ?? 'deterministic_fallback',
+                $aiReview['model'] ?? self::POLICY_VERSION,
+                is_array($aiReview) ? $aiReview : null
             );
         }
 
-        if ($bestAlternative && ($initialTooLow || $bestAlternative['review_score'] >= ($initialScore + $threshold))) {
-            $reason = $initialTooLow
-                ? "La sélection initiale présentait une cote bookmaker trop faible ({$initialOdds}) sans intérêt de coupon. L’alternative {$bestAlternative['label']} offre une cote abordable ({$bestAlternative['odds']}) avec une solidité statistique validée."
-                : 'Le marché alternatif calculé présente un meilleur compromis sécurité / cote selon les données disponibles.';
+        $canonical = $this->canonicalDecision($aiReview);
+        $risks = array_values(array_filter((array) ($aiReview['risk_factors'] ?? []), 'is_string'));
+        $reasoning = is_string($aiReview['reasoning'] ?? null) && $aiReview['reasoning'] !== ''
+            ? $aiReview['reasoning']
+            : 'Gemini n’a pas fourni d’explication.';
 
-            return $this->decision(
-                'replace',
+        if ($canonical === 'validated') {
+            return $this->assemble(
+                self::STATUS_VALIDATED,
                 $initial,
-                $bestAlternative,
-                $reason,
-                ['higher_validated_market_score', $initialTooLow ? 'initial_odds_unbettable' : 'better_value_alternative'],
+                null,
+                $reasoning,
+                array_values(array_unique(array_merge($risks, $this->qualityRisks($quality)))),
                 $candidates,
-                'medium'
+                (string) ($aiReview['confidence_in_revision'] ?? 'low'),
+                (string) ($aiReview['provider'] ?? 'google_gemini'),
+                $aiReview['model'] ?? null,
+                $aiReview,
+                $aiReview['supporting_factors'] ?? []
             );
         }
 
-        if ($initial['probability'] < 0.40) {
-            return $this->decision(
-                'keep',
+        if ($canonical === 'insufficient') {
+            return $this->assemble(
+                self::STATUS_INSUFFICIENT,
                 $initial,
-                $initial,
-                'La sélection initiale a une probabilité faible ; elle est publiée avec une confiance basse.',
-                ['low_initial_probability', 'limited_data_mode'],
+                null,
+                $reasoning.' La validation Gemini n’a pas pu être effectuée.',
+                array_values(array_unique(array_merge($risks, ['insufficient_information'], $this->qualityRisks($quality)))),
                 $candidates,
-                'low'
+                (string) ($aiReview['confidence_in_revision'] ?? 'low'),
+                (string) ($aiReview['provider'] ?? 'google_gemini'),
+                $aiReview['model'] ?? null,
+                $aiReview,
+                $aiReview['supporting_factors'] ?? []
             );
         }
 
-        return $this->decision('keep', $initial, $initial, 'La sélection initiale reste la meilleure candidate validée.', ['initial_candidate_remains_best'], $candidates);
+        if ($canonical === 'failed') {
+            return $this->assemble(
+                self::STATUS_FAILED,
+                $initial,
+                null,
+                'La validation Gemini n’a pas pu être effectuée. L’absence de réponse n’est pas une validation.',
+                array_values(array_unique(array_merge($risks, ['ai_review_unavailable'], $this->qualityRisks($quality)))),
+                $candidates,
+                'low',
+                (string) ($aiReview['provider'] ?? 'deterministic_fallback'),
+                $aiReview['model'] ?? self::POLICY_VERSION,
+                $aiReview
+            );
+        }
+
+        $alternative = null;
+        if ($canonical === 'not_validated') {
+            $alternative = $this->resolveAlternative($this->proposalFromReview($aiReview), $candidates, $initial);
+            if ($alternative === null && $this->proposalFromReview($aiReview) !== null) {
+                $risks[] = 'invalid_ai_candidate_rejected';
+            }
+        }
+
+        return $this->assemble(
+            $alternative ? self::STATUS_WITH_ALTERNATIVE : self::STATUS_WITHOUT_ALTERNATIVE,
+            $initial,
+            $alternative,
+            $reasoning,
+            array_values(array_unique(array_merge($risks, $this->qualityRisks($quality)))),
+            $candidates,
+            (string) ($aiReview['confidence_in_revision'] ?? 'low'),
+            (string) ($aiReview['provider'] ?? 'google_gemini'),
+            $aiReview['model'] ?? null,
+            $aiReview,
+            $aiReview['supporting_factors'] ?? []
+        );
+    }
+
+    public static function statusLabel(?string $status): string
+    {
+        return match ($status) {
+            self::STATUS_VALIDATED => 'Validé',
+            self::STATUS_WITH_ALTERNATIVE, self::STATUS_WITHOUT_ALTERNATIVE => 'Non validé',
+            self::STATUS_INSUFFICIENT => 'Informations insuffisantes',
+            self::STATUS_FAILED => 'Échec de l’analyse',
+            default => 'Validation non effectuée',
+        };
+    }
+
+    /**
+     * Les anciens pronostics sans statut Gemini restent éligibles.
+     * Un refus, un manque d'information ou un échec technique ne l'est pas.
+     */
+    public function pythonPickEligibleForParlay(Prediction $prediction): bool
+    {
+        $status = (string) ($prediction->review_decision ?? '');
+
+        return ! in_array($status, self::UNVALIDATED_STATUSES, true);
+    }
+
+    /**
+     * L'alternative n'entre dans un combiné qu'après les contrôles techniques
+     * et seulement si la configuration l'autorise. Le pronostic Python validé
+     * reste le seul choix lorsqu'il est éligible.
+     */
+    public function alternativeForParlay(Prediction $prediction): ?array
+    {
+        if ($prediction->review_decision !== self::STATUS_WITH_ALTERNATIVE) {
+            return null;
+        }
+        if ($this->pythonPickEligibleForParlay($prediction)) {
+            return null;
+        }
+
+        $alternative = data_get($prediction->market_metrics_json, 'gemini_review.alternative');
+        if (! is_array($alternative)) {
+            return null;
+        }
+        if (! (bool) config('services.hybrid_prediction.allow_gemini_alternative_in_parlays', false)) {
+            return null;
+        }
+
+        $origin = (string) ($alternative['origin'] ?? '');
+        if ($origin === 'PYTHON' && ($alternative['technically_valid'] ?? false) && is_numeric($alternative['probability'] ?? null)) {
+            return $alternative;
+        }
+
+        $allowAi = (bool) config('services.hybrid_prediction.allow_ai_in_parlays', true);
+        if ($origin === 'AI_ESTIMATE' && $allowAi && is_numeric($alternative['ai_probability'] ?? null) && ($alternative['market_recognized'] ?? false)) {
+            return $alternative;
+        }
+
+        return null;
+    }
+
+    public static function presentsAsValidated(?string $reviewDecision): bool
+    {
+        return ! in_array((string) $reviewDecision, self::UNVALIDATED_STATUSES, true);
+    }
+
+    public function storedReview(array $review): array
+    {
+        return [
+            'status' => $review['gemini_status'] ?? self::STATUS_FAILED,
+            'status_label' => self::statusLabel($review['gemini_status'] ?? null),
+            'explanation' => (string) ($review['reasoning'] ?? ''),
+            'python' => $this->displayPython($review['python_candidate'] ?? null),
+            'alternative' => $this->displayAlternative($review['alternative'] ?? null),
+            'published_selection' => $this->displayPython($review['python_candidate'] ?? null),
+        ];
+    }
+
+    public static function presentationFromPrediction(?Prediction $prediction): ?array
+    {
+        if (! $prediction) {
+            return null;
+        }
+
+        $stored = data_get($prediction->market_metrics_json, 'gemini_review');
+
+        return is_array($stored) && isset($stored['status']) ? $stored : null;
     }
 
     public function candidatesFromResult(array $result, array $oddsContext = []): array
@@ -364,9 +423,9 @@ class PredictionRevisionService
     }
 
     /**
-     * Favorise les marchés délaissés (BTTS, totaux, 1N2) sans jamais
-     * favoriser la double chance, trop facile à obtenir avec une forte
-     * probabilité et donc envahissante.
+     * Conserve le barème de diversité des marchés. Il ne remplace plus le
+     * pronostic Python : une alternative vient uniquement de Gemini, puis
+     * passe par les contrôles de marché.
      */
     private function marketDiversityBonus(string $market): float
     {
@@ -431,63 +490,287 @@ class PredictionRevisionService
             ?? collect($candidates)->sortByDesc('probability')->first();
     }
 
-    private function decision(string $decision, ?array $initial, ?array $final, string $reasoning, array $risks, array $candidates, string $confidence = 'low'): array
+    private function fromSparseProposal(array $analysis, ?array $initial, array $candidates, float $quality): array
     {
-        return [
-            'decision' => $decision,
-            'initial_candidate' => $initial,
-            'final_candidate' => $final,
-            'reasoning' => $reasoning,
-            'supporting_factors' => $final ? ['candidate_calculated_by_python'] : [],
-            'risk_factors' => $risks,
-            'confidence_in_revision' => $confidence,
-            'required_recalculation' => $decision === 'replace',
-            'candidates' => $candidates,
-            'provider' => 'local_revision_rules',
-            'model' => self::POLICY_VERSION,
-        ];
+        $proposal = is_array($analysis['candidate'] ?? null) ? $analysis['candidate'] : null;
+        if (is_array($proposal)) {
+            $proposal['justification'] = $analysis['reasoning'] ?? '';
+            $proposal['risk_factors'] = $analysis['risk_factors'] ?? [];
+            if (! isset($proposal['probability']) && isset($analysis['candidate']['probability'])) {
+                $proposal['probability'] = $analysis['candidate']['probability'];
+            }
+        }
+        $alternative = $this->resolveAlternative($proposal, $candidates, $initial);
+        $risks = array_values(array_unique(array_merge(
+            array_filter((array) ($analysis['risk_factors'] ?? []), 'is_string'),
+            $alternative ? [] : ['invalid_ai_candidate_rejected'],
+            $this->qualityRisks($quality)
+        )));
+
+        return $this->assemble(
+            $alternative ? self::STATUS_WITH_ALTERNATIVE : self::STATUS_WITHOUT_ALTERNATIVE,
+            $initial,
+            $alternative,
+            (string) ($analysis['reasoning'] ?? ''),
+            $risks,
+            $candidates,
+            (string) ($analysis['confidence'] ?? 'low'),
+            (string) ($analysis['provider'] ?? 'google_gemini'),
+            $analysis['model'] ?? null,
+            $analysis,
+            $analysis['supporting_factors'] ?? [],
+            $analysis['missing_data'] ?? []
+        );
     }
 
-    private function aiDecision(array $review, array $initial, ?array $final, array $candidates): array
-    {
-        $provider = $review['provider'] ?? 'google_gemini';
+    private function assemble(
+        string $status,
+        ?array $python,
+        ?array $alternative,
+        string $reasoning,
+        array $risks,
+        array $candidates,
+        string $confidence,
+        string $provider,
+        ?string $model,
+        ?array $aiResponse,
+        array $supporting = [],
+        array $missing = []
+    ): array {
+        $python = $python ? $this->withPythonOrigin($python) : null;
+
         return [
-            'decision' => $review['decision'],
-            'initial_candidate' => $initial,
-            'final_candidate' => $final,
-            'prediction_origin' => $provider === 'google_gemini' ? 'AI_ASSISTED_PYTHON' : 'PYTHON_ESTIMATE',
-            'source_model' => $review['model'] ?? 'python',
-            'reasoning' => $review['reasoning'] ?? '',
-            'supporting_factors' => $review['supporting_factors'] ?? [],
-            'risk_factors' => $review['risk_factors'] ?? [],
-            'confidence_in_revision' => $review['confidence_in_revision'] ?? 'low',
-            'required_recalculation' => (bool) ($review['required_recalculation'] ?? false),
+            'decision' => $status,
+            'gemini_status' => $status,
+            'initial_candidate' => $python,
+            'python_candidate' => $python,
+            'alternative' => $alternative,
+            'final_candidate' => $python,
+            'published_selection' => $python,
+            'prediction_origin' => 'PYTHON_ESTIMATE',
+            'source_model' => $model,
+            'ai_estimate' => ($alternative['origin'] ?? null) === 'AI_ESTIMATE' ? $alternative : null,
+            'reasoning' => $reasoning,
+            'supporting_factors' => array_values(array_filter($supporting, 'is_string')),
+            'risk_factors' => array_values(array_unique($risks)),
+            'missing_data' => array_values(array_filter($missing, 'is_string')),
+            'confidence_in_revision' => in_array($confidence, ['low', 'medium', 'high'], true) ? $confidence : 'low',
+            'required_recalculation' => ($alternative['origin'] ?? null) === 'PYTHON',
+            'parlay_eligible' => $status === self::STATUS_VALIDATED && $python !== null,
             'candidates' => $candidates,
             'provider' => $provider,
-            'model' => $review['model'] ?? null,
-            'ai_response' => $review,
+            'model' => $model,
+            'ai_response' => $aiResponse,
         ];
     }
 
-    private function aiEstimateDecision(array $analysis, ?array $initial, array $candidates): array
+    private function canonicalDecision(array $review): string
     {
+        return match (strtolower((string) ($review['decision'] ?? ''))) {
+            'validated', 'keep' => 'validated',
+            'not_validated', 'not_validated_with_alternative', 'replace' => 'not_validated',
+            'not_validated_without_alternative', 'reject' => 'not_validated_without',
+            'insufficient_information', 'insufficient_data' => 'insufficient',
+            default => 'failed',
+        };
+    }
+
+    private function proposalFromReview(array $review): ?array
+    {
+        if (is_array($review['alternative'] ?? null)) {
+            return $review['alternative'];
+        }
+
+        $key = $review['candidate_key'] ?? null;
+        $market = $review['alternative_market'] ?? $review['market'] ?? null;
+        $selection = $review['alternative_selection'] ?? $review['selection'] ?? null;
+        if (! $key && ! $market && ! $selection) {
+            return null;
+        }
+
         return [
-            'decision' => 'keep',
-            'initial_candidate' => $initial,
-            'final_candidate' => $analysis['candidate'],
-            'prediction_origin' => 'AI_ESTIMATE',
-            'source_model' => $analysis['model'] ?? 'gemini',
-            'ai_estimate' => $analysis,
-            'reasoning' => $analysis['reasoning'] ?? '',
-            'supporting_factors' => $analysis['supporting_factors'] ?? [],
-            'risk_factors' => $analysis['risk_factors'] ?? [],
-            'missing_data' => $analysis['missing_data'] ?? [],
-            'confidence_in_revision' => $analysis['confidence'] ?? 'low',
-            'required_recalculation' => false,
-            'candidates' => $candidates,
-            'provider' => $analysis['provider'] ?? 'google_gemini',
-            'model' => $analysis['model'] ?? null,
-            'ai_response' => $analysis,
+            'candidate_key' => $key,
+            'market' => $market,
+            'selection' => $selection,
+            'line' => $review['line'] ?? null,
+            'label' => $review['label'] ?? null,
+            'probability' => $review['alternative_probability'] ?? null,
+            'value_analysis' => (bool) ($review['value_analysis'] ?? false),
+            'justification' => $review['reasoning'] ?? '',
+            'risk_factors' => $review['risk_factors'] ?? [],
         ];
+    }
+
+    /**
+     * Une alternative n'est retenue que si le marché et la sélection existent.
+     * La probabilité Python est relue sur le marché déjà calculé. Sinon
+     * l'estimation reste identifiée comme telle, sans probabilité Python.
+     */
+    private function resolveAlternative(?array $proposal, array $candidates, ?array $python): ?array
+    {
+        if (! is_array($proposal)) {
+            return null;
+        }
+
+        $matched = null;
+        $key = $proposal['candidate_key'] ?? null;
+        if (is_string($key) && $key !== '') {
+            $matched = collect($candidates)->firstWhere('candidate_key', $key);
+        }
+        if (! $matched && is_string($proposal['market'] ?? null) && is_string($proposal['selection'] ?? null)) {
+            $matched = collect($candidates)->first(fn (array $candidate): bool => $candidate['market'] === $proposal['market']
+                && $candidate['selection'] === $proposal['selection']);
+        }
+
+        if ($matched && $python && ($matched['candidate_key'] ?? null) === ($python['candidate_key'] ?? null)) {
+            return null;
+        }
+
+        $justification = (string) ($proposal['justification'] ?? $proposal['reasoning'] ?? '');
+        $risks = array_values(array_filter((array) ($proposal['risk_factors'] ?? $proposal['risks'] ?? []), 'is_string'));
+        $valueRequested = (bool) ($proposal['value_analysis'] ?? false);
+
+        if ($matched) {
+            $bookmaker = ($matched['odds_source'] ?? null) === 'bookmaker';
+            if ($valueRequested && ! $bookmaker) {
+                $risks[] = 'value_analysis_without_bookmaker_odds';
+            }
+
+            return [
+                'candidate_key' => $matched['candidate_key'],
+                'market' => $matched['market'],
+                'selection' => $matched['selection'],
+                'label' => $matched['label'],
+                'line' => $matched['line'],
+                'probability' => $matched['probability'],
+                'origin' => 'PYTHON',
+                'ai_probability' => null,
+                'odds' => $bookmaker ? $matched['odds'] : null,
+                'odds_source' => $bookmaker ? 'bookmaker' : null,
+                'justification' => $justification,
+                'risks' => array_values(array_unique($risks)),
+                'technically_valid' => ! ($valueRequested && ! $bookmaker),
+                'market_recognized' => true,
+            ];
+        }
+
+        $market = is_string($proposal['market'] ?? null) ? $proposal['market'] : null;
+        $selection = is_string($proposal['selection'] ?? null) ? $proposal['selection'] : null;
+        if (! $this->selectionIsRecognized($market, $selection)) {
+            return null;
+        }
+
+        $aiProbability = is_numeric($proposal['probability'] ?? null) ? (float) $proposal['probability'] : null;
+        if ($aiProbability !== null && ($aiProbability <= 0 || $aiProbability >= 1)) {
+            $aiProbability = null;
+        }
+        $risks[] = 'python_probability_unavailable';
+
+        return [
+            'candidate_key' => $market.':'.$selection,
+            'market' => $market,
+            'selection' => $selection,
+            'label' => is_string($proposal['label'] ?? null) ? $proposal['label'] : $selection,
+            'line' => is_numeric($proposal['line'] ?? null) ? (float) $proposal['line'] : null,
+            'probability' => null,
+            'origin' => 'AI_ESTIMATE',
+            'ai_probability' => $aiProbability,
+            'odds' => null,
+            'odds_source' => null,
+            'justification' => $justification,
+            'risks' => array_values(array_unique($risks)),
+            'technically_valid' => false,
+            'market_recognized' => true,
+        ];
+    }
+
+    private function selectionIsRecognized(?string $market, ?string $selection): bool
+    {
+        if ($market === null || $selection === null || $selection === '') {
+            return false;
+        }
+
+        return match ($market) {
+            '1N2' => in_array($selection, ['home', 'draw', 'away'], true),
+            'double_chance' => in_array($selection, ['1X', 'X2', '12'], true),
+            'btts' => in_array($selection, ['yes', 'no'], true),
+            'dnb' => in_array($selection, ['home', 'away'], true),
+            'totals' => (bool) preg_match('/^(over|under)_\d+_\d+$/', $selection),
+            'team_totals' => (bool) preg_match('/^(home|away)_(OVER|UNDER)_\d+(?:\.\d+)?$/', $selection),
+            'asian_handicap' => (bool) preg_match('/^AH_(HOME|AWAY)_-?\d+(?:\.\d+)?$/', $selection),
+            default => false,
+        };
+    }
+
+    private function withPythonOrigin(array $candidate): array
+    {
+        $candidate['origin'] = 'PYTHON';
+        $candidate['origin_label'] = 'Python';
+
+        return $candidate;
+    }
+
+    private function qualityRisks(float $quality): array
+    {
+        if ($quality >= 58) {
+            return [];
+        }
+
+        return ['data_quality_below_validation_threshold', 'limited_data_mode'];
+    }
+
+    private function displayPython(?array $candidate): ?array
+    {
+        if (! is_array($candidate) || empty($candidate['market']) || empty($candidate['selection'])) {
+            return null;
+        }
+
+        $probability = is_numeric($candidate['probability'] ?? null) ? (float) $candidate['probability'] : null;
+
+        return [
+            'market' => $candidate['market'],
+            'selection' => $candidate['selection'],
+            'label' => $candidate['label'] ?? $candidate['selection'],
+            'probability' => $probability,
+            'probability_label' => $probability === null ? 'Non calculée' : $this->percentLabel($probability),
+            'origin' => 'PYTHON',
+            'origin_label' => 'Python',
+        ];
+    }
+
+    private function displayAlternative(?array $alternative): ?array
+    {
+        if (! is_array($alternative)) {
+            return null;
+        }
+
+        $origin = ($alternative['origin'] ?? '') === 'PYTHON' ? 'PYTHON' : 'AI_ESTIMATE';
+        $probability = $origin === 'PYTHON' && is_numeric($alternative['probability'] ?? null)
+            ? (float) $alternative['probability']
+            : null;
+        $aiProbability = is_numeric($alternative['ai_probability'] ?? null) ? (float) $alternative['ai_probability'] : null;
+
+        return [
+            'market' => $alternative['market'] ?? null,
+            'selection' => $alternative['selection'] ?? null,
+            'label' => $alternative['label'] ?? ($alternative['selection'] ?? ''),
+            'probability' => $probability,
+            'probability_label' => $probability === null ? 'Non calculée par Python' : $this->percentLabel($probability),
+            'ai_probability' => $aiProbability,
+            'ai_probability_label' => $aiProbability === null ? null : $this->percentLabel($aiProbability),
+            'origin' => $origin,
+            'origin_label' => $origin === 'PYTHON' ? 'Python' : 'Estimation IA',
+            'justification' => (string) ($alternative['justification'] ?? ''),
+            'risks' => array_values(array_filter((array) ($alternative['risks'] ?? []), 'is_string')),
+            'technically_valid' => (bool) ($alternative['technically_valid'] ?? false),
+            'market_recognized' => (bool) ($alternative['market_recognized'] ?? false),
+            'odds' => ($alternative['odds_source'] ?? null) === 'bookmaker' ? ($alternative['odds'] ?? null) : null,
+            'odds_source' => ($alternative['odds_source'] ?? null) === 'bookmaker' ? 'bookmaker' : null,
+        ];
+    }
+
+    private function percentLabel(float $probability): string
+    {
+        return number_format($probability * 100, 1, ',', ' ').' %';
     }
 }

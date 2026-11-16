@@ -320,6 +320,7 @@ class MatchController extends Controller
                 'status'          => $prediction->is_abstained ? 'insufficient_data' : 'ok',
                 'availability_status' => $match->analysis_status ?? 'LIMITED_DATA',
                 'prediction_origin' => $prediction->prediction_origin ?? 'PYTHON_ESTIMATE',
+                'gemini_review' => \App\Services\Prediction\PredictionRevisionService::presentationFromPrediction($prediction),
                 'source_model' => $prediction->source_model,
                 'missing_data' => $prediction->missing_data_json ?? [],
                 'uncertainty' => $prediction->uncertainty_tier ?? 'low',

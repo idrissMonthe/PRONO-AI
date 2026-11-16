@@ -512,6 +512,12 @@ class ParlayService
             return [];
         }
 
+        $pythonEligible = $this->revisionService->pythonPickEligibleForParlay($prediction);
+        $geminiAlternative = $this->revisionService->alternativeForParlay($prediction);
+        if (! $pythonEligible && $geminiAlternative === null) {
+            return [];
+        }
+
         $warnings = $prediction->warnings_json ?? [];
         if (collect($warnings)->contains(fn ($warning): bool => str_starts_with((string) $warning, 'model_not_trained')
             || str_starts_with((string) $warning, 'untrained_poisson_fallback')
@@ -572,8 +578,28 @@ class ParlayService
             ];
         };
 
-        // Les coupons utilisent exclusivement la sélection finale validée.
-        if ($prediction->published_market && $prediction->published_selection) {
+        if (! $pythonEligible && is_array($geminiAlternative)) {
+            $probability = ($geminiAlternative['origin'] ?? '') === 'AI_ESTIMATE'
+                ? ($geminiAlternative['ai_probability'] ?? null)
+                : ($geminiAlternative['probability'] ?? null);
+            $add(
+                (string) ($geminiAlternative['selection'] ?? 'alternative'),
+                (string) ($geminiAlternative['label'] ?? 'Alternative Gemini'),
+                (string) ($geminiAlternative['market'] ?? 'alternative'),
+                $probability
+            );
+            if ($options !== []) {
+                $options[0]['source'] = ($geminiAlternative['origin'] ?? '') === 'AI_ESTIMATE' ? 'AI_ESTIMATE' : 'PYTHON_ESTIMATE';
+                $options[0]['is_ai_estimate'] = ($geminiAlternative['origin'] ?? '') === 'AI_ESTIMATE';
+                $options[0]['gemini_status'] = PredictionRevisionService::STATUS_WITH_ALTERNATIVE;
+            }
+
+            return $options;
+        }
+
+        // Les coupons utilisent la sélection Python lorsque Gemini l'a validée,
+        // ou un pronostic historique antérieur à ce statut.
+        if ($pythonEligible && $prediction->published_market && $prediction->published_selection) {
             $published = collect($this->revisionService->candidatesFromResult([
                 'markets' => $markets,
                 'top_scores' => $prediction->top_scores_json ?? [],
