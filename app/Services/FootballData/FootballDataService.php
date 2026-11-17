@@ -746,12 +746,14 @@ class FootballDataService
                 ]
             );
 
+            // Les imports multi-sources fournissent les années réelles de la
+            // saison ; sans ces clés, le comportement historique est conservé.
             $season = Season::firstOrCreate(
                 ['league_id' => $league->id, 'name' => $rawRecord['season'] ?? '2025-2026'],
                 [
-                    'year_start' => 2025,
-                    'year_end'   => 2026,
-                    'is_current' => true,
+                    'year_start' => (int) ($rawRecord['season_year_start'] ?? 2025),
+                    'year_end'   => (int) ($rawRecord['season_year_end'] ?? 2026),
+                    'is_current' => $rawRecord['season_is_current'] ?? true,
                 ]
             );
 
