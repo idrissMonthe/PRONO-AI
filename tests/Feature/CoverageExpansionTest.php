@@ -472,9 +472,26 @@ class CoverageExpansionTest extends TestCase
             'is_official' => 1,
             'is_abstained' => 0,
             'prediction_origin' => 'PYTHON_ESTIMATE',
-            'published_market' => '1N2',
-            'published_selection' => 'home',
         ]);
-        $this->assertSame('PYTHON_READY', $match->fresh()->analysis_status);
+
+        // Depuis l'élargissement des marchés publiés, la sélection retenue est
+        // la meilleure de la bande de publication et n'est plus forcément le
+        // 1N2 brut : elle doit rester un marché dérivé de la même matrice.
+        $published = Prediction::where('match_id', $match->id)
+            ->where('is_official', true)
+            ->where('is_abstained', false)
+            ->first();
+
+        $this->assertNotNull($published);
+        $this->assertContains($published->published_market, [
+            '1N2', 'double_chance', 'totals', 'btts', 'dnb', 'team_totals', 'asian_totals',
+        ]);
+        $this->assertNotNull($published->published_selection);
+        $this->assertNotNull($published->published_probability);
+        $this->assertGreaterThanOrEqual(0.55, (float) $published->published_probability);
+        $this->assertLessThanOrEqual(0.85, (float) $published->published_probability);
+        // Le statut porte l'origine réelle de l'analyse : Python seul ou
+        // Python enrichi par la revue Gemini.
+        $this->assertContains($match->fresh()->analysis_status, ['PYTHON_READY', 'HYBRID_READY']);
     }
 }
