@@ -16,7 +16,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.devig import devig_odds
-from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix, reconcile_score_matrices, rescale_outcome_regions
+from app.core.dixon_coles import (
+    compute_score_matrix,
+    extract_match_markets_from_matrix,
+    project_lambdas_to_dixon_coles,
+    reconcile_score_matrices,
+)
 from app.core.metrics import (
     calculate_brier_multiclass,
     calculate_multiclass_ece,
@@ -358,18 +363,18 @@ def predict(req: PredictRequest):
             la *= 0.95
         warnings.append("short_rest_adjustment_applied")
 
-    # One score matrix is the source of every published market. Specialists
-    # tilt that matrix, then Elo, form and the market move only its 1N2 regions.
-    matrix, residual_mass, n = compute_score_matrix(lh, la, champion_model.rho)
-    dc_1n2 = extract_match_markets_from_matrix(matrix)["1N2"]
-    specialist_matrices = market_specialists.predict(matrix, req.home_team, req.away_team)
+    # L'ensemble donne une cible de 1N2. La matrice publiée est ensuite
+    # recalculée par Dixon-Coles : elle n'est plus déformée zone par zone.
+    base_matrix, _, _ = compute_score_matrix(lh, la, champion_model.rho)
+    dc_1n2 = extract_match_markets_from_matrix(base_matrix)["1N2"]
+    specialist_matrices = market_specialists.predict(base_matrix, req.home_team, req.away_team)
     reconciled = reconcile_score_matrices(
-        matrix,
+        base_matrix,
         specialist_matrices,
         {"outcome": 0.15, "goals": 0.15, "btts": 0.10, "exact_score": 0.05},
     )
-    # The weights above sum to 0.45; the Dixon-Coles matrix keeps the remaining mass.
-    reconciled = 0.55 * matrix + 0.45 * reconciled
+    # Les poids ci-dessus somment à 0,45 et ne servent qu'à lire une cible.
+    reconciled = 0.55 * base_matrix + 0.45 * reconciled
     reconciled = reconciled / max(float(reconciled.sum()), 1e-12)
     structural = extract_match_markets_from_matrix(reconciled)
     warnings.append("reconciled_score_distribution_applied")
@@ -404,16 +409,25 @@ def predict(req: PredictRequest):
         market_weight,
     )
     warnings.append("elo_form_ensemble_applied")
-    matrix = rescale_outcome_regions(reconciled, published[0], published[1], published[2])
+    lh, la, matrix, residual_mass, n = project_lambdas_to_dixon_coles(
+        lh,
+        la,
+        champion_model.rho,
+        published[0],
+        published[1],
+        published[2],
+    )
+    warnings.append("dixon_coles_joint_preserved")
     markets = extract_match_markets_from_matrix(matrix)
     p_home = markets["1N2"]["home"]
     p_draw = markets["1N2"]["draw"]
     p_away = markets["1N2"]["away"]
 
     dc_point = [float(dc_1n2["home"]), float(dc_1n2["draw"]), float(dc_1n2["away"])]
+    achieved = [p_home, p_draw, p_away]
 
     def shift_bootstrap_row(row):
-        shifted = [max(1e-4, published[index] + (float(row[index]) - dc_point[index])) for index in range(3)]
+        shifted = [max(1e-4, achieved[index] + (float(row[index]) - dc_point[index])) for index in range(3)]
         return shifted
 
     bootstrap_replicates = int(os.getenv("PREDICTION_BOOTSTRAP_REPLICATES", "0"))

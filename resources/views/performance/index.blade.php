@@ -12,7 +12,7 @@
 
     <div class="performance-market-grid">
         @forelse($marketStats as $stat)
-            <div class="performance-market-card"><span>{{ $stat['market'] }}</span><strong>{{ $stat['rate'] }}%</strong><small>{{ $stat['won'] }}/{{ $stat['total'] }} réussies</small></div>
+            <div class="performance-market-card"><span>{{ $stat['market'] }}</span><strong>{{ $stat['rate'] !== null ? $stat['rate'].'%' : 'Échantillon insuffisant' }}</strong><small>{{ $stat['won'] }}/{{ $stat['total'] }} réglées</small></div>
         @empty
             <div class="empty-card">Les statistiques apparaîtront après le premier match terminé avec une prédiction officielle.</div>
         @endforelse

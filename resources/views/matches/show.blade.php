@@ -54,8 +54,18 @@
                     </div>
                     <div class="text-[11px] text-[#A2ACA3] mono mt-1">Score Final Officiel</div>
                 @else
+                    @php
+                        $hoursUntilKickoff = (int) round(now()->diffInHours($match->match_date_utc, false));
+                        $liveStatuses = ['IN_PLAY', 'LIVE', 'PAUSED'];
+                    @endphp
                     <div class="px-4 py-1.5 rounded-full bg-[#181F1B] border border-[#303A32] text-xs font-bold text-[#A2ACA3] mono uppercase tracking-widest">
-                        COUP D'ENVOI DANS {{ round($match->match_date_utc->diffInHours(now())) }}H
+                        @if($hoursUntilKickoff > 0)
+                            COUP D'ENVOI DANS {{ $hoursUntilKickoff }}H
+                        @elseif(in_array($match->status, $liveStatuses, true))
+                            MATCH EN COURS
+                        @else
+                            COUP D'ENVOI PASSÉ
+                        @endif
                     </div>
                     <div class="text-xs text-[#C3A16A] mono mt-2 font-semibold">
                         Score Modal Modèle : {{ $predData['top_scores'][0]['score'] ?? '—' }}
@@ -267,19 +277,27 @@
 
             <div class="grid grid-cols-2 gap-3 text-xs">
                 <!-- Résultats combinés -->
+                @php
+                    $homeP = $predData['probabilities']['home']['p'] ?? null;
+                    $drawP = $predData['probabilities']['draw']['p'] ?? null;
+                    $awayP = $predData['probabilities']['away']['p'] ?? null;
+                    $percent = function ($value) {
+                        return is_numeric($value) ? round($value * 100).'%' : '—';
+                    };
+                @endphp
                 <div class="p-3 rounded bg-[#222B25] border border-[#303A32] space-y-1.5">
                     <span class="text-[#A2ACA3] font-semibold text-[11px] uppercase mono">Résultats combinés</span>
                     <div class="flex justify-between mono">
                         <span>1N :</span>
-                        <strong class="text-[#88B69A]">{{ round(($predData['probabilities']['home']['p'] + $predData['probabilities']['draw']['p']) * 100) }}%</strong>
+                        <strong class="text-[#88B69A]">{{ $percent(is_numeric($homeP) && is_numeric($drawP) ? $homeP + $drawP : null) }}</strong>
                     </div>
                     <div class="flex justify-between mono">
                         <span>N2 :</span>
-                        <strong class="text-[#D68D86]">{{ round(($predData['probabilities']['draw']['p'] + $predData['probabilities']['away']['p']) * 100) }}%</strong>
+                        <strong class="text-[#D68D86]">{{ $percent(is_numeric($drawP) && is_numeric($awayP) ? $drawP + $awayP : null) }}</strong>
                     </div>
                     <div class="flex justify-between mono">
                         <span>12 :</span>
-                        <strong class="text-[#F0F0E8]">{{ round(($predData['probabilities']['home']['p'] + $predData['probabilities']['away']['p']) * 100) }}%</strong>
+                        <strong class="text-[#F0F0E8]">{{ $percent($derivedMarkets['double_chance']['12'] ?? (is_numeric($homeP) && is_numeric($awayP) ? $homeP + $awayP : null)) }}</strong>
                     </div>
                 </div>
 
@@ -311,7 +329,8 @@
                         <span>Non :</span>
                         <strong class="text-[#A2ACA3]">{{ isset($btts['no']) ? round($btts['no'] * 100, 1) . '%' : '—' }}</strong>
                     </div>
-                    <div class="text-[10px] text-[#A2ACA3] pt-0.5 mono">
+                    <div class="text-[10px] text-[#A2ACA3] pt-0.5">BTTS Non est analysé avec les mêmes exigences que les autres marchés.</div>
+                    <div class="text-[10px] text-[#A2ACA3] mono">
                         {{ $match->awayTeam->short_name }} ne marque pas: {{ isset($cleanSheet['home']) ? round($cleanSheet['home'] * 100, 1) . '%' : '—' }}
                     </div>
                     <div class="text-[10px] text-[#A2ACA3] mono">
@@ -324,8 +343,16 @@
                     @foreach(['over_0_5' => '+0,5', 'over_3_5' => '+3,5', 'over_4_5' => '+4,5', 'over_5_5' => '+5,5'] as $key => $label)
                         <div class="flex justify-between mono">
                             <span>{{ $label }} buts :</span>
-                            <strong class="text-[#C3A16A]">{{ isset($totals[$key]) ? round($totals[$key] * 100, 1) . '%' : '—' }}</strong>
+                            <strong class="text-[#C3A16A]">{{ isset($totals[$key]) && is_numeric($totals[$key]) ? round($totals[$key] * 100, 1) . '%' : '—' }}</strong>
                         </div>
+                    @endforeach
+                    @foreach(($derivedMarkets['asian_totals'] ?? []) as $line => $entry)
+                        @if(is_array($entry) && is_numeric($entry['over']['win'] ?? null))
+                            <div class="flex justify-between mono">
+                                <span>+{{ $line }},0 gain / remboursement :</span>
+                                <strong class="text-[#F0F0E8]">{{ round($entry['over']['win'] * 100, 1) }}% / {{ round(($entry['over']['push'] ?? 0) * 100, 1) }}%</strong>
+                            </div>
+                        @endif
                     @endforeach
                 </div>
 
@@ -380,6 +407,10 @@
                         <div class="flex justify-between mono">
                             <span>{{ $teamName }} +1,5 :</span>
                             <strong class="text-[#C3A16A]">{{ isset($teamTotals[$side]['over_1_5']) ? round($teamTotals[$side]['over_1_5'] * 100, 1) . '%' : '—' }}</strong>
+                        </div>
+                        <div class="flex justify-between mono">
+                            <span>{{ $teamName }} -1,5 :</span>
+                            <strong class="text-[#A2ACA3]">{{ isset($teamTotals[$side]['under_1_5']) && is_numeric($teamTotals[$side]['under_1_5']) ? round($teamTotals[$side]['under_1_5'] * 100, 1) . '%' : '—' }}</strong>
                         </div>
                     @endforeach
                 </div>

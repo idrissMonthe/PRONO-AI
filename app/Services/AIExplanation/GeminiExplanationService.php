@@ -62,9 +62,10 @@ class GeminiExplanationService
             '1N2' => ['home', 'draw', 'away'],
             'double_chance' => ['1X', 'X2', '12'],
             'btts' => ['yes', 'no'],
-            'totals' => ['over_1_5', 'under_1_5', 'over_2_5', 'under_2_5', 'over_3_5', 'under_3_5'],
+            'totals' => ['over_0_5', 'under_0_5', 'over_1_5', 'under_1_5', 'over_2_5', 'under_2_5', 'over_3_5', 'under_3_5', 'over_4_5', 'under_4_5'],
+            'asian_totals' => ['over_1_0', 'under_1_0', 'over_2_0', 'under_2_0', 'over_3_0', 'under_3_0'],
             'dnb' => ['home', 'away'],
-            'team_totals' => ['home_OVER_0.5', 'home_OVER_1.5', 'away_OVER_0.5', 'away_OVER_1.5', 'home_UNDER_0.5', 'away_UNDER_0.5'],
+            'team_totals' => ['home_OVER_0.5', 'home_UNDER_0.5', 'home_OVER_1.5', 'home_UNDER_1.5', 'home_OVER_2.5', 'home_UNDER_2.5', 'away_OVER_0.5', 'away_UNDER_0.5', 'away_OVER_1.5', 'away_UNDER_1.5', 'away_OVER_2.5', 'away_UNDER_2.5'],
         ];
         $systemInstruction = implode("\n", [
             'Tu es un analyste football complémentaire, pas un bookmaker.',
@@ -477,6 +478,8 @@ class GeminiExplanationService
         $systemInstruction = implode("\n", [
             "Tu es un réviseur critique de pronostics football.",
             "Tu ne calcules aucune probabilité et tu n'en inventes jamais.",
+            "Les candidats peuvent couvrir le 1N2, la double chance 1X, X2 et 12, les totaux 0,5 à 4,5, les buts par équipe, le BTTS Oui et le BTTS Non, ainsi que les lignes asiatiques avec remboursement. Le 12 n'est pas un Draw No Bet.",
+            "Le BTTS Non n'est pas un pronostic sûr par nature. Traite-le comme les autres marchés.",
             "Le pronostic Python initial reste conservé quoi que tu décides. Tu ne le remplaces pas.",
             "Tu n'es pas obligé de valider ce pronostic, ni de proposer une alternative.",
             "Si tu proposes une alternative, candidate_key doit être une clé présente dans candidates, ou bien market et selection doivent décrire un marché réel. N'invente pas de probabilité.",

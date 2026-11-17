@@ -95,8 +95,10 @@ class PredictionRevisionServiceTest extends TestCase
     {
         $review = $this->service()->review($this->predictionResult(['1N2' => ['home' => 0.42, 'draw' => 0.30, 'away' => 0.28], 'double_chance' => ['1X' => 0.78, 'X2' => 0.58]]), ['quality_score' => 85]);
         $this->assertSame(PredictionRevisionService::STATUS_FAILED, $review['gemini_status']);
-        $this->assertSame('1N2', $review['final_candidate']['market']);
-        $this->assertSame('home', $review['final_candidate']['selection']);
+        $this->assertSame('double_chance', $review['python_candidate']['market']);
+        $this->assertSame('1X', $review['python_candidate']['selection']);
+        $this->assertSame($review['python_candidate'], $review['final_candidate']);
+        $this->assertFalse($review['python_candidate']['high_confidence']);
     }
 
     public function test_low_quality_keeps_the_candidate_in_limited_data_mode(): void
@@ -146,12 +148,12 @@ class PredictionRevisionServiceTest extends TestCase
             'model' => 'test-model',
         ]);
         $review = (new PredictionRevisionService($gemini))->review($this->predictionResult([
-            '1N2' => ['home' => 0.42, 'draw' => 0.30, 'away' => 0.28],
+            '1N2' => ['home' => 0.82, 'draw' => 0.10, 'away' => 0.08],
             'double_chance' => ['1X' => 0.78, 'X2' => 0.58],
         ]), ['quality_score' => 85]);
         $this->assertSame(PredictionRevisionService::STATUS_WITH_ALTERNATIVE, $review['gemini_status']);
         $this->assertSame('1N2', $review['python_candidate']['market']);
-        $this->assertSame(0.42, $review['python_candidate']['probability']);
+        $this->assertSame(0.82, $review['python_candidate']['probability']);
         $this->assertSame('double_chance', $review['alternative']['market']);
         $this->assertSame(0.78, $review['alternative']['probability']);
         $this->assertSame('PYTHON', $review['alternative']['origin']);
@@ -305,12 +307,12 @@ class PredictionRevisionServiceTest extends TestCase
             'reasoning' => 'Les deux équipes ont des buts attendus proches.',
             'provider' => 'google_gemini',
         ], [
-            '1N2' => ['home' => 0.48, 'draw' => 0.28, 'away' => 0.24],
+            '1N2' => ['home' => 0.64, 'draw' => 0.20, 'away' => 0.16],
             'btts' => ['yes' => 0.57, 'no' => 0.43],
         ]);
 
         $this->assertSame(PredictionRevisionService::STATUS_WITH_ALTERNATIVE, $review['gemini_status']);
-        $this->assertSame(0.48, $review['python_candidate']['probability']);
+        $this->assertSame(0.64, $review['python_candidate']['probability']);
         $this->assertSame(0.57, $review['alternative']['probability']);
         $this->assertSame('PYTHON', $review['alternative']['origin']);
         $this->assertNotSame(0.99, $review['alternative']['probability']);
@@ -421,7 +423,7 @@ class PredictionRevisionServiceTest extends TestCase
             'reasoning' => 'Le marché des deux équipes est plus cohérent.',
             'provider' => 'google_gemini',
         ], [
-            '1N2' => ['home' => 0.46, 'draw' => 0.29, 'away' => 0.25],
+            '1N2' => ['home' => 0.64, 'draw' => 0.20, 'away' => 0.16],
             'btts' => ['yes' => 0.63, 'no' => 0.37],
         ]);
         $stored = $this->serviceWith($this->geminiReturning([

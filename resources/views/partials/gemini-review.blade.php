@@ -9,6 +9,7 @@
                     · sélection {{ $review['python']['selection'] }}
                     · probabilité {{ $review['python']['probability_label'] ?? 'Non calculée' }}
                     · origine {{ $review['python']['origin_label'] ?? 'Python' }}
+                    · {{ $review['python']['calibration_label'] ?? 'Non suffisamment calibré' }}
                 </p>
             </div>
         @endif

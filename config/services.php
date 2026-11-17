@@ -58,6 +58,12 @@ return [
         // Une alternative Gemini n'entre dans un combiné que si ce réglage est actif
         // et après les contrôles de marché. Elle ne remplace pas le pronostic Python.
         'allow_gemini_alternative_in_parlays' => env('PREDICTION_ALLOW_GEMINI_ALTERNATIVE_IN_PARLAYS', false),
+        // Bande dans laquelle un marché peut devenir le pronostic publié.
+        // Au-dessus du plafond, la ligne reste analysée mais ne masque pas
+        // un autre marché déjà situé dans la bande.
+        'publish_probability_floor' => (float) env('PREDICTION_PUBLISH_PROBABILITY_FLOOR', 0.55),
+        'publish_probability_ceiling' => (float) env('PREDICTION_PUBLISH_PROBABILITY_CEILING', 0.85),
+        'min_calibration_sample' => max(1, (int) env('PREDICTION_MIN_CALIBRATION_SAMPLE', 30)),
     ],
 
     'prediction' => [

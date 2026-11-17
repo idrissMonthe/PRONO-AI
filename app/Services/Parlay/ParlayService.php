@@ -183,11 +183,15 @@ class ParlayService
                 $line = (float) $tOdd->line;
                 if ($line <= 0.0) continue;
                 $key = ($tOdd->selection === 'OVER' ? 'over_' : 'under_') . str_replace('.', '_', (string) $line);
-                $p = (float) ($derived['totals'][$key] ?? 0);
-                if ($p === 0.0) {
-                    $floorKey = ($tOdd->selection === 'OVER' ? 'over_' : 'under_') . str_replace('.', '_', (string) floor($line) . '_5');
-                    $p = (float) ($derived['totals'][$floorKey] ?? 0);
+                $p = $derived['totals'][$key] ?? null;
+                if (! is_numeric($p) && floor($line) == $line) {
+                    $direction = strtolower($tOdd->selection) === 'over' ? 'over' : 'under';
+                    $p = $derived['asian_totals'][(string) (int) $line][$direction]['win'] ?? null;
                 }
+                if (! is_numeric($p) || (float) $p <= 0.0 || (float) $p >= 1.0) {
+                    continue;
+                }
+                $p = (float) $p;
                 if ($p >= 0.40 && (float)$tOdd->decimal_odds > 1.15
                     && $this->modelAgreesWithMarket($p, (float) $tOdd->decimal_odds)) {
                     $o = (float) $tOdd->decimal_odds;
@@ -264,9 +268,11 @@ class ParlayService
                 // Formule bookmaker standard pour cote combinée double chance
                 $odds1X = round(1.0 / ((1.0 / $oH) + (1.0 / $oD)), 2);
                 $oddsX2 = round(1.0 / ((1.0 / $oD) + (1.0 / $oA)), 2);
+                $odds12 = round(1.0 / ((1.0 / $oH) + (1.0 / $oA)), 2);
 
                 $prob1X = (float) ($derived['double_chance']['1X'] ?? ($pHome + $pDraw));
                 $probX2 = (float) ($derived['double_chance']['X2'] ?? ($pDraw + $pAway));
+                $prob12 = (float) ($derived['double_chance']['12'] ?? ($pHome + $pAway));
 
                 if ($prob1X >= 0.55 && $odds1X >= 1.15 && $this->modelAgreesWithMarket($prob1X, $odds1X)) {
                     $candidates[] = [
@@ -308,6 +314,26 @@ class ParlayService
                         'price_basis'     => 'bookmaker',
                     ];
                 }
+                if ($prob12 >= 0.55 && $odds12 >= 1.15 && $this->modelAgreesWithMarket($prob12, $odds12)) {
+                    $candidates[] = [
+                        'match_id'        => $match->id,
+                        'match_label'     => $matchLabel,
+                        'league'          => $match->league->name ?? 'Ligue',
+                        'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                        'selection'       => 'DC_12',
+                        'selection_label' => 'Pas de nul (12)',
+                        'market_group'    => 'Double chance',
+                        'model_prob'      => round($prob12, 4),
+                        'model_prob_pct'  => round($prob12 * 100, 1),
+                        'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                        'odds'            => $odds12,
+                        'odds_source'     => $homeOdds->bookmaker->name ?? 'Pinnacle',
+                        'odds_updated_at' => $homeOdds->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                        'fair_odds'       => round(1.0 / max(0.01, $prob12), 2),
+                        'ev_pct'          => round((($prob12 * $odds12) - 1.0) * 100, 2),
+                        'price_basis'     => 'bookmaker',
+                    ];
+                }
             }
 
             // D. Marché BTTS si cote disponible
@@ -339,7 +365,55 @@ class ParlayService
                     ];
                 }
             }
+
+            foreach ($this->oddsFor($match, 'team_totals') as $teamOdd) {
+                $rawSelection = strtoupper((string) $teamOdd->selection);
+                $side = str_contains($rawSelection, 'AWAY') ? 'away' : (str_contains($rawSelection, 'HOME') ? 'home' : null);
+                $direction = str_contains($rawSelection, 'UNDER') ? 'under' : (str_contains($rawSelection, 'OVER') ? 'over' : null);
+                if ($side === null || $direction === null || $teamOdd->line === null) {
+                    continue;
+                }
+                $line = (float) $teamOdd->line;
+                $key = $direction.'_'.str_replace('.', '_', (string) $line);
+                $p = $derived['team_totals'][$side][$key] ?? null;
+                if (! is_numeric($p)) {
+                    continue;
+                }
+                $o = (float) $teamOdd->decimal_odds;
+                if ((float) $p < 0.40 || $o <= 1.15 || ! $this->modelAgreesWithMarket((float) $p, $o)) {
+                    continue;
+                }
+                $teamLabel = $side === 'home' ? $homeDisplay : $awayDisplay;
+                $prefix = $direction === 'over' ? 'plus de ' : 'moins de ';
+                $candidates[] = [
+                    'match_id'        => $match->id,
+                    'match_label'     => $matchLabel,
+                    'league'          => $match->league->name ?? 'Ligue',
+                    'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                    'selection'       => strtoupper($side).'_'.$teamOdd->selection.'_'.$line,
+                    'selection_label' => "{$teamLabel} {$prefix}{$line} but",
+                    'market_group'    => 'Buts par équipe',
+                    'model_prob'      => round((float) $p, 4),
+                    'model_prob_pct'  => round((float) $p * 100, 1),
+                    'model_version'   => $pred->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                    'odds'            => round($o, 2),
+                    'odds_source'     => $teamOdd->bookmaker->name ?? 'Pinnacle',
+                    'odds_updated_at' => $teamOdd->snapshot_time_utc?->toIso8601String() ?? now()->toIso8601String(),
+                    'fair_odds'       => round(1.0 / max(0.01, (float) $p), 2),
+                    'ev_pct'          => round((((float) $p * $o) - 1.0) * 100, 2),
+                    'price_basis'     => 'bookmaker',
+                ];
+            }
         }
+
+        $candidates = array_map(function (array $candidate): array {
+            $candidate['market_family'] = $this->parlayFamily(
+                (string) ($candidate['market_group'] ?? ''),
+                (string) ($candidate['selection'] ?? '')
+            );
+
+            return $candidate;
+        }, $candidates);
 
         if (count($candidates) < 2) {
             Log::info('ParlayService: moins de 2 candidats valides pour la date', [
@@ -374,11 +448,12 @@ class ParlayService
             return $chosen;
         };
 
-        // 1. COMBINÉ SÉCURITÉ & CONFIANCE (MODERE, 2 sélections à très forte probabilité >= 60%)
-        $moderatePool = collect($candidates)->where('model_prob', '>=', 0.60)->all();
-        if (count($moderatePool) < 2) {
-            $moderatePool = collect($candidates)->where('model_prob', '>=', 0.50)->all();
-        }
+        // Le coupon présenté comme le plus fiable exige une calibration historique.
+        // Une probabilité élevée, y compris sur le BTTS Non, ne suffit pas.
+        $moderatePool = collect($candidates)
+            ->where('model_prob', '>=', 0.60)
+            ->filter(fn (array $candidate): bool => $this->revisionService->familyCalibrated((string) ($candidate['market_family'] ?? '')))
+            ->all();
         $moderateCandidates = $pickDistinctMatches($moderatePool, 2, fn ($a, $b) => $b['model_prob'] <=> $a['model_prob']);
 
         if (count($moderateCandidates) >= 2) {
@@ -929,6 +1004,19 @@ class ParlayService
         }
 
         return $this->marketIdCache[$code];
+    }
+
+    private function parlayFamily(string $group, string $selection): string
+    {
+        return match ($group) {
+            '1N2' => '1X2',
+            'Double chance' => str_contains($selection, '12') ? '12' : '1X2',
+            'Total buts' => 'Over/Under',
+            'Buts par équipe' => 'Buts équipe',
+            'BTTS' => str_ends_with($selection, 'NO') ? 'BTTS Non' : 'BTTS Oui',
+            'Handicap' => 'Ligne asiatique',
+            default => $group,
+        };
     }
 
     /**

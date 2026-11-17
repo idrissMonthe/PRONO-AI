@@ -32,7 +32,8 @@ class PredictionPerformanceController extends Controller
         $total = (clone $all)->whereIn('status', ['WON', 'LOST'])->count();
         $won = (clone $all)->where('status', 'WON')->count();
         $lost = (clone $all)->where('status', 'LOST')->count();
-        $rate = $total > 0 ? round(($won / $total) * 100, 1) : null;
+        $minimumSample = max(1, (int) config('services.hybrid_prediction.min_calibration_sample', 30));
+        $rate = $total >= $minimumSample ? round(($won / $total) * 100, 1) : null;
 
         $marketStats = PredictionEvaluation::query()
             ->whereIn('status', ['WON', 'LOST'])
@@ -44,7 +45,9 @@ class PredictionPerformanceController extends Controller
                 'market' => $row->market_group,
                 'total' => (int) $row->total,
                 'won' => (int) $row->won,
-                'rate' => $row->total > 0 ? round(($row->won / $row->total) * 100, 1) : 0,
+                'rate' => $row->total >= max(1, (int) config('services.hybrid_prediction.min_calibration_sample', 30))
+                    ? round(($row->won / $row->total) * 100, 1)
+                    : null,
             ]);
 
         $calibrationStats = ModelVersion::query()

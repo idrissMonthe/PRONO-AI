@@ -4,7 +4,7 @@ Statistical & Property-based tests for Dixon-Coles, Devigging & Metrics (CDC Sec
 import numpy as np
 import pytest
 from app.core.devig import devig_odds, devig_power, devig_proportional, devig_shin
-from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix
+from app.core.dixon_coles import compute_score_matrix, extract_match_markets_from_matrix, project_lambdas_to_dixon_coles
 from app.core.metrics import calculate_brier_multiclass, calculate_ece, calculate_multiclass_ece, calculate_log_loss, calculate_rps, diebold_mariano_test
 from app.core.elo import EloEngine
 from app.core.poisson_regressor import DixonColesModel, MatchData
@@ -63,6 +63,18 @@ def test_derived_markets_coherence():
 
     assert markets["totals"]["over_0_5"] + markets["totals"]["under_0_5"] == pytest.approx(1.0)
     assert markets["totals"]["over_5_5"] + markets["totals"]["under_5_5"] == pytest.approx(1.0)
+    assert markets["double_chance"]["12"] == pytest.approx(p1n2["home"] + p1n2["away"], abs=1e-4)
+    for line in ("1", "2", "3"):
+        over = markets["asian_totals"][line]["over"]
+        assert over["win"] + over["push"] + over["loss"] == pytest.approx(1.0, abs=1e-3)
+        assert markets["asian_totals"][line]["under"]["push"] == over["push"]
+        # Le gain d'un over entier égale l'over demi-ligne suivant, mais le but exact est remboursé.
+        assert over["win"] == pytest.approx(markets["totals"][f"over_{line}_5"], abs=1e-3)
+        assert over["push"] > 0
+        assert over["win"] + over["push"] > markets["totals"][f"over_{line}_5"]
+    for side in ("home", "away"):
+        team_line = markets["asian_team_totals"][side]["1"]["over"]
+        assert team_line["win"] + team_line["push"] + team_line["loss"] == pytest.approx(1.0, abs=1e-3)
     assert sum(markets["exact_totals"].values()) <= 1.0
     assert markets["european_handicap"]["0"]["home"] + markets["european_handicap"]["0"]["draw"] + markets["european_handicap"]["0"]["away"] == pytest.approx(1.0)
     asian = markets["asian_handicap"]["m0_25"]["home"]
@@ -398,3 +410,57 @@ def test_published_probabilities_match_the_derived_markets(monkeypatch):
     assert result["markets"]["btts"]["yes"] + result["markets"]["btts"]["no"] == pytest.approx(1.0, abs=1e-3)
     assert result["abstain"] is False
     assert result["status"] == "ok"
+    assert "dixon_coles_joint_preserved" in result["warnings"]
+    rebuilt, _, _ = compute_score_matrix(
+        result["expected_goals"]["home"],
+        result["expected_goals"]["away"],
+        model.rho,
+    )
+    rebuilt_markets = extract_match_markets_from_matrix(rebuilt)
+    assert result["markets"]["btts"]["yes"] == pytest.approx(rebuilt_markets["btts"]["yes"], abs=1.5e-3)
+    assert result["markets"]["totals"]["over_2_5"] == pytest.approx(rebuilt_markets["totals"]["over_2_5"], abs=1.5e-3)
+    assert one["home"] == pytest.approx(rebuilt_markets["1N2"]["home"], abs=1.5e-3)
+
+
+def test_lambda_projection_remains_a_dixon_coles_matrix():
+    lambda_home, lambda_away, rho = 1.55, 1.05, -0.08
+    target = (0.72, 0.16, 0.12)
+    home, away, matrix, _, _ = project_lambdas_to_dixon_coles(lambda_home, lambda_away, rho, *target)
+    rebuilt, _, _ = compute_score_matrix(home, away, rho)
+
+    assert np.allclose(matrix, rebuilt)
+    assert abs(np.log(home / lambda_home)) <= 0.15 + 1e-9
+    assert abs(np.log(away / lambda_away)) <= 0.15 + 1e-9
+
+    base, _, _ = compute_score_matrix(lambda_home, lambda_away, rho)
+    base_1n2 = extract_match_markets_from_matrix(base)["1N2"]
+    moved_1n2 = extract_match_markets_from_matrix(matrix)["1N2"]
+
+    def gap(probabilities):
+        return (
+            (probabilities["home"] - target[0]) ** 2
+            + (probabilities["draw"] - target[1]) ** 2
+            + (probabilities["away"] - target[2]) ** 2
+        )
+
+    assert gap(moved_1n2) <= gap(base_1n2) + 1e-9
+    assert moved_1n2["home"] > base_1n2["home"]
+    assert abs((moved_1n2["home"] + moved_1n2["draw"] + moved_1n2["away"]) - 1.0) < 1e-3
+
+
+def test_projection_keeps_the_original_matrix_when_the_target_matches():
+    lambda_home, lambda_away, rho = 1.4, 1.1, -0.04
+    matrix, _, _ = compute_score_matrix(lambda_home, lambda_away, rho)
+    current = extract_match_markets_from_matrix(matrix)["1N2"]
+    home, away, projected, _, _ = project_lambdas_to_dixon_coles(
+        lambda_home,
+        lambda_away,
+        rho,
+        current["home"],
+        current["draw"],
+        current["away"],
+    )
+
+    assert home == pytest.approx(lambda_home)
+    assert away == pytest.approx(lambda_away)
+    assert np.allclose(projected, matrix)

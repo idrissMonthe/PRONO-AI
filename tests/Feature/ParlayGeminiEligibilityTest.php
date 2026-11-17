@@ -37,6 +37,20 @@ class ParlayGeminiEligibilityTest extends TestCase
             $this->matchWithPick($target, 'INFO E', PredictionRevisionService::STATUS_INSUFFICIENT),
             $this->matchWithPick($target, 'FAIL F', PredictionRevisionService::STATUS_FAILED),
         ];
+        $prediction = $validated->officialPrediction;
+        for ($i = 0; $i < 30; $i++) {
+            \App\Models\PredictionEvaluation::create([
+                'prediction_id' => $prediction->id,
+                'match_id' => $validated->id,
+                'market_group' => '1X2',
+                'market_key' => 'sample-'.$i,
+                'predicted_label' => 'Victoire',
+                'predicted_probability' => 0.64,
+                'actual_label' => 'Victoire',
+                'status' => 'WON',
+                'evaluated_at_utc' => now(),
+            ]);
+        }
 
         $parlays = app(ParlayService::class)->generateDailyParlays($target);
         $matchIds = $parlays->flatMap(fn (Parlay $parlay) => collect($parlay->selections_json)->pluck('match_id'))->all();
@@ -44,6 +58,10 @@ class ParlayGeminiEligibilityTest extends TestCase
         $this->assertNotEmpty($matchIds);
         $this->assertContains($validated->id, $matchIds);
         $this->assertContains($legacy->id, $matchIds);
+        foreach ($parlays as $parlay) {
+            $ids = collect($parlay->selections_json)->pluck('match_id');
+            $this->assertSame($ids->count(), $ids->unique()->count());
+        }
         foreach ($blocked as $match) {
             $this->assertNotContains($match->id, $matchIds);
         }

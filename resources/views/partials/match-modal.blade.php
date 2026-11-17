@@ -192,7 +192,12 @@
                                     <span class="text-[#A2ACA3]">Les 2 Marquent</span>
                                     <strong id="market-btts-yes" class="text-[#88B69A]">--%</strong>
                                 </div>
+                                <div class="p-2.5 rounded bg-[#101513] border border-[#303A32]/50 flex justify-between items-center mono">
+                                    <span class="text-[#A2ACA3]">12</span>
+                                    <strong id="market-dc-12" class="text-[#F0F0E8]">--%</strong>
+                                </div>
                             </div>
+                            <div id="modal-extra-markets" class="space-y-1 text-[11px] mono"></div>
                         </div>
 
                         <!-- Top 5 Scores Exacts les plus probables -->
@@ -627,6 +632,38 @@
         document.getElementById('market-over-25').innerText = formatProbability(unitProbability(totals.over_2_5));
         document.getElementById('market-under-25').innerText = formatProbability(unitProbability(totals.under_2_5));
         document.getElementById('market-btts-yes').innerText = formatProbability(unitProbability(btts.yes));
+        document.getElementById('market-dc-12').innerText = formatProbability(
+            unitProbability(storedDoubleChance['12']) ?? sumProbabilities(pHome, pAway)
+        );
+        const extraMarkets = document.getElementById('modal-extra-markets');
+        extraMarkets.replaceChildren();
+        const extraLines = [];
+        const pushLine = (label, value) => {
+            const probability = unitProbability(value);
+            if (probability === null) return;
+            extraLines.push({ label, text: formatProbability(probability) });
+        };
+        pushLine('+0,5 but', totals.over_0_5);
+        pushLine('+1,5 but', totals.over_1_5);
+        pushLine('+3,5 buts', totals.over_3_5);
+        pushLine('+4,5 buts', totals.over_4_5);
+        pushLine('BTTS Non', btts.no);
+        const teamTotals = markets.team_totals || {};
+        pushLine((info.home_short || 'Domicile') + ' +0,5', teamTotals.home && teamTotals.home.over_0_5);
+        pushLine((info.home_short || 'Domicile') + ' +1,5', teamTotals.home && teamTotals.home.over_1_5);
+        pushLine((info.away_short || 'Extérieur') + ' +0,5', teamTotals.away && teamTotals.away.over_0_5);
+        pushLine((info.away_short || 'Extérieur') + ' +1,5', teamTotals.away && teamTotals.away.over_1_5);
+        extraLines.slice(0, 6).forEach((line) => {
+            const row = document.createElement('div');
+            row.className = 'flex justify-between text-[#A2ACA3]';
+            const name = document.createElement('span');
+            name.textContent = line.label;
+            const value = document.createElement('strong');
+            value.className = 'text-[#F0F0E8]';
+            value.textContent = line.text;
+            row.append(name, value);
+            extraMarkets.append(row);
+        });
 
         // Top Scores
         const topScoresList = document.getElementById('modal-top-scores-list');

@@ -81,6 +81,63 @@ def compute_score_matrix(
     return matrix, residual_mass, n
 
 
+# L'ensemble Elo / forme / marché peut déplacer le 1N2, mais seulement
+# d'un pas que Dixon-Coles sait encore représenter par ses buts attendus.
+MAX_ENSEMBLE_LOG_SHIFT = 0.15
+
+
+def outcome_probabilities(matrix: np.ndarray) -> Tuple[float, float, float]:
+    """1N2 lu sur la matrice, sans renormalisation supplémentaire si elle somme déjà à 1."""
+    home = float(np.sum(np.tril(matrix, -1)))
+    draw = float(np.sum(np.diag(matrix)))
+    away = float(np.sum(np.triu(matrix, 1)))
+    total = home + draw + away
+    if total <= 0:
+        raise ValueError("Score matrix has no probability mass.")
+    return home / total, draw / total, away / total
+
+
+def project_lambdas_to_dixon_coles(
+    lambda_home: float,
+    lambda_away: float,
+    rho: float,
+    target_home: float,
+    target_draw: float,
+    target_away: float,
+    max_log_shift: float = MAX_ENSEMBLE_LOG_SHIFT,
+) -> Tuple[float, float, np.ndarray, float, int]:
+    """
+    Rapproche le 1N2 Dixon-Coles d'une cible, puis renvoie la matrice recalculée.
+
+    Le déplacement des buts attendus reste borné. Le résultat est toujours
+    compute_score_matrix : les cases 0-0, 1-0, 0-1 et 1-1 gardent tau.
+    """
+    target = np.array([target_home, target_draw, target_away], dtype=float)
+    if not np.all(np.isfinite(target)) or float(target.sum()) <= 0:
+        matrix, residual_mass, n = compute_score_matrix(lambda_home, lambda_away, rho)
+        return lambda_home, lambda_away, matrix, residual_mass, n
+    target = target / float(target.sum())
+
+    def distance(matrix: np.ndarray) -> float:
+        current = np.array(outcome_probabilities(matrix), dtype=float)
+        return float(np.sum((current - target) ** 2))
+
+    base_matrix, base_residual, base_n = compute_score_matrix(lambda_home, lambda_away, rho)
+    best = (lambda_home, lambda_away, base_matrix, base_residual, base_n, distance(base_matrix), 0.0)
+    for home_shift in np.linspace(-max_log_shift, max_log_shift, 7):
+        for away_shift in np.linspace(-max_log_shift, max_log_shift, 7):
+            candidate_home = float(lambda_home * np.exp(home_shift))
+            candidate_away = float(lambda_away * np.exp(away_shift))
+            matrix, residual_mass, n = compute_score_matrix(candidate_home, candidate_away, rho)
+            candidate_distance = distance(matrix)
+            movement = float(home_shift ** 2 + away_shift ** 2)
+            if candidate_distance < best[5] - 1e-12 or (
+                abs(candidate_distance - best[5]) <= 1e-12 and movement < best[6]
+            ):
+                best = (candidate_home, candidate_away, matrix, residual_mass, n, candidate_distance, movement)
+    return best[0], best[1], best[2], best[3], best[4]
+
+
 def rescale_outcome_regions(matrix: np.ndarray, p_home: float, p_draw: float, p_away: float) -> np.ndarray:
     """Reweights home, draw and away cells so every derived market stays on one matrix."""
     target = np.array([p_home, p_draw, p_away], dtype=float)
@@ -163,6 +220,19 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
         p_under = 1.0 - p_over
         totals[f"over_{str(threshold).replace('.', '_')}"] = round(p_over, 4)
         totals[f"under_{str(threshold).replace('.', '_')}"] = round(p_under, 4)
+
+    # Lignes entières : 3 buts gagnent un over 2.0, 2 buts remboursent, 0 ou 1 perdent.
+    # Ce n'est pas un over 1.5. La masse push n'est pas additionnée au gain.
+    asian_totals = {}
+    for line in (1, 2, 3):
+        win_over = float(np.sum(matrix[total_goals_grid > line]))
+        push = float(np.sum(matrix[total_goals_grid == line]))
+        win_under = float(np.sum(matrix[total_goals_grid < line]))
+        asian_totals[str(line)] = {
+            "line": float(line),
+            "over": {"win": round(win_over, 4), "push": round(push, 4), "loss": round(win_under, 4)},
+            "under": {"win": round(win_under, 4), "push": round(push, 4), "loss": round(win_over, 4)},
+        }
 
     exact_totals = {
         str(goals): round(float(np.sum(matrix[total_goals_grid == goals])), 4)
@@ -250,6 +320,18 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
         team_totals["away"][f"under_{key}"] = round(
             1.0 - team_totals["away"][f"over_{key}"], 4
         )
+    goal_axis = np.arange(n_plus_one)
+    asian_team_totals = {"home": {}, "away": {}}
+    for side, distribution in (("home", home_goal_probabilities), ("away", away_goal_probabilities)):
+        for line in (1, 2):
+            win_over = float(np.sum(distribution[goal_axis > line]))
+            push = float(np.sum(distribution[goal_axis == line]))
+            win_under = float(np.sum(distribution[goal_axis < line]))
+            asian_team_totals[side][str(line)] = {
+                "line": float(line),
+                "over": {"win": round(win_over, 4), "push": round(push, 4), "loss": round(win_under, 4)},
+                "under": {"win": round(win_under, 4), "push": round(push, 4), "loss": round(win_over, 4)},
+            }
     # Home -0.5 is same as Home win (goal_diff >= 1)
     # Home +0.5 is same as 1X (goal_diff >= 0)
     # Home 0.0 is DNB
@@ -295,7 +377,9 @@ def extract_match_markets_from_matrix(matrix: np.ndarray) -> Dict[str, any]:
         "european_handicap": european_handicap,
         "asian_handicap": asian_handicap,
         "team_totals": team_totals,
+        "asian_team_totals": asian_team_totals,
         "totals": totals,
+        "asian_totals": asian_totals,
         "exact_totals": exact_totals,
         "combos": combos,
         "btts": {

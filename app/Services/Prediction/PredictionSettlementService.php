@@ -45,12 +45,18 @@ class PredictionSettlementService
 
         $actualResult = $homeGoals === $awayGoals ? 'draw' : ($homeGoals > $awayGoals ? 'home' : 'away');
         $resultLabels = ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away];
+        $published = null;
         if ($prediction->published_market && $prediction->published_selection && $prediction->published_probability !== null) {
             $published = $this->publishedOutcome($prediction, $homeGoals, $awayGoals, $actualResult, $home, $away);
         if (! empty($published['push'])) {
             $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], 'PUSH');
         } elseif ($published) {
             $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], $published['hit'] ? 'WON' : 'LOST');
+        }
+        if ($published) {
+            $family = app(PredictionRevisionService::class)->marketFamily((string) $prediction->published_market, (string) $prediction->published_selection);
+            $familyStatus = ! empty($published['push']) ? 'PUSH' : ($published['hit'] ? 'WON' : 'LOST');
+            $this->addEvaluation($rows, $prediction, $match, $family, 'family_'.$family, (float) $prediction->published_probability, $published['label'], $published['actual_label'], $familyStatus);
         }
         }
         $alternative = data_get($prediction->market_metrics_json, 'gemini_review.alternative');
@@ -262,8 +268,17 @@ class PredictionSettlementService
         } elseif ($market === 'totals' && preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)) {
             $threshold = (float) ($parts[2].'.'.$parts[3]);
             $total = $homeGoals + $awayGoals;
-            $hit = $parts[1] === 'over' ? $total > $threshold : $total <= $threshold;
+            $hit = $parts[1] === 'over' ? $total > $threshold : $total < $threshold;
             $label = ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').str_replace('.', ',', (string) $threshold).' buts';
+            $actualLabel = 'Total réel '.$total;
+        } elseif ($market === 'asian_totals' && preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)) {
+            $line = (float) ($parts[2].'.'.$parts[3]);
+            $total = $homeGoals + $awayGoals;
+            $label = ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').str_replace('.', ',', (string) $line).' buts';
+            if (abs($total - $line) < 0.001) {
+                return ['hit' => false, 'label' => $label, 'actual_label' => 'Remboursé (total '.$total.')', 'push' => true];
+            }
+            $hit = $parts[1] === 'over' ? $total > $line : $total < $line;
             $actualLabel = 'Total réel '.$total;
         } elseif ($market === 'team_totals' && preg_match('/^(home|away)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', (string) $selection, $parts)) {
             $goals = $parts[1] === 'home' ? $homeGoals : $awayGoals;
@@ -271,6 +286,16 @@ class PredictionSettlementService
             $hit = strtoupper($parts[2]) === 'OVER' ? $goals > $line : $goals <= $line;
             $teamName = $parts[1] === 'home' ? $home : $away;
             $label = $teamName.' '.($parts[2] === 'OVER' ? 'plus de ' : 'moins de ').str_replace('.', ',', $parts[3]);
+            $actualLabel = $teamName.' a marqué '.$goals;
+        } elseif ($market === 'asian_team_totals' && preg_match('/^(home|away)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', (string) $selection, $parts)) {
+            $goals = $parts[1] === 'home' ? $homeGoals : $awayGoals;
+            $line = (float) $parts[3];
+            $teamName = $parts[1] === 'home' ? $home : $away;
+            $label = $teamName.' '.($parts[2] === 'OVER' ? 'plus de ' : 'moins de ').str_replace('.', ',', $parts[3]);
+            if (abs($goals - $line) < 0.001) {
+                return ['hit' => false, 'label' => $label, 'actual_label' => 'Remboursé ('.$goals.' buts)', 'push' => true];
+            }
+            $hit = strtoupper($parts[2]) === 'OVER' ? $goals > $line : $goals < $line;
             $actualLabel = $teamName.' a marqué '.$goals;
         } elseif ($market === 'exact_score') {
             $actualScore = $homeGoals.'-'.$awayGoals;
@@ -324,6 +349,7 @@ class PredictionSettlementService
     private function addEvaluation(array &$rows, Prediction $prediction, FootballMatch $match, string $group, string $key, float $probability, string $predictedLabel, string $actualLabel, string $status): void
     {
         $probability = max(0.0001, min(0.9999, $probability));
+        $settled = in_array($status, ['WON', 'LOST', 'HIT', 'MISS'], true);
         $hit = in_array($status, ['WON', 'HIT'], true);
         $rows[] = [
             'match_id' => $match->id,
@@ -331,8 +357,8 @@ class PredictionSettlementService
             'market_key' => $key,
             'predicted_label' => $predictedLabel,
             'predicted_probability' => round($probability, 4),
-            'brier_score' => round(($probability - ($hit ? 1.0 : 0.0)) ** 2, 6),
-            'log_loss' => round(-log($hit ? $probability : (1.0 - $probability)), 6),
+            'brier_score' => $settled ? round(($probability - ($hit ? 1.0 : 0.0)) ** 2, 6) : null,
+            'log_loss' => $settled ? round(-log($hit ? $probability : (1.0 - $probability)), 6) : null,
             'probability_bucket' => $this->probabilityBucket($probability),
             'actual_label' => $actualLabel,
             'status' => $status,
