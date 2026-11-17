@@ -508,6 +508,7 @@ def render_markdown(report: Dict[str, object]) -> str:
     selection = report["market_selection"]  # type: ignore[index]
     test = report["test"]  # type: ignore[index]
     baseline = test["baseline_dixon_coles"]  # type: ignore[index]
+    significance = report.get("significance") or {}
 
     lines = [
         "# Rapport de backtesting walk-forward",
@@ -598,7 +599,24 @@ def render_markdown(report: Dict[str, object]) -> str:
             delta_log = round(float(score["log_loss"]) - float(baseline["log_loss"]), 4)
             delta_brier = round(float(score["brier"]) - float(baseline["brier"]), 4)
             delta_ece = round(float(score["ece"]) - float(baseline["ece"]), 4)
-            decision = "à activer" if delta_log < 0 else "rejetée (pas de gain)"
+            # Un gain de log loss ne suffit pas : sans signification au test de
+            # Diebold-Mariano la variante reste désactivée par défaut.
+            if label == "xG":
+                p_value = (significance.get("xg_vs_dixon_coles") or {}).get("p_value")
+            elif significance.get("selected") and label == f"calibration {significance['selected']}":
+                # Le test DM est calculé pour le calibrateur retenu uniquement.
+                p_value = (significance.get("platt_or_isotonic_vs_baseline") or {}).get("p_value")
+            else:
+                p_value = None
+
+            if delta_log >= 0:
+                decision = "rejetée (pas de gain)"
+            elif p_value is not None and float(p_value) < 0.05:
+                decision = f"à activer (p={float(p_value):.3f})"
+            elif p_value is not None:
+                decision = f"rejetée (non significatif, p={float(p_value):.3f})"
+            else:
+                decision = "rejetée (non significatif)"
             lines.append(f"| {label} | {delta_log:+} | {delta_brier:+} | {delta_ece:+} | {decision} |")
         lines.append("")
         lines.append(
