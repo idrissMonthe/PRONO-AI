@@ -29,6 +29,10 @@ class ParlayAjaxAndDatesTest extends TestCase
 
     public function test_parlay_generate_supports_ajax_and_returns_json(): void
     {
+        // Horloge figée : le 3e match est à +8 h, et passé 15 h UTC il sortirait
+        // de la journée Africa/Douala, laissant moins de trois rencontres.
+        $this->travelTo(Carbon::parse('2026-11-17 10:00:00', 'Africa/Douala'));
+
         $league = League::create(['code' => 'PL', 'name' => 'Premier League', 'country' => 'England', 'tier' => '1', 'is_active' => true]);
         $season = Season::create(['league_id' => $league->id, 'name' => '2025-2026', 'year_start' => 2025, 'year_end' => 2026, 'is_current' => true]);
         $m3 = ModelVersion::create([

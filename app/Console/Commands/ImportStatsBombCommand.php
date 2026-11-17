@@ -83,6 +83,11 @@ class ImportStatsBombCommand extends Command
                 try {
                     if ($importer->importStats($record, $connector, $dryRun)) {
                         $statsImported++;
+                    } else {
+                        // Fichier d'événements indisponible ou match non lié :
+                        // l'import reste valide, mais la couverture est partielle.
+                        $failures[] = 'stats '.$record->externalId.' : statistiques indisponibles';
+                        $this->warn('⚠️  Statistiques indisponibles pour '.$record->externalId);
                     }
                 } catch (Throwable $exception) {
                     $failures[] = 'stats '.$record->externalId.' : '.$exception->getMessage();
@@ -92,14 +97,29 @@ class ImportStatsBombCommand extends Command
         }
 
         $status = $failures === [] ? 'success' : 'partial';
-        $run->finish($status, $counters + ['metadata' => ['stats_imported' => $statsImported]], $failures === [] ? null : implode(' | ', $failures));
+        $imported = (int) $counters['imported'] + (int) $counters['updated'];
+        $error = $failures === [] ? null : implode(' | ', $failures);
+
+        if ($imported === 0) {
+            $status = 'failed';
+            $error ??= 'Aucun match importé.';
+        }
+
+        // Union PHP : `$counters` contient déjà une clé `metadata`, il faut donc
+        // la compléter explicitement (sinon `stats_imported` est perdu).
+        $counters['metadata'] = array_merge((array) ($counters['metadata'] ?? []), ['stats_imported' => $statsImported]);
+        $run->finish($status, $counters, $error);
 
         $this->table(
             ['Reçus', 'Importés', 'Mis à jour', 'Rejetés', 'Divergents', 'Stats xG'],
             [[$counters['received'], $counters['imported'], $counters['updated'], $counters['rejected'], $counters['divergent'], $statsImported]]
         );
 
-        return $status === 'success' ? self::SUCCESS : self::FAILURE;
+        // Un fichier de statistiques indisponible ne doit pas faire échouer un
+        // import qui a bien écrit des matchs : le statut `partial` consigné dans
+        // import_runs porte le détail. Le code 1 reste réservé aux échecs
+        // complets (aucun match importé).
+        return $status === 'failed' ? self::FAILURE : self::SUCCESS;
     }
 
     /** @return array<int, array<string, mixed>> */

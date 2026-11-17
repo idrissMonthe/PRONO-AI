@@ -215,6 +215,96 @@ TXT),
         $this->assertSame(0, (int) $away->shots_on_target);
     }
 
+    public function test_statsbomb_partial_stats_import_exits_successfully(): void
+    {
+        config([
+            'imports.statsbomb.enabled' => true,
+            'imports.statsbomb.base_url' => 'https://raw.githubusercontent.com/statsbomb/open-data/master/data',
+            'imports.statsbomb.stats_limit' => 5,
+            'imports.statsbomb.retry_attempts' => 2,
+            'imports.statsbomb.retry_pause_ms' => 0,
+            'imports.statsbomb.seasons' => [[
+                'competition_id' => 2,
+                'season_id' => 27,
+                'code' => 'PL',
+                'name' => 'Premier League',
+                'country' => 'England',
+                'season' => '2015-2016',
+            ]],
+        ]);
+
+        Http::fake([
+            '*/matches/2/27.json' => Http::response([
+                [
+                    'match_id' => 3754023,
+                    'match_date' => '2015-08-29',
+                    'kick_off' => '15:00:00.000',
+                    'competition' => ['competition_id' => 2, 'competition_name' => 'Premier League', 'country_name' => 'England'],
+                    'season' => ['season_id' => 27, 'season_name' => '2015/2016'],
+                    'home_team' => ['home_team_id' => 1, 'home_team_name' => 'Arsenal'],
+                    'away_team' => ['away_team_id' => 2, 'away_team_name' => 'Chelsea'],
+                    'home_score' => 2,
+                    'away_score' => 1,
+                ],
+                [
+                    'match_id' => 3754217,
+                    'match_date' => '2015-08-30',
+                    'kick_off' => '16:00:00.000',
+                    'competition' => ['competition_id' => 2, 'competition_name' => 'Premier League', 'country_name' => 'England'],
+                    'season' => ['season_id' => 27, 'season_name' => '2015/2016'],
+                    'home_team' => ['home_team_id' => 3, 'home_team_name' => 'Liverpool'],
+                    'away_team' => ['away_team_id' => 4, 'away_team_name' => 'Manchester City'],
+                    'home_score' => 0,
+                    'away_score' => 0,
+                ],
+            ]),
+            '*/events/3754023.json' => Http::response([
+                ['type' => ['name' => 'Shot'], 'team' => ['id' => 1], 'shot' => ['statsbomb_xg' => 0.30, 'outcome' => ['name' => 'Goal']]],
+            ]),
+            // Fichier d'événements définitivement indisponible pour ce match.
+            '*/events/3754217.json' => Http::response([], 500),
+        ]);
+
+        $this->artisan('oracle:import-statsbomb', ['--stats' => true])->assertExitCode(0);
+
+        // Les deux matchs sont en base, un seul a des statistiques.
+        $this->assertSame(2, FootballMatch::count());
+        $this->assertSame(2, TeamMatchStat::count());
+
+        $run = ImportRun::latest('id')->firstOrFail();
+        $this->assertSame('partial', $run->status);
+        $this->assertSame(2, (int) $run->imported);
+        $this->assertSame(1, (int) $run->metadata['stats_imported']);
+        $this->assertStringContainsString('3754217', (string) $run->error);
+    }
+
+    public function test_statsbomb_import_exits_failure_when_nothing_is_imported(): void
+    {
+        config([
+            'imports.statsbomb.enabled' => true,
+            'imports.statsbomb.base_url' => 'https://raw.githubusercontent.com/statsbomb/open-data/master/data',
+            'imports.statsbomb.retry_attempts' => 1,
+            'imports.statsbomb.retry_pause_ms' => 0,
+            'imports.statsbomb.seasons' => [[
+                'competition_id' => 2,
+                'season_id' => 27,
+                'code' => 'PL',
+                'name' => 'Premier League',
+                'country' => 'England',
+                'season' => '2015-2016',
+            ]],
+        ]);
+
+        Http::fake([
+            '*/matches/2/27.json' => Http::response([], 404),
+        ]);
+
+        $this->artisan('oracle:import-statsbomb')->assertExitCode(1);
+
+        $this->assertSame(0, FootballMatch::count());
+        $this->assertSame('failed', ImportRun::latest('id')->firstOrFail()->status);
+    }
+
     public function test_statsbomb_retries_a_failed_event_download(): void
     {
         config([
