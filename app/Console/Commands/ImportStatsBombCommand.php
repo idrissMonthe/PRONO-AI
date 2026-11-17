@@ -15,6 +15,7 @@ class ImportStatsBombCommand extends Command
                             {--season= : Identifiant de saison StatsBomb (défaut : configuration)}
                             {--stats : Importe aussi tirs, tirs cadrés et xG des matchs liés}
                             {--limit= : Nombre maximal de matchs dont les événements sont lus}
+                            {--offset= : Nombre de matchs à ignorer avant de lire les événements}
                             {--dry-run : Simule sans écrire en base}';
 
     protected $description = 'Importe les matchs historiques StatsBomb Open Data et, sur demande, les statistiques de tirs/xG';
@@ -79,7 +80,11 @@ class ImportStatsBombCommand extends Command
         $statsImported = 0;
         if ($this->option('stats')) {
             $limit = (int) ($this->option('limit') ?: config('imports.statsbomb.stats_limit', 25));
-            foreach (array_slice($records, 0, max(1, $limit)) as $record) {
+            $offset = max(0, (int) $this->option('offset'));
+
+            // `--offset` permet de paginer : sans lui, chaque relance relisait
+            // les mêmes premiers matchs et ne progressait jamais.
+            foreach (array_slice($records, $offset, max(1, $limit)) as $record) {
                 try {
                     if ($importer->importStats($record, $connector, $dryRun)) {
                         $statsImported++;

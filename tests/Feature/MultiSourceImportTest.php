@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Models\FootballMatch;
 use App\Models\ImportRun;
 use App\Models\League;
+use App\Models\ProviderEntityMap;
+use appmodelsproviderentitymap;
 use App\Models\Season;
 use App\Models\TeamMatchStat;
 use App\Services\FootballData\FootballDataService;
@@ -276,6 +278,60 @@ TXT),
         $this->assertSame(2, (int) $run->imported);
         $this->assertSame(1, (int) $run->metadata['stats_imported']);
         $this->assertStringContainsString('3754217', (string) $run->error);
+    }
+
+    public function test_statsbomb_offset_pages_through_stats_batches(): void
+    {
+        config([
+            'imports.statsbomb.enabled' => true,
+            'imports.statsbomb.base_url' => 'https://raw.githubusercontent.com/statsbomb/open-data/master/data',
+            'imports.statsbomb.stats_limit' => 2,
+            'imports.statsbomb.retry_attempts' => 1,
+            'imports.statsbomb.retry_pause_ms' => 0,
+            'imports.statsbomb.seasons' => [[
+                'competition_id' => 2,
+                'season_id' => 27,
+                'code' => 'PL',
+                'name' => 'Premier League',
+                'country' => 'England',
+                'season' => '2015-2016',
+            ]],
+        ]);
+
+        $matches = [];
+        $events = [];
+        foreach ([3754023, 3754217, 3754300] as $index => $matchId) {
+            $matches[] = [
+                'match_id' => $matchId,
+                'match_date' => sprintf('2015-08-%02d', 29 + $index),
+                'kick_off' => '15:00:00.000',
+                'competition' => ['competition_id' => 2, 'competition_name' => 'Premier League', 'country_name' => 'England'],
+                'season' => ['season_id' => 27, 'season_name' => '2015/2016'],
+                'home_team' => ['home_team_id' => 10 + $index, 'home_team_name' => 'Home '.$index],
+                'away_team' => ['away_team_id' => 20 + $index, 'away_team_name' => 'Away '.$index],
+                'home_score' => 1,
+                'away_score' => 1,
+            ];
+            $events['*/events/'.$matchId.'.json'] = Http::response([
+                ['type' => ['name' => 'Shot'], 'team' => ['id' => 10 + $index], 'shot' => ['statsbomb_xg' => 0.25, 'outcome' => ['name' => 'Goal']]],
+            ]);
+        }
+
+        Http::fake(['*/matches/2/27.json' => Http::response($matches)] + $events);
+
+        $this->artisan('oracle:import-statsbomb', ['--stats' => true, '--limit' => 1, '--offset' => 1])->assertExitCode(0);
+
+        // Les trois matchs sont importés, seul celui en position 2 reçoit des statistiques.
+        $this->assertSame(3, FootballMatch::count());
+        $this->assertSame(2, TeamMatchStat::count());
+
+        $withStats = ProviderEntityMap::where([
+            'provider' => StatsBombConnector::SOURCE,
+            'external_id' => 'statsbomb:3754217',
+        ])->firstOrFail();
+
+        $this->assertSame(2, TeamMatchStat::where('match_id', $withStats->internal_id)->count());
+        $this->assertSame(0, TeamMatchStat::where('match_id', '!=', $withStats->internal_id)->count());
     }
 
     public function test_statsbomb_import_exits_failure_when_nothing_is_imported(): void
