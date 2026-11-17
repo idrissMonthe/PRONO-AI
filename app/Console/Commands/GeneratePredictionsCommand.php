@@ -139,6 +139,9 @@ class GeneratePredictionsCommand extends Command
                     'competition_goals_per_match' => is_numeric($leagueBaselines[$leagueId] ?? null) && (float) $leagueBaselines[$leagueId] >= 0.4
                         ? round((float) $leagueBaselines[$leagueId], 3)
                         : null,
+                    // Référence xG de la compétition ; le service se rabat sur
+                    // la référence globale si elle est trop peu échantillonnée.
+                    'competition' => $match->league?->code,
                 ]);
 
                 // Sélections plutôt qu'identifiants de marché : ces ids sont

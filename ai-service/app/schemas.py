@@ -55,6 +55,8 @@ class PredictRequest(BaseModel):
     rest_days_away: float = Field(default=7.0, ge=0.0, le=60.0)
     is_international: bool = False
     competition_goals_per_match: Optional[float] = Field(default=None, ge=0.4, le=6.0)
+    # Code de compétition interne : sert à choisir la bonne référence xG.
+    competition: Optional[str] = Field(default=None, max_length=20)
 
     @field_validator("home_team", "away_team")
     @classmethod
@@ -103,6 +105,8 @@ class PredictResponse(BaseModel):
     duration_ms: int
     uncertainty_method: str = "unavailable"
     uncertainty_replicates: int = 0
+    # Couverture statistique réelle du pronostic (xG et historique d'équipe).
+    xg: Optional[Dict[str, Any]] = None
 
 
 class DevigRequest(BaseModel):
@@ -152,6 +156,15 @@ class TrainingMatch(BaseModel):
     away_goals: int = Field(ge=0, le=30)
     days_ago: float = Field(ge=0, le=3650)
     is_neutral: bool = False
+    # xG reste optionnel : une source qui ne le fournit pas laisse ces champs
+    # nuls, et le moteur conserve alors Dixon-Coles sans invention de valeur.
+    home_xg: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    away_xg: Optional[float] = Field(default=None, ge=0.0, le=10.0)
+    home_shots: Optional[int] = Field(default=None, ge=0, le=100)
+    away_shots: Optional[int] = Field(default=None, ge=0, le=100)
+    home_shots_on_target: Optional[int] = Field(default=None, ge=0, le=100)
+    away_shots_on_target: Optional[int] = Field(default=None, ge=0, le=100)
+    competition: Optional[str] = Field(default=None, max_length=20)
 
 
 class TrainRequest(BaseModel):

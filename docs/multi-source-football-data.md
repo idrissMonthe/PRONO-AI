@@ -152,9 +152,14 @@ les minutes.
   déduplication se fait à la journée, avec un risque résiduel de deux matchs
   le même jour entre les mêmes équipes (très rare, et signalé comme divergence
   plutôt que fusionné).
-- **Pas de fusion des statistiques avec les modèles** : `team_match_stats` est
-  alimenté, mais Dixon-Coles/Elo n'exploitent pas encore xG. Toute
-  modification des pondérations demanderait un backtest dédié.
+- **xG optionnel et désactivé par défaut** : `team_match_stats` alimente un
+  moteur xG à fenêtres glissantes, mais l'ajustement des lambdas reste coupé
+  tant que `XG_ADJUSTMENT_WEIGHT` vaut 0. Voir
+  [xg-prediction-engine.md](xg-prediction-engine.md) pour les règles anti-fuite,
+  le repli sur données manquantes et le protocole de backtest.
+- **Export pour backtest** : `php artisan oracle:export-xg-dataset` produit un
+  JSON chronologique (xG inclus quand il existe) consommé par
+  `ai-service/scripts/backtest_walkforward.py`.
 - **Attribution StatsBomb** obligatoire dans toute publication d'analyse
   dérivée.
 - Les fichiers `*.json` volumineux (événements) sont lus en mémoire ; la limite

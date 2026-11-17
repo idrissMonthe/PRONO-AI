@@ -7,7 +7,7 @@ import json
 import os
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
@@ -30,6 +30,11 @@ from app.core.metrics import (
 )
 from app.core.poisson_regressor import DixonColesModel, MIN_TEAM_MATCHES_FOR_OFFICIAL_PREDICTIONS
 from app.core.elo import EloEngine
+from app.core.xg_features import (
+    XgFeatureBuilder,
+    XgMatch,
+    adjust_lambdas_with_xg,
+)
 from app.core.market_specialists import MarketSpecialists
 from app.schemas import (
     DevigRequest,
@@ -99,6 +104,10 @@ elo_ratings: Dict[str, float] = {}
 recent_form: Dict[str, List[float]] = {}
 market_specialists = MarketSpecialists()
 bootstrap_cache: Dict[str, dict] = {}
+# xG history is rebuilt at every training run. The adjustment stays disabled
+# unless XG_ADJUSTMENT_WEIGHT is set to a value validated by the backtest.
+xg_builder = XgFeatureBuilder()
+XG_ADJUSTMENT_WEIGHT_DEFAULT = 0.0
 
 
 def load_model_state() -> None:
@@ -145,6 +154,27 @@ def load_model_state() -> None:
         recent_form.clear()
         recent_form.update({k: [float(x) for x in v] for k, v in state.get("recent_form", {}).items()})
         market_specialists.load_state(state.get("market_specialists", {}))
+        xg_builder.reset()
+        for item in state.get("xg_matches", []) or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                xg_builder.add(XgMatch(
+                    match_date=date.fromisoformat(str(item["date"])[:10]),
+                    home_team=str(item["home_team"]),
+                    away_team=str(item["away_team"]),
+                    home_goals=int(item["home_goals"]),
+                    away_goals=int(item["away_goals"]),
+                    home_xg=item.get("home_xg"),
+                    away_xg=item.get("away_xg"),
+                    home_shots=item.get("home_shots"),
+                    away_shots=item.get("away_shots"),
+                    home_shots_on_target=item.get("home_shots_on_target"),
+                    away_shots_on_target=item.get("away_shots_on_target"),
+                    competition=str(item.get("competition") or "unknown"),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         champion_model.is_fitted = False
 
@@ -178,6 +208,25 @@ def save_model_state() -> None:
         "elo_ratings": elo_ratings,
         "recent_form": recent_form,
         "market_specialists": market_specialists.state(),
+        # Historique xG compact : permet de recalculer des fenêtres glissantes
+        # au moment de la prédiction sans re-télécharger les événements.
+        "xg_matches": [
+            {
+                "date": row.match_date.isoformat(),
+                "home_team": row.home_team,
+                "away_team": row.away_team,
+                "home_goals": row.home_goals,
+                "away_goals": row.away_goals,
+                "home_xg": row.home_xg,
+                "away_xg": row.away_xg,
+                "home_shots": row.home_shots,
+                "away_shots": row.away_shots,
+                "home_shots_on_target": row.home_shots_on_target,
+                "away_shots_on_target": row.away_shots_on_target,
+                "competition": row.competition,
+            }
+            for row in xg_builder.matches()
+        ],
     }), encoding="utf-8")
 
 
@@ -288,6 +337,30 @@ def train(req: TrainRequest):
         # the caller instead of claiming that retraining succeeded.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     market_specialists.fit(training_rows)
+
+    # xG : reconstruit l'historique chronologique. Une source sans xG laisse
+    # simplement les champs à None ; aucune valeur n'est extrapolée.
+    xg_builder.reset()
+    reference_date = date.today()
+    for item in req.matches:
+        try:
+            xg_builder.add(XgMatch(
+                match_date=reference_date - timedelta(days=float(item.days_ago)),
+                home_team=item.home_team,
+                away_team=item.away_team,
+                home_goals=item.home_goals,
+                away_goals=item.away_goals,
+                home_xg=item.home_xg,
+                away_xg=item.away_xg,
+                home_shots=item.home_shots,
+                away_shots=item.away_shots,
+                home_shots_on_target=item.home_shots_on_target,
+                away_shots_on_target=item.away_shots_on_target,
+                competition=item.competition or "unknown",
+            ))
+        except (TypeError, ValueError):
+            continue
+
     elo_ratings.clear()
     recent_form.clear()
     # Rebuild signals chronologically so no future result leaks into an earlier rating.
@@ -362,6 +435,32 @@ def predict(req: PredictRequest):
         if req.rest_days_away < 3:
             la *= 0.95
         warnings.append("short_rest_adjustment_applied")
+
+    # Ajustement xG borné : uniquement des matchs antérieurs à aujourd'hui,
+    # poids plafonné par la couverture réelle des deux équipes.
+    xg_report = None
+    if req.lambda_home_override is None and len(xg_builder) > 0:
+        as_of = date.today()
+        xg_weight = float(os.getenv("XG_ADJUSTMENT_WEIGHT", str(XG_ADJUSTMENT_WEIGHT_DEFAULT)) or 0.0)
+        home_xg_features = xg_builder.features(req.home_team, as_of)
+        away_xg_features = xg_builder.features(req.away_team, as_of)
+        competition_reference = req.competition
+        baseline = xg_builder.baseline(as_of, competition_reference)
+        if competition_reference is not None and not baseline.get("available"):
+            baseline = xg_builder.baseline(as_of)
+            competition_reference = "all"
+        adjustment = adjust_lambdas_with_xg(
+            lh, la, home_xg_features, away_xg_features, baseline, weight=xg_weight
+        )
+        lh, la = adjustment.lambda_home, adjustment.lambda_away
+        xg_report = adjustment.to_dict()
+        xg_report["home_profile"] = home_xg_features.to_dict()
+        xg_report["away_profile"] = away_xg_features.to_dict()
+        xg_report["competition_reference"] = competition_reference or "all"
+        if adjustment.applied:
+            warnings.append("xg_adjustment_applied")
+        else:
+            warnings.append(f"xg_not_applied:{adjustment.reason}")
 
     # L'ensemble donne une cible de 1N2. La matrice publiée est ensuite
     # recalculée par Dixon-Coles : elle n'est plus déformée zone par zone.
@@ -561,6 +660,7 @@ def predict(req: PredictRequest):
         "duration_ms": duration_ms,
         "uncertainty_method": intervals.get("method", "unavailable"),
         "uncertainty_replicates": int(intervals.get("valid_replicates", 0)),
+        "xg": xg_report,
     }
 
 
