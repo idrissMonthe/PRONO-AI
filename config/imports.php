@@ -71,7 +71,11 @@ return [
     'statsbomb' => [
         'enabled' => filter_var(env('STATSBOMB_ENABLED', true), FILTER_VALIDATE_BOOL),
         'base_url' => env('STATSBOMB_BASE_URL', 'https://raw.githubusercontent.com/statsbomb/open-data/master/data'),
-        'timeout' => (int) env('STATSBOMB_TIMEOUT', 30),
+        'timeout' => (int) env('STATSBOMB_TIMEOUT', 60),
+        // Un fichier d'événements pèse plusieurs mégaoctets : une coupure
+        // réseau ne doit pas annuler tout l'import.
+        'retry_attempts' => (int) env('STATSBOMB_RETRY_ATTEMPTS', 3),
+        'retry_pause_ms' => (int) env('STATSBOMB_RETRY_PAUSE_MS', 1500),
         'import_stats' => filter_var(env('STATSBOMB_IMPORT_STATS', true), FILTER_VALIDATE_BOOL),
         'stats_limit' => (int) env('STATSBOMB_STATS_LIMIT', 25),
 

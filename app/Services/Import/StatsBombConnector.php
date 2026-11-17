@@ -3,6 +3,7 @@
 namespace App\Services\Import;
 
 use Carbon\CarbonImmutable;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -46,15 +47,10 @@ class StatsBombConnector
         }
 
         $url = $this->baseUrl()."/matches/{$competitionId}/{$seasonId}.json";
-        $response = Http::timeout((int) ($this->config['timeout'] ?? 30))->get($url);
+        $payload = $this->fetchJson($url);
 
-        if (! $response->successful()) {
-            throw new RuntimeException("StatsBomb : matchs indisponibles ({$url}, HTTP {$response->status()}).");
-        }
-
-        $payload = $response->json();
-        if (! is_array($payload) || $payload === []) {
-            throw new RuntimeException("StatsBomb : aucun match retourné pour la compétition {$competitionId} / saison {$seasonId}.");
+        if ($payload === null || $payload === []) {
+            throw new RuntimeException("StatsBomb : aucun match retourné pour la compétition {$competitionId} / saison {$seasonId} ({$url}).");
         }
 
         $matches = [];
@@ -124,16 +120,11 @@ class StatsBombConnector
         }
 
         $url = $this->baseUrl()."/events/{$matchId}.json";
-        $response = Http::timeout((int) ($this->config['timeout'] ?? 30))->get($url);
+        $events = $this->fetchJson($url);
 
-        if (! $response->successful()) {
-            Log::warning('StatsBomb: événements indisponibles.', ['match_id' => $matchId, 'status' => $response->status()]);
+        if ($events === null) {
+            Log::warning('StatsBomb: événements indisponibles après tentatives.', ['match_id' => $matchId]);
 
-            return ['home' => null, 'away' => null];
-        }
-
-        $events = $response->json();
-        if (! is_array($events)) {
             return ['home' => null, 'away' => null];
         }
 
@@ -168,6 +159,52 @@ class StatsBombConnector
             'home' => $stats['home'],
             'away' => $stats['away'],
         ];
+    }
+
+    /**
+     * Télécharge un JSON avec quelques tentatives. Une coupure réseau ne doit
+     * pas faire perdre tout un import : les fichiers d'événements pèsent
+     * plusieurs mégaoctets et les dépôts publics limitent le débit.
+     */
+    private function fetchJson(string $url): ?array
+    {
+        $attempts = max(1, (int) ($this->config['retry_attempts'] ?? 3));
+        $timeout = max(5, (int) ($this->config['timeout'] ?? 60));
+        $pause = max(0, (int) ($this->config['retry_pause_ms'] ?? 1500));
+
+        $lastError = null;
+        for ($attempt = 1; $attempt <= $attempts; $attempt++) {
+            try {
+                $response = Http::timeout($timeout)->get($url);
+            } catch (ConnectionException $exception) {
+                $lastError = $exception->getMessage();
+                if ($attempt < $attempts) {
+                    usleep($pause * 1000 * $attempt);
+
+                    continue;
+                }
+
+                throw new RuntimeException("StatsBomb : téléchargement impossible ({$url}) après {$attempts} tentative(s) : {$lastError}");
+            }
+
+            if ($response->successful()) {
+                $payload = $response->json();
+
+                return is_array($payload) ? $payload : null;
+            }
+
+            if ($response->serverError() && $attempt < $attempts) {
+                usleep($pause * 1000 * $attempt);
+
+                continue;
+            }
+
+            Log::warning('StatsBomb: réponse non exploitable.', ['url' => $url, 'status' => $response->status()]);
+
+            return null;
+        }
+
+        return null;
     }
 
     private function baseUrl(): string

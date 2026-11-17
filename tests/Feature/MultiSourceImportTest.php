@@ -8,6 +8,9 @@ use App\Models\League;
 use App\Models\Season;
 use App\Models\TeamMatchStat;
 use App\Services\FootballData\FootballDataService;
+use App\Services\Import\NormalizedMatch;
+use App\Services\Import\StatsBombConnector;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -210,5 +213,51 @@ TXT),
         $away = TeamMatchStat::where('match_id', $match->id)->where('is_home', false)->firstOrFail();
         $this->assertSame(1, (int) $away->shots);
         $this->assertSame(0, (int) $away->shots_on_target);
+    }
+
+    public function test_statsbomb_retries_a_failed_event_download(): void
+    {
+        config([
+            'imports.statsbomb.retry_attempts' => 2,
+            'imports.statsbomb.retry_pause_ms' => 0,
+        ]);
+
+        Http::fake([
+            '*/events/3754023.json' => Http::sequence()
+                ->pushStatus(503)
+                ->push([
+                    ['type' => ['name' => 'Shot'], 'team' => ['id' => 1], 'shot' => ['statsbomb_xg' => 0.40, 'outcome' => ['name' => 'Goal']]],
+                ]),
+        ]);
+
+        $match = new NormalizedMatch(
+            source: StatsBombConnector::SOURCE,
+            externalId: 'statsbomb:3754023',
+            leagueCode: 'PL',
+            leagueName: 'Premier League',
+            country: 'England',
+            seasonName: '2015-2016',
+            seasonYearStart: 2015,
+            seasonYearEnd: 2016,
+            kickoffUtc: CarbonImmutable::parse('2015-08-29', 'UTC')->startOfDay(),
+            kickoffTimeKnown: false,
+            homeTeam: 'Arsenal',
+            awayTeam: 'Chelsea',
+            homeScore: 2,
+            awayScore: 1,
+            metadata: [
+                'statsbomb_match_id' => 3754023,
+                'statsbomb_home_team_id' => 1,
+                'statsbomb_away_team_id' => 2,
+            ],
+        );
+
+        $stats = StatsBombConnector::fromConfig()->shotStats($match);
+
+        // La première réponse (503) est ignorée, la seconde est exploitée.
+        $this->assertNotNull($stats['home']);
+        $this->assertSame(1, $stats['home']['shots']);
+        $this->assertEqualsWithDelta(0.40, $stats['home']['xg'], 0.001);
+        $this->assertSame(0, $stats['away']['shots']);
     }
 }
