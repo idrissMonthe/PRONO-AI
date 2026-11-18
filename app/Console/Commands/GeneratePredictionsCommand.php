@@ -44,6 +44,7 @@ class GeneratePredictionsCommand extends Command
 
         $marketId = Market::where('code', '1N2')->value('id');
         $generated = 0;
+        $familyStats = [];
         foreach ($matches as $match) {
             try {
                 // La qualité doit refléter la fraîcheur des cotes et des
@@ -431,7 +432,9 @@ class GeneratePredictionsCommand extends Command
                     'analysis_updated_at' => now()->utc(),
                 ])->saveQuietly();
                 $generated++;
-                $this->line("✓ {$match->homeTeam->short_name} – {$match->awayTeam->short_name} ({$prediction->confidence_tier})");
+                $fam = $finalCandidate['family'] ?? $finalCandidate['market'] ?? 'unknown';
+                $familyStats[$fam] = ($familyStats[$fam] ?? 0) + 1;
+                $this->line("✓ {$match->homeTeam->short_name} – {$match->awayTeam->short_name} [{$fam}] ({$prediction->confidence_tier})");
             } catch (Throwable $e) {
                 \Illuminate\Support\Facades\Log::error('oracle:generate-predictions failed', [
                     'match_id' => $match->id,
@@ -450,6 +453,12 @@ class GeneratePredictionsCommand extends Command
         }
 
         $this->info("{$generated} prédiction(s) officielle(s) générée(s).");
+        if ($familyStats !== []) {
+            $this->line("Répartition par famille de marché :");
+            foreach ($familyStats as $fam => $count) {
+                $this->line("  - {$fam} : {$count}");
+            }
+        }
         return self::SUCCESS;
     }
 

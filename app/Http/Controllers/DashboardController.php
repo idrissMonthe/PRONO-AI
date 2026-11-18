@@ -9,6 +9,7 @@ use App\Models\SystemAlert;
 use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
 use App\Services\Parlay\ParlayService;
+use App\Services\Prediction\MarketNormalizationService;
 use App\Services\Prediction\PredictionClient;
 use App\Services\Prediction\PredictionRevisionService;
 use App\Services\Prediction\LiveFlashPickService;
@@ -257,9 +258,21 @@ class DashboardController extends Controller
             if ($prediction->published_market && ! $prediction->is_abstained) {
                 $published = $this->publishedPick($match, $prediction);
                 if (! $published) continue;
-                $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
+
+                // Cartons/discipline : ne peuvent JAMAIS entrer dans "Les plus sûrs" (prudent)
+                $isCard = MarketNormalizationService::isCardsMarket(
+                    $prediction->published_market,
+                    $prediction->published_family ?? null
+                );
+                if ($isCard) {
+                    $risk = 'equilibre';
+                } else {
+                    $risk = $published['prob'] >= 0.65 ? 'prudent' : ($published['prob'] >= 0.50 ? 'equilibre' : 'audacieux');
+                }
+
                 $groups[$risk][] = array_merge($published, [
                     'match' => $match,
+                    'market_family' => $prediction->published_family ?? ($isCard ? 'cards' : null),
                     'source' => $prediction->prediction_origin === 'AI_ESTIMATE'
                         ? 'Estimation IA'
                         : ($prediction->review_decision === PredictionRevisionService::STATUS_VALIDATED
@@ -388,8 +401,29 @@ class DashboardController extends Controller
             }
         }
 
-        foreach ($groups as $risk => $picks) {
-            $groups[$risk] = collect($picks)
+        // Cartons/discipline : strictement exclus de "prudent" ("Les plus sûrs")
+        // et plafonnés à 1 seule sélection au maximum sur l'ensemble du dashboard.
+        $totalCardsCount = 0;
+        foreach (['prudent', 'equilibre', 'audacieux'] as $risk) {
+            $filtered = [];
+            foreach ($groups[$risk] as $pick) {
+                $isCard = MarketNormalizationService::isCardsMarket(
+                    $pick['key'] ?? $pick['market'] ?? '',
+                    $pick['market_family'] ?? null
+                );
+                if ($isCard) {
+                    if ($risk === 'prudent') {
+                        continue;
+                    }
+                    if ($totalCardsCount >= 1) {
+                        continue;
+                    }
+                    $totalCardsCount++;
+                }
+                $filtered[] = $pick;
+            }
+
+            $groups[$risk] = collect($filtered)
                 ->sortByDesc('prob')
                 // Un même match peut apporter deux familles distinctes, jamais
                 // la même sélection répétée.
@@ -510,6 +544,10 @@ class DashboardController extends Controller
                 if (($item['coverage'] ?? 'none') === 'none') {
                     continue;
                 }
+                // Les cartons/discipline ne peuvent JAMAIS entrer dans la catégorie prudent ("Les plus sûrs")
+                if ($risk === 'prudent' && MarketNormalizationService::isCardsMarket($item['market_id'] ?? '', $item['family'] ?? null)) {
+                    continue;
+                }
                 $picks[$risk] = [
                     'key' => ($item['market_id'] ?? 'market').':'.($item['selection'] ?? ''),
                     'label' => (string) ($item['selection_label'] ?? $item['market_name'] ?? 'Marché'),
@@ -585,6 +623,15 @@ class DashboardController extends Controller
             'result_total_combo', 'result_btts_combo' => (string) ($selection),
             default => null,
         };
+        if (! $label) {
+            $label = MarketNormalizationService::getSelectionLabel(
+                $market,
+                $selection,
+                $home,
+                $away,
+                $prediction->published_line ? (float) $prediction->published_line : null
+            );
+        }
         if (! $label) return null;
 
         // Cote bookmaker réelle uniquement : une cote estimée depuis la
@@ -631,7 +678,6 @@ class DashboardController extends Controller
                 default              => $market,
             },
         ];
-    }
     }
 
     private function lookupOddFromSnapshot(FootballMatch $match, string $market, string $selection, float $line = 0): ?float

@@ -21,6 +21,15 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 COVERAGE_WEIGHT = {"full": 1.0, "partial": 0.72, "thin": 0.38, "none": 0.0}
 CATEGORY_ORDER = ("prudent", "equilibre", "audacieux")
 
+# Familles de marchés de cartons/discipline : exclus des « plus sûrs »,
+# limités à 1 au total dans les catégories secondaires.
+CARDS_DISCIPLINE_FAMILIES: frozenset = frozenset({
+    "cards",
+    "discipline",
+    "yellow_cards",
+    "red_cards",
+})
+
 # Paires incompatibles lorsqu'elles portent sur la même rencontre.
 _CONTRADICTIONS: Tuple[Tuple[str, str], ...] = (
     ("1x2:home", "1x2:draw"),
@@ -130,16 +139,26 @@ def category_for(prediction: Dict[str, Any]) -> Optional[str]:
     probability = float(prediction.get("probability", 0.0))
     coverage = str(prediction.get("coverage", "none"))
     reliability = float(prediction.get("reliability", 0.0))
+    market_status = str(prediction.get("market_status", ""))
+
+    # Données absentes ou fiabilité insuffisante → jamais publié
     if coverage == "none" or reliability < 0.35:
+        return None
+    # Marché exclu du registre ou insuffisamment couvert → jamais recommandé
+    if market_status in {"insufficient", "unsupported"}:
         return None
     if probability < 0.15 or is_trivial_market(prediction):
         return None
+    # Famille cartons : exclue de « prudent » (les plus sûrs)
+    family = str(prediction.get("family", ""))
+    is_cards = family in CARDS_DISCIPLINE_FAMILIES
 
     if (
-        0.62 <= probability <= 0.82
+        not is_cards
+        and 0.62 <= probability <= 0.82
         and reliability >= 0.68
         and coverage in {"full", "partial"}
-        and str(prediction.get("market_status")) in {"supported", "conditional"}
+        and market_status in {"supported", "conditional"}
     ):
         return "prudent"
     if 0.42 <= probability < 0.78 and reliability >= 0.55:
@@ -175,6 +194,7 @@ def rank_categories(
 ) -> Dict[str, List[Dict[str, Any]]]:
     grouped: Dict[str, List[Dict[str, Any]]] = {name: [] for name in CATEGORY_ORDER}
     seen_market_families: Dict[str, set] = {}
+    cards_count_total = 0
 
     eligible = [p for p in predictions if float(p.get("probability", 0.0)) > 0.0]
     eligible.sort(
@@ -189,6 +209,17 @@ def rank_categories(
         category = category_for(prediction)
         if category is None:
             continue
+
+        family = str(prediction.get("family", ""))
+        is_cards = family in CARDS_DISCIPLINE_FAMILIES
+        if is_cards:
+            # Cartons/discipline : strictement bannis des pronostics prudents ("Les plus sûrs")
+            if category == "prudent":
+                continue
+            # Limité à un seul marché de discipline/carton au total sur l'ensemble des catégories
+            if cards_count_total >= 1:
+                continue
+
         if any(_signature(item) == _signature(prediction) for items in grouped.values() for item in items):
             continue
         if any(contradicts(item, prediction) for items in grouped.values() for item in items):
@@ -201,6 +232,8 @@ def rank_categories(
             continue
         used.add(key)
         grouped[category].append(prediction)
+        if is_cards:
+            cards_count_total += 1
         if len(grouped[category]) >= limit_per_category:
             continue
 

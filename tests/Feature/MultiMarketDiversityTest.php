@@ -180,14 +180,10 @@ class MultiMarketDiversityTest extends TestCase
 
         $candidates = $service->candidatesFromResult($sparseResult);
         
-        // Les marchés avec coverage 'none' ne doivent pas être sélectionnés comme candidat initial
+        // Les marchés avec coverage 'none' ne doivent pas figurer dans les candidats éligibles
         $candidatesColl = collect($candidates);
         $shotsCandidate = $candidatesColl->firstWhere('market', 'shots');
-        
-        // Si présent, sa couverture doit être 'none'
-        if ($shotsCandidate) {
-            $this->assertSame('none', $shotsCandidate['coverage']);
-        }
+        $this->assertNull($shotsCandidate, "Les marchés avec coverage 'none' doivent être strictement exclus des candidats.");
     }
 
     /**

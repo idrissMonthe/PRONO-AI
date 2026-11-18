@@ -256,3 +256,122 @@ def test_time_markets_are_flagged_as_assumption_based():
     assert total == pytest.approx(1.0, abs=2e-3)
     assert all(p["coverage"] == "thin" for p in predictions)
     assert all("timestamped_goal_events" in p["missing_data"] for p in predictions)
+
+
+def test_cards_markets_never_in_prudent_category():
+    card_prediction = {
+        "match_id": "m1",
+        "market_id": "total_yellow_cards",
+        "family": "cards",
+        "selection": "over_3_5",
+        "line": 3.5,
+        "probability": 0.75,
+        "reliability": 0.85,
+        "coverage": "full",
+        "market_status": "supported",
+    }
+    # Les cartons/discipline sont strictement interdits dans "prudent"
+    assert category_for(card_prediction) != "prudent"
+    # Ils peuvent aller dans équilibré si la fiabilité est bonne
+    assert category_for(card_prediction) == "equilibre"
+
+
+def test_cards_markets_limited_to_one_in_rank_categories():
+    predictions = [
+        {
+            "match_id": f"m{i}",
+            "market_id": "total_yellow_cards",
+            "family": "cards",
+            "selection": f"over_{i}_5",
+            "line": i + 0.5,
+            "probability": 0.65,
+            "reliability": 0.75,
+            "coverage": "full",
+            "market_status": "supported",
+        }
+        for i in range(5)
+    ]
+    # Ajoutons aussi des marchés football classiques
+    predictions.extend([
+        {
+            "match_id": f"mf{i}",
+            "market_id": "1x2",
+            "family": "result",
+            "selection": "home",
+            "line": None,
+            "probability": 0.70,
+            "reliability": 0.80,
+            "coverage": "full",
+            "market_status": "supported",
+        }
+        for i in range(4)
+    ])
+    ranked = rank_categories(predictions, limit_per_category=6)
+
+    # 1. Aucun carton dans prudent
+    prudent_cards = [p for p in ranked["prudent"] if p.get("family") in {"cards", "discipline"}]
+    assert len(prudent_cards) == 0
+
+    # 2. Au plus 1 carton sur l'ensemble des catégories
+    all_cards = [
+        p for cat in ("prudent", "equilibre", "audacieux")
+        for p in ranked[cat]
+        if p.get("family") in {"cards", "discipline"}
+    ]
+    assert len(all_cards) <= 1
+
+
+def test_insufficient_or_no_coverage_markets_never_categorized():
+    p_insufficient = {
+        "match_id": "m1",
+        "market_id": "player_carded",
+        "family": "cards",
+        "selection": "player_x",
+        "line": None,
+        "probability": 0.70,
+        "reliability": 0.80,
+        "coverage": "full",
+        "market_status": "insufficient",
+    }
+    p_no_coverage = {
+        "match_id": "m1",
+        "market_id": "total_goals",
+        "family": "goals",
+        "selection": "over_2_5",
+        "line": 2.5,
+        "probability": 0.70,
+        "reliability": 0.80,
+        "coverage": "none",
+        "market_status": "supported",
+    }
+    assert category_for(p_insufficient) is None
+    assert category_for(p_no_coverage) is None
+
+
+def test_trivial_markets_never_categorized():
+    # Moins de 5,5 buts à 95% ou Moins de 0,5 but etc.
+    p_trivial = {
+        "match_id": "m1",
+        "market_id": "total_goals",
+        "family": "goals",
+        "selection": "under_5_5",
+        "line": 5.5,
+        "probability": 0.95,
+        "reliability": 0.90,
+        "coverage": "full",
+        "market_status": "supported",
+    }
+    p_high_prob = {
+        "match_id": "m1",
+        "market_id": "1x2",
+        "family": "result",
+        "selection": "home",
+        "line": None,
+        "probability": 0.89,
+        "reliability": 0.90,
+        "coverage": "full",
+        "market_status": "supported",
+    }
+    assert category_for(p_trivial) is None
+    assert category_for(p_high_prob) is None
+
