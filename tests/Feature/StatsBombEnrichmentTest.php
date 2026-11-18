@@ -20,6 +20,23 @@ class StatsBombEnrichmentTest extends TestCase
 {
     use RefreshDatabase;
 
+    private string $statsbombCache;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Cache d'événements isolé : un test ne doit jamais relire les
+        // fichiers réels mis en cache pour l'import de production.
+        $this->statsbombCache = sys_get_temp_dir().'/prono-sb-'.spl_object_hash($this);
+        config(['imports.statsbomb.cache_path' => $this->statsbombCache]);
+    }
+
+    protected function tearDown(): void
+    {
+        \Illuminate\Support\Facades\File::deleteDirectory($this->statsbombCache);
+        parent::tearDown();
+    }
+
     private function configure(): void
     {
         config([

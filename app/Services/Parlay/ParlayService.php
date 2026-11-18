@@ -955,7 +955,7 @@ class ParlayService
 
         $aiResult = $this->geminiService->explainParlay($context);
 
-        return Parlay::create([
+        $parlay = Parlay::create([
             'title'           => $title,
             'date_for'        => $dateFor->toDateString(),
             'risk_level'      => $riskLevel,
@@ -969,6 +969,16 @@ class ParlayService
             'ai_model_used'   => $aiResult['model'] ?? 'deterministic_template',
             'status'          => 'PENDING',
         ]);
+
+        // Historisation immuable : le combiné publié reste identique à ce qui
+        // a été montré, même si le moteur en régénère un autre plus tard.
+        try {
+            app(\App\Services\Prediction\PredictionHistoryService::class)->recordCombination($parlay);
+        } catch (\Throwable $exception) {
+            report($exception);
+        }
+
+        return $parlay;
     }
 
     /**

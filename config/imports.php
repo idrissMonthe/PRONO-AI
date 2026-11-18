@@ -78,6 +78,9 @@ return [
         'retry_pause_ms' => (int) env('STATSBOMB_RETRY_PAUSE_MS', 1500),
         'import_stats' => filter_var(env('STATSBOMB_IMPORT_STATS', true), FILTER_VALIDATE_BOOL),
         'stats_limit' => (int) env('STATSBOMB_STATS_LIMIT', 25),
+        // Fichiers d'événements mis en cache hors Git (licence : pas de
+        // redistribution). Évite de retélécharger plusieurs Go à chaque lot.
+        'cache_path' => env('STATSBOMB_CACHE_PATH', storage_path('app/statsbomb-cache')),
 
         /*
         | Couples compétition/saison réellement présents dans competitions.json.
@@ -86,6 +89,38 @@ return [
         */
         'seasons' => [
             ['competition_id' => 2, 'season_id' => 27, 'code' => 'PL', 'name' => 'Premier League', 'country' => 'England', 'season' => '2015-2016'],
+        ],
+    ],
+
+    /*
+    | Football-Data.co.uk : résultats, scores à la pause, tirs, corners,
+    | fautes, cartons et cotes de clôture 1N2 / Plus-Moins 2,5.
+    |
+    | Un fichier par compétition et par saison. Seules les saisons utiles aux
+    | compétitions déjà présentes sont listées : télécharger tous les
+    | championnats depuis 1993 n'apporterait rien au moteur.
+    */
+    'football_data_uk' => [
+        'enabled' => filter_var(env('FOOTBALL_DATA_UK_ENABLED', true), FILTER_VALIDATE_BOOL),
+        'base_url' => env('FOOTBALL_DATA_UK_BASE_URL', 'https://www.football-data.co.uk/mmz4281'),
+        'timeout' => (int) env('FOOTBALL_DATA_UK_TIMEOUT', 45),
+        'user_agent' => env('FOOTBALL_DATA_UK_USER_AGENT', 'Mozilla/5.0 (compatible; PRONO-IA/1.0)'),
+        'cache_path' => env('FOOTBALL_DATA_UK_CACHE_PATH', storage_path('app/football-data-uk')),
+
+        'seasons' => ['2627', '2526'],
+
+        // Codes de division tels que publiés => compétition interne.
+        'competitions' => [
+            'E0' => ['code' => 'PL', 'name' => 'Premier League', 'country' => 'England'],
+            'SP1' => ['code' => 'PD', 'name' => 'Primera Division', 'country' => 'Spain'],
+            'I1' => ['code' => 'SA', 'name' => 'Serie A', 'country' => 'Italy'],
+            'D1' => ['code' => 'BL1', 'name' => 'Bundesliga', 'country' => 'Germany'],
+            'F1' => ['code' => 'FL1', 'name' => 'Ligue 1', 'country' => 'France'],
+            'N1' => ['code' => 'OF-NL1', 'name' => 'Eredivisie', 'country' => 'Netherlands'],
+            'P1' => ['code' => 'OF-PT1', 'name' => 'Primeira Liga', 'country' => 'Portugal'],
+            'B1' => ['code' => 'OF-BE1', 'name' => 'Pro League', 'country' => 'Belgium'],
+            'T1' => ['code' => 'OF-TR1', 'name' => 'Süper Lig', 'country' => 'Turkey'],
+            'G1' => ['code' => 'OF-GR1', 'name' => 'Super League', 'country' => 'Greece'],
         ],
     ],
 ];

@@ -146,7 +146,10 @@ class GeneratePredictionsCommand extends Command
                     // Contexte réel des marchés étendus. Absent = famille non
                     // calculée ; aucune moyenne n'est inventée côté Python.
                     'period_share' => $this->periodContext($match),
-                    'counts' => $this->countContext($match),
+                    // Un tableau PHP vide se sérialise en `[]`, que Pydantic
+                    // refuse pour un champ dictionnaire : un match sans
+                    // comptage doit envoyer un objet vide, pas une liste.
+                    'counts' => (object) $this->countContext($match),
                     'players' => $this->playerContext($match),
                 ]);
 
@@ -384,6 +387,11 @@ class GeneratePredictionsCommand extends Command
                     ]);
                     $chain->chainPrediction($initialPrediction);
                     $chain->chainPrediction($finalPrediction);
+                    // Snapshot immuable du pronostic réellement publié : la
+                    // probabilité annoncée reste consultable même après une
+                    // nouvelle génération.
+                    app(\App\Services\Prediction\PredictionHistoryService::class)
+                        ->recordPrediction($match, $finalPrediction);
                     PredictionRevision::create([
                         'initial_prediction_id' => $initialPrediction->id,
                         'final_prediction_id' => $finalPrediction->id,

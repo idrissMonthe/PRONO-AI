@@ -13,6 +13,7 @@ class TeamMatchStat extends Model
     protected $fillable = [
         'match_id',
         'team_id',
+        'provider',
         'is_home',
         'shots',
         'shots_on_target',

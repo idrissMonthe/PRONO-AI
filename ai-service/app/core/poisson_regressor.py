@@ -88,6 +88,34 @@ class DixonColesModel:
         # Precompute weights w_k = exp(-xi * days_ago)
         weights = np.array([np.exp(-self.xi * m.days_ago) for m in matches])
 
+        # Vecteurs de travail préparés une seule fois. L-BFGS-B différencie la
+        # vraisemblance numériquement (2 * paramètres + 1 évaluations par
+        # itération) : sur 534 matchs et ~200 équipes, une boucle Python sur
+        # les matchs représentait l'essentiel du temps d'entraînement.
+        safe_home = np.array(
+            [candidate_team_indices.get(m.home_team, 0) for m in matches], dtype=np.int64
+        )
+        safe_away = np.array(
+            [candidate_team_indices.get(m.away_team, 0) for m in matches], dtype=np.int64
+        )
+        has_home = np.array([m.home_team in candidate_team_indices for m in matches], dtype=bool)
+        has_away = np.array([m.away_team in candidate_team_indices for m in matches], dtype=bool)
+        goals_home = np.array([int(m.home_goals) for m in matches], dtype=float)
+        goals_away = np.array([int(m.away_goals) for m in matches], dtype=float)
+        not_neutral = np.array([0.0 if m.is_neutral else 1.0 for m in matches], dtype=float)
+
+        # Les quatre seules cases corrigées par tau (0-0, 0-1, 1-0, 1-1).
+        cell_00 = (goals_home == 0) & (goals_away == 0)
+        cell_01 = (goals_home == 0) & (goals_away == 1)
+        cell_10 = (goals_home == 1) & (goals_away == 0)
+        cell_11 = (goals_home == 1) & (goals_away == 1)
+
+        def tau_penalty(tau: np.ndarray) -> np.ndarray:
+            # Même convention que tau_correction : une masse négative est
+            # ramenée à zéro, puis fortement pénalisée si elle devient nulle.
+            tau = np.maximum(tau, 0.0)
+            return np.where(tau > 1e-8, -np.log(np.maximum(tau, 1e-8)), 20.0)
+
         # Parameter vector layout:
         # [0]: mu (intercept)
         # [1]: home_adv (h)
@@ -119,46 +147,155 @@ class DixonColesModel:
             free_def = params[2 + num_free_att : 2 + num_free_att + num_free_def]
             defense = np.append(free_def, -np.sum(free_def))
 
-            loss = 0.0
-            for idx, m in enumerate(matches):
-                w = weights[idx]
-                h_idx = candidate_team_indices.get(m.home_team)
-                a_idx = candidate_team_indices.get(m.away_team)
-                att_h = att[h_idx] if h_idx is not None else 0.0
-                def_h = defense[h_idx] if h_idx is not None else 0.0
-                att_a = att[a_idx] if a_idx is not None else 0.0
-                def_a = defense[a_idx] if a_idx is not None else 0.0
+            att_h = np.where(has_home, att[safe_home], 0.0)
+            def_h = np.where(has_home, defense[safe_home], 0.0)
+            att_a = np.where(has_away, att[safe_away], 0.0)
+            def_a = np.where(has_away, defense[safe_away], 0.0)
 
-                eff_h = 0.0 if m.is_neutral else h
-                log_lambda_h = mu + eff_h + att_h - def_a
-                log_lambda_a = mu + att_a - def_h
+            eff_h = h * not_neutral
+            log_lambda_h = mu + eff_h + att_h - def_a
+            log_lambda_a = mu + att_a - def_h
 
-                lambda_h = np.exp(np.clip(log_lambda_h, -5.0, 5.0))
-                lambda_a = np.exp(np.clip(log_lambda_a, -5.0, 5.0))
+            lambda_h = np.exp(np.clip(log_lambda_h, -5.0, 5.0))
+            lambda_a = np.exp(np.clip(log_lambda_a, -5.0, 5.0))
 
-                # Negative log likelihood Poisson: lambda - y * log(lambda)
-                loss_h = lambda_h - m.home_goals * np.log(max(1e-8, lambda_h))
-                loss_a = lambda_a - m.away_goals * np.log(max(1e-8, lambda_a))
-                tau = tau_correction(int(m.home_goals), int(m.away_goals), float(lambda_h), float(lambda_a), rho)
-                tau_penalty = -np.log(tau) if tau > 1e-8 else 20.0
+            # Negative log likelihood Poisson: lambda - y * log(lambda)
+            loss = np.sum(
+                weights
+                * (
+                    lambda_h
+                    - goals_home * np.log(np.maximum(1e-8, lambda_h))
+                    + lambda_a
+                    - goals_away * np.log(np.maximum(1e-8, lambda_a))
+                )
+            )
 
-                loss += w * (loss_h + loss_a + tau_penalty)
+            # tau ne dépend des buts attendus que sur quatre cases : les
+            # sélectionner évite d'évaluer la correction sur tout le match.
+            if cell_00.any():
+                tau = 1.0 - lambda_h[cell_00] * lambda_a[cell_00] * rho
+                loss += np.sum(weights[cell_00] * tau_penalty(tau))
+            if cell_01.any():
+                tau = 1.0 + lambda_h[cell_01] * rho
+                loss += np.sum(weights[cell_01] * tau_penalty(tau))
+            if cell_10.any():
+                tau = 1.0 + lambda_a[cell_10] * rho
+                loss += np.sum(weights[cell_10] * tau_penalty(tau))
+            if cell_11.any():
+                tau = 1.0 - rho
+                loss += np.sum(weights[cell_11] * tau_penalty(tau))
 
             # L2 penalty to shrink forces towards mean
             reg = self.l2_reg * (np.sum(att**2) + np.sum(defense**2))
             value = float(loss + reg)
             return value if np.isfinite(value) else float("inf")
 
-        # Le budget d'évaluations doit suivre le nombre de paramètres : sur un
-        # historique de plusieurs centaines de matchs et d'équipes, la limite
-        # par défaut (15 000) est atteinte avant convergence et l'ajustement
-        # échoue sur un simple budget, sans que le modèle soit en cause.
+        def grad(params: np.ndarray) -> np.ndarray:
+            """Gradient analytique de nll.
+
+            Sans lui, L-BFGS-B approxime le gradient par différences finies :
+            2 * total_params + 1 évaluations de la vraisemblance par itération,
+            soit ~800 sur ~400 paramètres. Le modèle dépensait alors tout son
+            budget d'évaluations avant d'avoir convergé. Le gradient est
+            exact, donc le budget ne sert plus qu'à la convergence.
+            """
+            mu = params[0]
+            h = params[1]
+            rho = float(params[-1])
+
+            free_att = params[2 : 2 + num_free_att]
+            att = np.append(free_att, -np.sum(free_att))
+            free_def = params[2 + num_free_att : 2 + num_free_att + num_free_def]
+            defense = np.append(free_def, -np.sum(free_def))
+
+            att_h = np.where(has_home, att[safe_home], 0.0)
+            def_h = np.where(has_home, defense[safe_home], 0.0)
+            att_a = np.where(has_away, att[safe_away], 0.0)
+            def_a = np.where(has_away, defense[safe_away], 0.0)
+
+            log_lambda_h = mu + h * not_neutral + att_h - def_a
+            log_lambda_a = mu + att_a - def_h
+            lambda_h = np.exp(np.clip(log_lambda_h, -5.0, 5.0))
+            lambda_a = np.exp(np.clip(log_lambda_a, -5.0, 5.0))
+
+            # d/d(log lambda) de lambda - y * log(lambda) = lambda - y.
+            # Hors bornes de clipping, la dérivée du logarithme écrasé est nulle.
+            active_h = ((log_lambda_h > -5.0) & (log_lambda_h < 5.0)).astype(float)
+            active_a = ((log_lambda_a > -5.0) & (log_lambda_a < 5.0)).astype(float)
+            d_h = weights * (lambda_h - goals_home) * active_h
+            d_a = weights * (lambda_a - goals_away) * active_a
+
+            d_rho = 0.0
+            if cell_00.any():
+                lh = lambda_h[cell_00]
+                la = lambda_a[cell_00]
+                tau = np.maximum(1.0 - lh * la * rho, 0.0)
+                live = tau > 1e-8
+                tau_safe = np.where(live, tau, 1.0)
+                # d tau / d log(lambda) = d tau / d lambda * lambda.
+                d_h[cell_00] += np.where(live, weights[cell_00] * la * rho * lh / tau_safe, 0.0)
+                d_a[cell_00] += np.where(live, weights[cell_00] * lh * rho * la / tau_safe, 0.0)
+                d_rho += float(np.sum(np.where(live, weights[cell_00] * lh * la / tau_safe, 0.0)))
+            if cell_01.any():
+                lh = lambda_h[cell_01]
+                tau = np.maximum(1.0 + lh * rho, 0.0)
+                live = tau > 1e-8
+                tau_safe = np.where(live, tau, 1.0)
+                d_h[cell_01] += np.where(live, -weights[cell_01] * rho * lh / tau_safe, 0.0)
+                d_rho += float(np.sum(np.where(live, -weights[cell_01] * lh / tau_safe, 0.0)))
+            if cell_10.any():
+                la = lambda_a[cell_10]
+                tau = np.maximum(1.0 + la * rho, 0.0)
+                live = tau > 1e-8
+                tau_safe = np.where(live, tau, 1.0)
+                d_a[cell_10] += np.where(live, -weights[cell_10] * rho * la / tau_safe, 0.0)
+                d_rho += float(np.sum(np.where(live, -weights[cell_10] * la / tau_safe, 0.0)))
+            if cell_11.any():
+                tau = np.maximum(1.0 - rho, 0.0)
+                live = tau > 1e-8
+                if live:
+                    d_rho += float(np.sum(weights[cell_11])) / float(tau)
+
+            gradient = np.zeros(total_params)
+            gradient[0] = float(np.sum(d_h + d_a))
+            gradient[1] = float(np.sum(d_h * not_neutral))
+
+            g_att = np.zeros(att.shape[0])
+            g_def = np.zeros(defense.shape[0])
+            np.add.at(g_att, safe_home[has_home], d_h[has_home])
+            np.add.at(g_att, safe_away[has_away], d_a[has_away])
+            np.add.at(g_def, safe_home[has_home], -d_a[has_home])
+            np.add.at(g_def, safe_away[has_away], -d_h[has_away])
+
+            # L2 : d/d att (l2 * sum(att^2)) = 2 * l2 * att.
+            g_att += 2.0 * self.l2_reg * att
+            g_def += 2.0 * self.l2_reg * defense
+
+            # att[dernier] = -sum(att_libres) : la contrainte d'identifiabilité
+            # reporte la dérivée du dernier coefficient sur les libres.
+            if num_free_att:
+                gradient[2 : 2 + num_free_att] = g_att[:num_free_att] - g_att[-1]
+            if num_free_def:
+                gradient[2 + num_free_att : 2 + num_free_att + num_free_def] = (
+                    g_def[:num_free_def] - g_def[-1]
+                )
+            gradient[-1] = d_rho
+
+            return np.where(np.isfinite(gradient), gradient, 0.0)
+
+        # Le gradient est analytique : le budget d'évaluations n'a plus à
+        # croître avec le nombre d'équipes, il ne sert qu'à la convergence.
         res = minimize(
             nll,
             x0,
+            jac=grad,
             method="L-BFGS-B",
             bounds=bounds,
-            options={"maxiter": 250, "maxfun": max(15000, 120 * total_params)},
+            # L'objectif est peu courbé : sur ~600 paramètres corrélés, la
+            # convergence demande beaucoup d'itérations. Chacune ne coûte
+            # qu'une évaluation et un gradient exacts, donc le budget utile
+            # est en itérations, pas en temps.
+            options={"maxiter": 3000, "maxfun": max(20000, 60 * total_params)},
         )
 
         fit_message = str(getattr(res, "message", "Unknown optimizer result"))

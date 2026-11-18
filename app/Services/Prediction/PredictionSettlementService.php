@@ -239,7 +239,11 @@ class PredictionSettlementService
         return $this->selectionOutcome((string) $prediction->published_market, (string) $prediction->published_selection, $homeGoals, $awayGoals, $actualResult, $home, $away);
     }
 
-    private function selectionOutcome(string $market, string $selection, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away): ?array
+    /**
+     * Règle une sélection sur un résultat réel. Public : l'historisation des
+     * pronostics réutilise exactement les mêmes règles de règlement.
+     */
+    public function selectionOutcome(string $market, string $selection, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away): ?array
     {
         $hit = false;
         $label = $market.' '.$selection;
@@ -376,7 +380,7 @@ class PredictionSettlementService
         return '90-100%';
     }
 
-    private function comboHit(string $key, int $homeGoals, int $awayGoals): bool
+    public function comboHit(string $key, int $homeGoals, int $awayGoals): bool
     {
         $homeWin = $homeGoals > $awayGoals;
         $awayWin = $awayGoals > $homeGoals;

@@ -2,9 +2,12 @@
 
 namespace App\Services\Import;
 
+use App\Models\Bookmaker;
 use App\Models\FootballMatch;
 use App\Models\ImportRun;
 use App\Models\League;
+use App\Models\Market;
+use App\Models\OddsSnapshot;
 use App\Models\ProviderEntityMap;
 use App\Models\Season;
 use App\Models\Team;
@@ -41,6 +44,8 @@ class MultiSourceImporter
             'rejected' => 0,
             'divergent' => 0,
             'skipped' => 0,
+            'stats_rows' => 0,
+            'odds_rows' => 0,
             'metadata' => ['divergences' => [], 'errors' => []],
         ];
 
@@ -116,6 +121,13 @@ class MultiSourceImporter
                     continue;
                 }
 
+                // Faits annexes fournis par la source (statistiques d'équipe
+                // et cotes de clôture). Écrits seulement après un match
+                // réellement persisté.
+                $facts = $this->persistFacts($persisted, $match);
+                $counters['stats_rows'] = ($counters['stats_rows'] ?? 0) + $facts['stats'];
+                $counters['odds_rows'] = ($counters['odds_rows'] ?? 0) + $facts['odds'];
+
                 if ($existing) {
                     $counters['updated']++;
                     $progress?->call($this, $match, 'updated');
@@ -183,6 +195,7 @@ class MultiSourceImporter
                 ['match_id' => $stored->id, 'team_id' => $teamId],
                 [
                     'is_home' => $side === 'home',
+                    'provider' => StatsBombConnector::SOURCE,
                     'shots' => $values['shots'],
                     'shots_on_target' => $values['shots_on_target'],
                     'xg' => round((float) $values['xg'], 2),
@@ -236,6 +249,145 @@ class MultiSourceImporter
         }
 
         return true;
+    }
+
+    /**
+     * Écrit les faits annexes d'un match (statistiques d'équipe, cotes).
+     *
+     * Une valeur déjà renseignée par un autre fournisseur n'est jamais
+     * écrasée : deux sources peuvent mesurer différemment (un tir cadré
+     * StatsBomb n'est pas forcément celui de Football-Data.co.uk). Seuls les
+     * champs vides sont complétés, et la provenance de la ligne est conservée.
+     *
+     * @return array{stats: int, odds: int}
+     */
+    private function persistFacts(FootballMatch $stored, NormalizedMatch $incoming): array
+    {
+        $statsRows = 0;
+        $oddsRows = 0;
+
+        $stats = $incoming->metadata['stats'] ?? null;
+        if (is_array($stats)) {
+            foreach (['home' => $stored->home_team_id, 'away' => $stored->away_team_id] as $side => $teamId) {
+                $values = $stats[$side] ?? null;
+                if (! is_array($values) || $values === []) {
+                    continue;
+                }
+
+                $row = TeamMatchStat::firstOrNew(['match_id' => $stored->id, 'team_id' => $teamId]);
+                $sameProvider = $row->provider === $incoming->source;
+                $updates = ['is_home' => $side === 'home'];
+
+                foreach (['shots', 'shots_on_target', 'corners', 'fouls', 'offsides', 'yellow_cards', 'red_cards', 'xg'] as $field) {
+                    if (! array_key_exists($field, $values) || $values[$field] === null) {
+                        continue;
+                    }
+
+                    if ($row->{$field} === null || $sameProvider) {
+                        $updates[$field] = $values[$field];
+                    }
+                }
+
+                if (count($updates) <= 1) {
+                    continue;
+                }
+
+                // La provenance n'est renseignée que sur les faits écrits ici.
+                $updates['provider'] = $incoming->source;
+                $row->fill($updates)->save();
+                $statsRows++;
+            }
+        }
+
+        $odds = $incoming->metadata['odds'] ?? null;
+        if (is_array($odds)) {
+            $oddsRows += $this->persistOdds($stored, $incoming, $odds);
+        }
+
+        return ['stats' => $statsRows, 'odds' => $oddsRows];
+    }
+
+    /**
+     * @param  array<string, mixed>  $odds
+     */
+    private function persistOdds(FootballMatch $stored, NormalizedMatch $incoming, array $odds): int
+    {
+        $written = 0;
+        $snapshotAt = $incoming->kickoffUtc->utc();
+
+        $bookmakerIds = [];
+        $bookmaker = function (string $code) use (&$bookmakerIds): int {
+            if (isset($bookmakerIds[$code])) {
+                return $bookmakerIds[$code];
+            }
+
+            $model = Bookmaker::firstOrCreate(
+                ['code' => $code],
+                [
+                    'name' => ucfirst(str_replace('_', ' ', $code)),
+                    'type' => $code === 'market_avg' ? 'high_margin' : ($code === 'betfair_ex' ? 'exchange' : 'low_margin'),
+                    'is_active' => true,
+                ]
+            );
+
+            return $bookmakerIds[$code] = $model->id;
+        };
+
+        $market = function (string $code, string $name): int {
+            return Market::firstOrCreate(['code' => $code], ['name' => $name, 'category' => 'main'])->id;
+        };
+
+        $write = function (int $bookmakerId, int $marketId, string $selection, ?float $line, float $decimalOdds) use ($stored, $incoming, $snapshotAt, &$written): void {
+            $attributes = [
+                'match_id' => $stored->id,
+                'bookmaker_id' => $bookmakerId,
+                'market_id' => $marketId,
+                'selection' => $selection,
+                'line' => $line,
+                'snapshot_time_utc' => $snapshotAt,
+                'source' => $incoming->source,
+            ];
+
+            $snapshot = OddsSnapshot::firstOrNew($attributes);
+            $snapshot->decimal_odds = $decimalOdds;
+            // Les fichiers publiés sont des cotes de clôture pré-match.
+            $snapshot->is_closing = true;
+            $snapshot->is_opening = false;
+            $snapshot->raw_hash = hash('sha256', implode('|', [$stored->id, $bookmakerId, $marketId, $selection, (string) $line, (string) $decimalOdds]));
+            $snapshot->save();
+            $written++;
+        };
+
+        foreach ((array) ($odds['1x2_closing'] ?? []) as $entry) {
+            if (! is_array($entry) || ! isset($entry['bookmaker'])) {
+                continue;
+            }
+
+            $bookmakerId = $bookmaker((string) $entry['bookmaker']);
+            $marketId = $market('1N2', 'Résultat du Match (1N2)');
+            foreach (['HOME' => 'home', 'DRAW' => 'draw', 'AWAY' => 'away'] as $selection => $key) {
+                if (isset($entry[$key])) {
+                    $write($bookmakerId, $marketId, $selection, null, (float) $entry[$key]);
+                }
+            }
+        }
+
+        foreach ((array) ($odds['totals_2_5_closing'] ?? []) as $entry) {
+            if (! is_array($entry) || ! isset($entry['bookmaker'])) {
+                continue;
+            }
+
+            $bookmakerId = $bookmaker((string) $entry['bookmaker']);
+            $marketId = $market('totals', 'Total de Buts (Plus / Moins)');
+            if (isset($entry['over'])) {
+                $write($bookmakerId, $marketId, 'OVER', 2.5, (float) $entry['over']);
+            }
+            if (isset($entry['under'])) {
+                $write($bookmakerId, $marketId, 'UNDER', 2.5, (float) $entry['under']);
+            }
+        }
+
+        return $written;
     }
 
     private function resolveLeague(NormalizedMatch $match): League

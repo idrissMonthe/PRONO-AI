@@ -163,8 +163,7 @@ class StatsBombConnector
             return $empty;
         }
 
-        $url = $this->baseUrl()."/events/{$matchId}.json";
-        $events = $this->fetchJson($url);
+        $events = $this->fetchEvents($matchId);
 
         if ($events === null) {
             Log::warning('StatsBomb: événements indisponibles après tentatives.', ['match_id' => $matchId]);
@@ -418,6 +417,46 @@ class StatsBombConnector
 
         $players[$playerId]['yellow_cards'] += $yellow;
         $players[$playerId]['red_cards'] += $red;
+    }
+
+    /**
+     * Lit le fichier d'événements d'un match, depuis le cache local quand il
+     * existe, sinon depuis le dépôt distant (puis mise en cache).
+     *
+     * Un fichier d'événements pèse plusieurs mégaoctets : sans cache, un import
+     * interrompu repartait de zéro et retéléchargeait les mêmes matchs. Le
+     * cache reste dans `storage/` (hors Git) car la licence StatsBomb interdit
+     * la redistribution.
+     */
+    private function fetchEvents(int $matchId): ?array
+    {
+        $directory = rtrim((string) ($this->config['cache_path'] ?? storage_path('app/statsbomb-cache')), '/');
+        $path = $directory.'/'.$matchId.'.json';
+
+        if (is_file($path)) {
+            $raw = @file_get_contents($path);
+            if (is_string($raw) && $raw !== '') {
+                $cached = json_decode($raw, true);
+                if (is_array($cached) && $cached !== []) {
+                    return $cached;
+                }
+            }
+        }
+
+        $events = $this->fetchJson($this->baseUrl()."/events/{$matchId}.json");
+
+        if ($events !== null && $events !== []) {
+            if (! is_dir($directory)) {
+                @mkdir($directory, 0775, true);
+            }
+
+            $encoded = json_encode($events);
+            if (is_string($encoded) && is_dir($directory)) {
+                @file_put_contents($path, $encoded);
+            }
+        }
+
+        return $events;
     }
 
     /**

@@ -146,6 +146,13 @@ class PredictionClient
                 ->post("{$this->baseUrl}/v1/train", ['matches' => $matches]);
 
             if ($response->successful()) return $response->json();
+
+            // Un 422 vient de la validation Pydantic : sans le détail, la
+            // cause réelle (champ hors bornes) reste invisible.
+            Log::error('AI Service training rejected the payload.', [
+                'status' => $response->status(),
+                'body' => mb_substr($response->body(), 0, 2000),
+            ]);
         } catch (Exception $e) {
             Log::error('AI Service training failed: '.$e->getMessage());
         }

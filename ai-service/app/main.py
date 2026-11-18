@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.devig import devig_odds
 from app.core.dixon_coles import (
+    MAX_ENSEMBLE_LOG_SHIFT,
     compute_score_matrix,
     extract_match_markets_from_matrix,
     project_lambdas_to_dixon_coles,
@@ -523,6 +524,15 @@ def predict(req: PredictRequest):
         market_weight,
     )
     warnings.append("elo_form_ensemble_applied")
+
+    # Une équipe sans historique ne possède aucun signal propre : le marché est
+    # alors la seule preuve disponible. Le déplacement reste borné, mais il doit
+    # être assez large pour que la cible du blend soit représentable, sinon la
+    # projection ramène le 1N2 au modèle et la confiance retombe à tort.
+    projection_shift = MAX_ENSEMBLE_LOG_SHIFT
+    if has_sparse_team_history and req.market_probabilities is not None:
+        projection_shift = 0.5
+
     lh, la, matrix, residual_mass, n = project_lambdas_to_dixon_coles(
         lh,
         la,
@@ -530,6 +540,7 @@ def predict(req: PredictRequest):
         published[0],
         published[1],
         published[2],
+        max_log_shift=projection_shift,
     )
     warnings.append("dixon_coles_joint_preserved")
     markets = extract_match_markets_from_matrix(matrix)
