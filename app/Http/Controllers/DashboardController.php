@@ -537,18 +537,21 @@ class DashboardController extends Controller
         if (! $market || ! $selection || $probability <= 0 || $probability >= 1) return null;
 
         // Exclusion stricte des marchés triviaux/non rentables
-        if ($market === 'totals' && in_array($selection, ['over_0_5', 'under_0_5', 'over_5_5', 'under_5_5', 'under_4_5'], true)) {
+        if (in_array($market, ['totals', 'total_goals'], true) && in_array($selection, ['over_0_5', 'under_0_5', 'over_5_5', 'under_5_5', 'under_4_5'], true)) {
+            return null;
+        }
+        if ($probability > 0.82) {
             return null;
         }
         $home = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
         $away = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
         $label = match ($market) {
-            '1N2' => ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$selection] ?? null,
+            '1N2', '1x2' => ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$selection] ?? null,
             'double_chance' => ['1X' => $home.' ou nul', 'X2' => $away.' ou nul', '12' => 'Pas de match nul'][$selection] ?? null,
             'btts' => ['yes' => 'Les deux équipes marquent', 'no' => 'Au moins une équipe ne marque pas'][$selection] ?? null,
-            'dnb' => ['home' => 'Victoire '.$home.' (Remboursé si nul)', 'away' => 'Victoire '.$away.' (Remboursé si nul)'][$selection] ?? null,
-            'team_totals' => preg_match('/^(HOME|AWAY)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', $selection, $parts)
-                ? (($parts[2] === 'OVER') ? 'Plus de ' : 'Moins de ').str_replace('.', ',', $parts[3]).' buts — '.($parts[1] === 'HOME' ? $home : $away)
+            'dnb', 'draw_no_bet' => ['home' => 'Victoire '.$home.' (Remboursé si nul)', 'away' => 'Victoire '.$away.' (Remboursé si nul)'][$selection] ?? null,
+            'team_totals', 'team_total_goals' => preg_match('/^(HOME|AWAY|home|away)_(OVER|UNDER|over|under)_(\d+(?:\.\d+)?)$/i', $selection, $parts)
+                ? ((strtoupper($parts[2]) === 'OVER') ? 'Plus de ' : 'Moins de ').str_replace('.', ',', $parts[3]).' buts — '.(strtoupper($parts[1]) === 'HOME' ? $home : $away)
                 : null,
             'asian_handicap' => preg_match('/^AH_(HOME|AWAY)_(-?\d+(?:\.\d+)?)$/', $selection, $parts)
                 ? ($parts[1] === 'HOME' ? $home : $away).' handicap '.($parts[2] > 0 ? '+' : '').rtrim(rtrim($parts[2], '0'), '.')
@@ -562,21 +565,19 @@ class DashboardController extends Controller
                 }
                 : null,
             'exact_score' => 'Score exact '.$selection,
-            'totals' => preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)
-                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts' : null,
-            'half_time_result' => ['home' => 'Mi-temps : '.$home.' mène', 'draw' => 'Mi-temps : égalité', 'away' => 'Mi-temps : '.$away.' mène'][$selection] ?? null,
-            'half_time_totals' => preg_match('/^(over|under)_(\d+)_(\d+)_ht$/', $selection, $parts)
-                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts (MT)'
-                : (preg_match('/^(over|under)_(\d+(?:_\d+)?)$/', $selection, $parts2)
-                    ? ($parts2[1] === 'over' ? 'Plus de ' : 'Moins de ').str_replace('_', ',', $parts2[2]).' buts (MT)'
-                    : 'MT : '.str_replace('_', ' ', $selection)),
-            'corners' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+            'totals', 'total_goals' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' buts' : null,
+            'half_time_result', 'ht_1x2' => ['home' => 'Mi-temps : '.$home.' mène', 'draw' => 'Mi-temps : égalité', 'away' => 'Mi-temps : '.$away.' mène'][$selection] ?? null,
+            'half_time_totals', 'ht_total_goals' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?(?:_ht)?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' buts (MT)'
+                : 'MT : '.str_replace('_', ' ', $selection),
+            'corners', 'total_corners', 'corners_total' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' corners'
                 : 'Corners : '.str_replace('_', ' ', $selection),
-            'cards' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+            'cards', 'total_cards', 'cards_total' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' cartons'
                 : 'Cartons : '.str_replace('_', ' ', $selection),
-            'shots' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+            'shots', 'total_shots', 'shots_total' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' tirs'
                 : 'Tirs : '.str_replace('_', ' ', $selection),
             'clean_sheet' => ['home' => $away.' ne marque pas', 'away' => $home.' ne marque pas'][$selection] ?? 'Clean sheet : '.str_replace('_', ' ', $selection),
@@ -599,7 +600,7 @@ class DashboardController extends Controller
             $odds = $this->lookupOddFromSnapshot($match, $market, $selection, (float) ($prediction->published_line ?? 0));
         }
 
-        if ($odds && $odds < 1.20) {
+        if ($odds && $odds < 1.25) {
             return null;
         }
 
@@ -609,20 +610,20 @@ class DashboardController extends Controller
             'prob' => $probability,
             'odds' => $odds,
             'market' => match ($market) {
-                '1N2'                => 'Résultat',
+                '1N2', '1x2'         => 'Résultat',
                 'double_chance'      => 'Double chance',
                 'btts'               => 'BTTS',
-                'totals'             => 'Total buts',
+                'totals', 'total_goals' => 'Total buts',
                 'asian_handicap'     => 'Handicap asiatique',
                 'european_handicap'  => 'Handicap européen',
-                'dnb'                => 'Draw No Bet',
-                'team_totals'        => 'Total par équipe',
+                'dnb', 'draw_no_bet' => 'Draw No Bet',
+                'team_totals', 'team_total_goals' => 'Total par équipe',
                 'exact_score'        => 'Score exact',
-                'half_time_result'   => 'Mi-temps 1X2',
-                'half_time_totals'   => 'Total buts MT',
-                'corners'            => 'Corners',
-                'cards'              => 'Cartons',
-                'shots'              => 'Tirs',
+                'half_time_result', 'ht_1x2' => 'Mi-temps 1X2',
+                'half_time_totals', 'ht_total_goals' => 'Total buts MT',
+                'corners', 'total_corners', 'corners_total' => 'Corners',
+                'cards', 'total_cards', 'cards_total' => 'Cartons',
+                'shots', 'total_shots', 'shots_total' => 'Tirs',
                 'clean_sheet'        => 'Clean sheet',
                 'win_to_nil'         => 'Win to nil',
                 'result_total_combo' => 'Résultat + Buts',
@@ -630,6 +631,7 @@ class DashboardController extends Controller
                 default              => $market,
             },
         ];
+    }
     }
 
     private function lookupOddFromSnapshot(FootballMatch $match, string $market, string $selection, float $line = 0): ?float

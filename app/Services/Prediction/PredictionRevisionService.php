@@ -319,6 +319,21 @@ class PredictionRevisionService
                 }
             }
 
+            // Exclusion stricte des sélections parasites à probabilité excessive (> 0.82)
+            // car leur cote réelle (< 1.22) ne présente aucun intérêt de pari.
+            if ($probability > 0.82) {
+                return;
+            }
+            if (in_array($market, ['totals', 'total_goals'], true) && in_array($selection, ['over_0_5', 'under_0_5', 'over_5_5', 'under_5_5', 'under_4_5'], true)) {
+                return;
+            }
+            if (in_array($market, ['totals', 'total_goals'], true) && $line !== null && (in_array((float) $line, [0.5, 5.5], true) || ((float) $line === 4.5 && $probability > 0.80))) {
+                return;
+            }
+            if (in_array($market, ['team_totals', 'team_total_goals'], true) && ($line === 0.5 || str_contains($selection, '0.5') || str_contains($selection, '0_5')) && $probability > 0.78) {
+                return;
+            }
+
             $candidates[] = [
                 'candidate_key' => $key,
                 'market' => $market,
@@ -574,26 +589,25 @@ class PredictionRevisionService
         }
 
         $floor = (float) config('services.hybrid_prediction.publish_probability_floor', 0.50);
-        $ceiling = (float) config('services.hybrid_prediction.publish_probability_ceiling', 0.88);
+        $ceiling = min(0.82, (float) config('services.hybrid_prediction.publish_probability_ceiling', 0.82));
         $inBand = array_values(array_filter(
             $candidates,
             fn (array $c): bool => (float) $c['probability'] >= $floor
                 && (float) $c['probability'] <= $ceiling
+                && ((float) ($c['odds'] ?? 1.30)) >= 1.25
         ));
         $aboveFloor = array_values(array_filter(
             $candidates,
             fn (array $c): bool => (float) $c['probability'] >= $floor
+                && ((float) ($c['odds'] ?? 1.30)) >= 1.25
         ));
         $pool = $inBand !== [] ? $inBand : ($aboveFloor !== [] ? $aboveFloor : $candidates);
 
-        // Score multi-critères statistique équitable :
-        // 1. Probabilité calibrée (45%)
-        // 2. Fiabilité de la famille (35%)
-        // 3. Couverture des données (15%)
-        // 4. Bonus d'espérance mathématique si cote bookmaker réelle disponible (+EV)
+        // Score multi-critères équilibrant probabilité, fiabilité et valeur de cote :
         $scoreFn = function (array $c): float {
             $prob = (float) $c['probability'];
             $rel = (float) ($c['reliability'] ?? 0.65);
+            $odds = (float) ($c['odds'] ?? 1.40);
             $cov = match ($c['coverage'] ?? 'full') {
                 'full' => 1.0,
                 'partial' => 0.75,
@@ -601,15 +615,24 @@ class PredictionRevisionService
                 default => 0.70,
             };
 
+            // Bonus/malus de cote : pénalise les cotes dérisoires (< 1.25) et valorise la zone 1.35-2.10
+            $oddsQuality = match (true) {
+                $odds < 1.22 => -0.25,
+                $odds < 1.28 => -0.10,
+                $odds >= 1.35 && $odds <= 2.10 => 0.15,
+                $odds > 2.10 => 0.05,
+                default => 0.0,
+            };
+
             $evBonus = 0.0;
             if (($c['odds_source'] ?? '') === 'bookmaker' && is_numeric($c['expected_value'] ?? null)) {
                 $ev = (float) $c['expected_value'];
                 if ($ev > 0) {
-                    $evBonus = min(0.10, $ev * 0.35);
+                    $evBonus = min(0.12, $ev * 0.40);
                 }
             }
 
-            return (0.45 * $prob) + (0.35 * $rel) + (0.15 * $cov) + $evBonus;
+            return (0.35 * $prob) + (0.30 * $rel) + (0.15 * $cov) + $oddsQuality + $evBonus;
         };
 
         usort($pool, fn (array $a, array $b): int => $scoreFn($b) <=> $scoreFn($a));

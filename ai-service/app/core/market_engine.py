@@ -225,7 +225,10 @@ class MarketEngine:
         for key, probability in markets["totals"].items():
             direction, raw = key.split("_", 1)
             line = float(raw.replace("_", "."))
-            if not (0.12 <= float(probability) <= 0.90):
+            # Exclusion des lignes extrêmes et non rentables (0,5 et 5,5 buts)
+            if line in (0.5, 5.5):
+                continue
+            if not (0.15 <= float(probability) <= 0.82):
                 continue
             self._add(match_id, "total_goals", key, f"{'Plus' if direction == 'over' else 'Moins'} de {_fmt_line(line)} buts",
                       probability, "full", line=line, justification="Somme des cellules au-dessus/en dessous de la ligne.")
@@ -234,7 +237,9 @@ class MarketEngine:
             for key, probability in markets["team_totals"][side].items():
                 direction, raw = key.split("_", 1)
                 line = float(raw.replace("_", "."))
-                if not (0.12 <= float(probability) <= 0.90):
+                if line == 0.5 and float(probability) > 0.80:
+                    continue
+                if not (0.15 <= float(probability) <= 0.82):
                     continue
                 self._add(match_id, "team_total_goals", f"{side}:{key}",
                           f"{team} : {'plus' if direction == 'over' else 'moins'} de {_fmt_line(line)} but",

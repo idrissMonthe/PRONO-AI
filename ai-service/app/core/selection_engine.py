@@ -92,17 +92,51 @@ def reliability_score(
     return round(min(1.0, max(0.0, score)), 4)
 
 
+TRIVIAL_SELECTIONS = {
+    ("total_goals", "under_5_5"),
+    ("total_goals", "over_0_5"),
+    ("total_goals", "under_0_5"),
+    ("total_goals", "over_5_5"),
+    ("total_goals", "under_4_5"),
+}
+
+
+def is_trivial_market(prediction: Dict[str, Any]) -> bool:
+    """Écarte les sélections parasites ou de cote dérisoire (< 1.22).
+
+    Un pari à 95 % (ex: 'Moins de 5,5 buts') a une cote de ~1.04 sans aucune
+    rentabilité. Les pronostics publiés doivent présenter un intérêt de pari réel.
+    """
+    market_id = str(prediction.get("market_id", ""))
+    selection = str(prediction.get("selection", ""))
+    line = prediction.get("line")
+    prob = float(prediction.get("probability", 0.0))
+
+    if (market_id, selection) in TRIVIAL_SELECTIONS:
+        return True
+    if market_id in {"total_goals", "totals"}:
+        if line is not None and (float(line) in (0.5, 5.5) or (float(line) == 4.5 and prob > 0.80)):
+            return True
+    if market_id in {"team_total_goals", "team_totals"}:
+        if line is not None and float(line) == 0.5 and prob > 0.80:
+            return True
+    # Plafond de publication : probabilité > 0.82 correspond à une cote < 1.22
+    if prob > 0.82:
+        return True
+    return False
+
+
 def category_for(prediction: Dict[str, Any]) -> Optional[str]:
     probability = float(prediction.get("probability", 0.0))
     coverage = str(prediction.get("coverage", "none"))
     reliability = float(prediction.get("reliability", 0.0))
     if coverage == "none" or reliability < 0.35:
         return None
-    if probability < 0.15 or probability > 0.97:
+    if probability < 0.15 or is_trivial_market(prediction):
         return None
 
     if (
-        probability >= 0.62
+        0.62 <= probability <= 0.82
         and reliability >= 0.68
         and coverage in {"full", "partial"}
         and str(prediction.get("market_status")) in {"supported", "conditional"}
@@ -114,7 +148,7 @@ def category_for(prediction: Dict[str, Any]) -> Optional[str]:
         return "audacieux"
     # Une probabilité élevée mais une fiabilité moyenne reste visible dans
     # Équilibrés plutôt que d'être promue en « plus sûr ».
-    if probability >= 0.55 and reliability >= 0.45:
+    if 0.50 <= probability <= 0.82 and reliability >= 0.45:
         return "equilibre"
     return None
 
@@ -124,7 +158,10 @@ def _category_score(prediction: Dict[str, Any], category: str) -> float:
     reliability = float(prediction.get("reliability", 0.0))
     uncertainty = float(prediction.get("uncertainty", 0.5))
     if category == "prudent":
-        return 0.55 * probability + 0.35 * reliability - 0.10 * uncertainty
+        # Compromis optimal : forte probabilité (0.65-0.80), haute fiabilité et
+        # incertitude faible, sans favoriser une quasi-certitude à cote nulle.
+        prob_sweet_spot = 1.0 - abs(probability - 0.74)
+        return 0.40 * probability + 0.35 * reliability + 0.15 * prob_sweet_spot - 0.10 * uncertainty
     if category == "equilibre":
         # Compromis : proximité de 60 % et fiabilité, sans récompenser une
         # quasi-certitude sans information.

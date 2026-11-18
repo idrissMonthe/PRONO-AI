@@ -103,19 +103,18 @@ class ExampleTest extends TestCase
         $response->assertSee('Paper Trading', false);
     }
 
-    public function test_laboratory_page_loads(): void
+    public function test_laboratory_page_redirects(): void
     {
         $response = $this->get('/laboratory');
-        $response->assertStatus(200);
-        $response->assertSee('Banc d\'essai', false);
+        $response->assertStatus(302);
+        $response->assertRedirect('/');
     }
 
     public function test_backtest_does_not_persist_fabricated_metrics(): void
     {
         $this->withoutMiddleware()
             ->post('/laboratory/run-backtest')
-            ->assertRedirect('/laboratory')
-            ->assertSessionHas('error');
+            ->assertRedirect('/');
 
         $this->assertDatabaseCount('backtest_runs', 0);
     }
@@ -127,8 +126,7 @@ class ExampleTest extends TestCase
 
         $this->withoutMiddleware()
             ->post('/laboratory/promote', ['target_version_id' => $candidate->id])
-            ->assertRedirect('/laboratory')
-            ->assertSessionHas('error');
+            ->assertRedirect('/');
 
         $this->assertSame('champion', $champion->fresh()->status);
         $this->assertSame('candidate', $candidate->fresh()->status);
