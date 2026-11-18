@@ -35,6 +35,12 @@ class PredictionHistoryService
     /** Nombre de snapshots conservés par génération (borne la taille des lots). */
     private const MAX_SNAPSHOTS_PER_RUN = 40;
 
+    /** Catégorie du pronostic officiellement publié (hors grille de risque). */
+    public const CATEGORY_PUBLISHED = 'published';
+
+    /** Catégories de risque produites par le moteur Python. */
+    public const RISK_CATEGORIES = ['safe', 'balanced', 'bold'];
+
     /**
      * Enregistre la prédiction officielle publiée d'une rencontre.
      *
@@ -156,11 +162,16 @@ class PredictionHistoryService
     private function publishedEntries(Prediction $prediction, string $market, string $selection, float $probability): array
     {
         $markets = (array) ($prediction->derived_markets_json ?? []);
+        // Le pronostic officiellement publié n'appartient pas forcément à l'une
+        // des trois catégories de risque : il reçoit sa propre catégorie
+        // explicite. Sans elle, la ventilation publiée/plus sûrs/équilibrés/
+        // audacieux ne se réconcilie pas avec le total des snapshots.
         $entries = [[
             'market_key' => $market,
             'market_group' => app(PredictionRevisionService::class)->marketFamily($market, $selection),
             'selection' => $selection,
             'probability' => $probability,
+            'category' => self::CATEGORY_PUBLISHED,
             'line' => $prediction->published_line,
             'odds' => isset($prediction->market_metrics_json['published_odds'])
                 ? (float) $prediction->market_metrics_json['published_odds']
@@ -516,7 +527,18 @@ class PredictionHistoryService
             'overall' => $summarize($rows) + $totals,
             'snapshots' => $rows->count(),
             'by_market' => $rows->groupBy('market_group')->map(fn (Collection $group) => $summarize($group))->all(),
-            'by_category' => $rows->groupBy(fn ($row) => $row->category ?? 'unspecified')->map(fn (Collection $group) => $summarize($group))->all(),
+            // Les snapshots historiques antérieurs à la catégorisation explicite
+            // ont une catégorie NULL : ce sont les pronostics publiés, jamais
+            // des lignes perdues. On les relit comme tels, sans réécrire les
+            // données, pour que la ventilation se réconcilie avec le total.
+            'by_category' => $rows
+                ->groupBy(fn ($row) => $row->category ?: self::CATEGORY_PUBLISHED)
+                ->map(fn (Collection $group) => $summarize($group))
+                ->all(),
+            'category_counts' => $rows
+                ->groupBy(fn ($row) => $row->category ?: self::CATEGORY_PUBLISHED)
+                ->map(fn (Collection $group) => $group->count())
+                ->all(),
             'by_model' => $rows->groupBy(fn ($row) => $row->model_version ?? 'unknown')->map(fn (Collection $group) => $summarize($group))->all(),
         ];
     }

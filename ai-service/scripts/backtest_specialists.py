@@ -228,6 +228,10 @@ def main() -> int:
                 "oa": float(row["oa"]),
                 "actual": actual,
                 "league": row.get("league") or "unknown",
+                # Trace du pli et de la date : indispensable pour décomposer un
+                # ROI sans réentraîner ni mélanger les périodes de test.
+                "date": row["date"],
+                "fold": folds,
             })
 
     corner_results = {
@@ -307,8 +311,15 @@ def main() -> int:
         "one_n_two": one_n_two_result,
     }
 
+    # Export des sélections individuelles : la décomposition du ROI (par
+    # compétition, plage de probabilité, cote, type de sélection) doit être
+    # vérifiable sans relancer le walk-forward.
+    report["one_n_two_picks"] = one_n_two["model"]
+
     with open(args.output_json, "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False)
+
+    report.pop("one_n_two_picks")
 
     with open(args.output_md, "w", encoding="utf-8") as handle:
         handle.write("# Backtest chronologique — marchés spécialisés\n\n")

@@ -72,12 +72,15 @@ class DashboardController extends Controller
         // 2. Combinés du jour automatiques (évalués pour aujourd'hui en Africa/Douala)
         $dailyParlays = $parlayService->getOrGenerateDailyParlays($todayDouala);
 
-        // 3. Prochains matchs à surveiller (uniquement rencontres futures réelles)
+        // 3. Prochaines rencontres réelles (bassin des sélections du jour).
+        // Le bassin ne doit pas être limité à six rencontres : une compétition
+        // dont les six prochains matchs sont tous en attente laisserait la
+        // rubrique vide alors que d'autres rencontres sont exploitables.
         $upcomingMatches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction', 'oddsSnapshots'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
             ->orderBy('match_date_utc', 'asc')
-            ->take(6)
+            ->take(40)
             ->get();
 
         if ($upcomingMatches->isEmpty()) {
@@ -236,11 +239,10 @@ class DashboardController extends Controller
                 continue;
             }
 
-            // Un refus, un manque d'information ou un échec Gemini n'est pas
-            // présenté comme un pronostic validé dans les sélections du jour.
-            if (! PredictionRevisionService::presentsAsValidated($prediction->review_decision)) {
-                continue;
-            }
+            // Python reste souverain : un verdict Gemini défavorable, une
+            // validation en attente ou une indisponibilité technique ne
+            // supprime jamais le pronostic Python. Le verdict accompagne la
+            // sélection sous forme d'indicateur, il ne la remplace pas.
 
             // Les familles étendues (corners, cartons, périodes…) sont
             // classées par le moteur Python. Elles enrichissent les catégories
@@ -393,11 +395,74 @@ class DashboardController extends Controller
                 // la même sélection répétée.
                 ->unique(fn (array $pick) => $pick['match']->id.'|'.($pick['market'] ?? ''))
                 ->take(4)
+                ->map(function (array $pick): array {
+                    $prediction = $pick['match']->officialPrediction ?? null;
+                    $pick['gemini'] = $prediction ? $this->geminiBadge($prediction) : [
+                        'state' => 'not_evaluated',
+                        'label' => 'Non évalué',
+                    ];
+                    $pick['gemini_alternative'] = $prediction ? $this->geminiAlternative($prediction) : null;
+
+                    return $pick;
+                })
                 ->values()
                 ->all();
         }
 
         return $groups;
+    }
+
+    /**
+     * Les trois états de validation Gemini, sans jamais confondre une
+     * indisponibilité technique avec un rejet statistique.
+     *
+     * @return array{state: string, label: string}
+     */
+    private function geminiBadge(Prediction $prediction): array
+    {
+        return match ((string) ($prediction->review_decision ?? '')) {
+            PredictionRevisionService::STATUS_VALIDATED => [
+                'state' => 'validated',
+                'label' => 'Validé par Gemini',
+            ],
+            PredictionRevisionService::STATUS_WITH_ALTERNATIVE,
+            PredictionRevisionService::STATUS_WITHOUT_ALTERNATIVE => [
+                'state' => 'not_validated',
+                'label' => 'Non validé par Gemini',
+            ],
+            // Échec technique, informations insuffisantes, ou revue non
+            // effectuée : ce n'est pas un refus statistique.
+            default => [
+                'state' => 'not_evaluated',
+                'label' => 'Non évalué par Gemini',
+            ],
+        };
+    }
+
+    /**
+     * Proposition alternative de Gemini, lorsqu'elle existe. Elle ne remplace
+     * jamais la sélection Python et ne porte aucune probabilité inventée.
+     *
+     * @return array{label: string, market: string, justification: string, origin: string}|null
+     */
+    private function geminiAlternative(Prediction $prediction): ?array
+    {
+        // Case-insensitive comparison to handle status variants
+        if (strcasecmp((string) $prediction->review_decision, PredictionRevisionService::STATUS_WITH_ALTERNATIVE) !== 0) {
+            return null;
+        }
+
+        $alternative = data_get($prediction->market_metrics_json, 'gemini_review.alternative');
+        if (! is_array($alternative) || empty($alternative['selection'])) {
+            return null;
+        }
+
+        return [
+            'label' => (string) ($alternative['label'] ?? $alternative['selection']),
+            'market' => (string) ($alternative['market'] ?? ''),
+            'justification' => (string) ($alternative['justification'] ?? ''),
+            'origin' => (string) ($alternative['origin'] ?? 'AI_ESTIMATE'),
+        ];
     }
 
     /**
@@ -481,15 +546,42 @@ class DashboardController extends Controller
             '1N2' => ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$selection] ?? null,
             'double_chance' => ['1X' => $home.' ou nul', 'X2' => $away.' ou nul', '12' => 'Pas de match nul'][$selection] ?? null,
             'btts' => ['yes' => 'Les deux équipes marquent', 'no' => 'Au moins une équipe ne marque pas'][$selection] ?? null,
+            'dnb' => ['home' => 'Victoire '.$home.' (Remboursé si nul)', 'away' => 'Victoire '.$away.' (Remboursé si nul)'][$selection] ?? null,
             'team_totals' => preg_match('/^(HOME|AWAY)_(OVER|UNDER)_(\d+(?:\.\d+)?)$/', $selection, $parts)
                 ? (($parts[2] === 'OVER') ? 'Plus de ' : 'Moins de ').str_replace('.', ',', $parts[3]).' buts — '.($parts[1] === 'HOME' ? $home : $away)
                 : null,
             'asian_handicap' => preg_match('/^AH_(HOME|AWAY)_(-?\d+(?:\.\d+)?)$/', $selection, $parts)
                 ? ($parts[1] === 'HOME' ? $home : $away).' handicap '.($parts[2] > 0 ? '+' : '').rtrim(rtrim($parts[2], '0'), '.')
                 : null,
+            'european_handicap' => preg_match('/^EH_(HOME|AWAY|DRAW)_(-?\d+)$/', $selection, $parts)
+                ? match($parts[1]) {
+                    'HOME' => $home.' -'.abs((int)$parts[2]).' (Handicap européen)',
+                    'AWAY' => $away.' -'.abs((int)$parts[2]).' (Handicap européen)',
+                    'DRAW' => 'Nul handicap '.$parts[2],
+                    default => null
+                }
+                : null,
             'exact_score' => 'Score exact '.$selection,
             'totals' => preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts' : null,
+            'half_time_result' => ['home' => 'Mi-temps : '.$home.' mène', 'draw' => 'Mi-temps : égalité', 'away' => 'Mi-temps : '.$away.' mène'][$selection] ?? null,
+            'half_time_totals' => preg_match('/^(over|under)_(\d+)_(\d+)_ht$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].','.$parts[3].' buts (MT)'
+                : (preg_match('/^(over|under)_(\d+(?:_\d+)?)$/', $selection, $parts2)
+                    ? ($parts2[1] === 'over' ? 'Plus de ' : 'Moins de ').str_replace('_', ',', $parts2[2]).' buts (MT)'
+                    : 'MT : '.str_replace('_', ' ', $selection)),
+            'corners' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' corners'
+                : 'Corners : '.str_replace('_', ' ', $selection),
+            'cards' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' cartons'
+                : 'Cartons : '.str_replace('_', ' ', $selection),
+            'shots' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' tirs'
+                : 'Tirs : '.str_replace('_', ' ', $selection),
+            'clean_sheet' => ['home' => $away.' ne marque pas', 'away' => $home.' ne marque pas'][$selection] ?? 'Clean sheet : '.str_replace('_', ' ', $selection),
+            'win_to_nil' => ['home' => $home.' gagne sans encaisser', 'away' => $away.' gagne sans encaisser'][$selection] ?? null,
+            'result_total_combo', 'result_btts_combo' => (string) ($selection),
             default => null,
         };
         if (! $label) return null;
@@ -517,7 +609,25 @@ class DashboardController extends Controller
             'prob' => $probability,
             'odds' => $odds,
             'market' => match ($market) {
-                '1N2' => 'Résultat', 'double_chance' => 'Double chance', 'btts' => 'BTTS', 'totals' => 'Total buts', 'asian_handicap' => 'Handicap', 'team_totals' => 'Total par équipe', 'exact_score' => 'Score exact', default => $market,
+                '1N2'                => 'Résultat',
+                'double_chance'      => 'Double chance',
+                'btts'               => 'BTTS',
+                'totals'             => 'Total buts',
+                'asian_handicap'     => 'Handicap asiatique',
+                'european_handicap'  => 'Handicap européen',
+                'dnb'                => 'Draw No Bet',
+                'team_totals'        => 'Total par équipe',
+                'exact_score'        => 'Score exact',
+                'half_time_result'   => 'Mi-temps 1X2',
+                'half_time_totals'   => 'Total buts MT',
+                'corners'            => 'Corners',
+                'cards'              => 'Cartons',
+                'shots'              => 'Tirs',
+                'clean_sheet'        => 'Clean sheet',
+                'win_to_nil'         => 'Win to nil',
+                'result_total_combo' => 'Résultat + Buts',
+                'result_btts_combo'  => 'Résultat + BTTS',
+                default              => $market,
             },
         ];
     }

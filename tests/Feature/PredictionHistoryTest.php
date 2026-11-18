@@ -224,4 +224,53 @@ class PredictionHistoryTest extends TestCase
         $this->assertSame(1, $report['overall']['pending']);
         $this->assertEqualsWithDelta(0.04, $report['overall']['brier'], 1e-6);
     }
+
+    /**
+     * La ventilation par catégorie doit toujours se réconcilier avec le total
+     * des snapshots : le pronostic publié est une catégorie à part entière,
+     * pas une ligne non classée.
+     */
+    public function test_category_breakdown_reconciles_with_the_snapshot_total(): void
+    {
+        $match = $this->match();
+        $prediction = $this->prediction($match, 'home', 0.55, [
+            'derived_markets_json' => [
+                'market_categories' => [
+                    'prudent' => [['market_id' => 'double_chance', 'selection' => '1X', 'probability' => 0.78, 'coverage' => 'covered']],
+                    'equilibre' => [['market_id' => 'btts', 'selection' => 'yes', 'probability' => 0.58, 'coverage' => 'covered']],
+                    'audacieux' => [['market_id' => 'totals', 'selection' => 'over_2_5', 'probability' => 0.41, 'coverage' => 'covered']],
+                ],
+            ],
+        ]);
+
+        app(PredictionHistoryService::class)->recordPrediction($match, $prediction);
+
+        $total = PredictionSnapshot::where('match_id', $match->id)->count();
+        $report = app(PredictionHistoryService::class)->performance();
+        $counts = $report['category_counts'];
+
+        $this->assertSame(4, $total, 'Un snapshot publié et trois catégories de risque.');
+        $this->assertSame(1, $counts[PredictionHistoryService::CATEGORY_PUBLISHED] ?? null);
+        $this->assertSame(1, $counts['safe'] ?? null);
+        $this->assertSame(1, $counts['balanced'] ?? null);
+        $this->assertSame(1, $counts['bold'] ?? null);
+        $this->assertSame($report['snapshots'], array_sum($counts));
+    }
+
+    /**
+     * Les lignes historiques sans catégorie sont relues comme des pronostics
+     * publiés : aucune donnée n'est réécrite pour faire coïncider les chiffres.
+     */
+    public function test_legacy_null_category_is_reported_as_published(): void
+    {
+        $match = $this->match();
+        app(PredictionHistoryService::class)->recordPrediction($match, $this->prediction($match, 'home', 0.55));
+
+        PredictionSnapshot::where('match_id', $match->id)->update(['category' => null]);
+
+        $report = app(PredictionHistoryService::class)->performance();
+
+        $this->assertSame(1, $report['category_counts'][PredictionHistoryService::CATEGORY_PUBLISHED] ?? null);
+        $this->assertArrayNotHasKey('unspecified', $report['category_counts']);
+    }
 }

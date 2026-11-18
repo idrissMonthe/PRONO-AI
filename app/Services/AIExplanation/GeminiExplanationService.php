@@ -476,36 +476,37 @@ class GeminiExplanationService
         if (! $this->isConfigured()) return $fallback;
 
         $systemInstruction = implode("\n", [
-            "Tu es un réviseur critique de pronostics football.",
+            "Tu es un réviseur critique indépendant de pronostics football.",
             "Tu ne calcules aucune probabilité et tu n'en inventes jamais.",
-            "Les candidats peuvent couvrir le 1N2, la double chance 1X, X2 et 12, les totaux 0,5 à 4,5, les buts par équipe, le BTTS Oui et le BTTS Non, ainsi que les lignes asiatiques avec remboursement. Le 12 n'est pas un Draw No Bet.",
-            "Le BTTS Non n'est pas un pronostic sûr par nature. Traite-le comme les autres marchés.",
-            "Le pronostic Python initial reste conservé quoi que tu décides. Tu ne le remplaces pas.",
-            "Tu n'es pas obligé de valider ce pronostic, ni de proposer une alternative.",
-            "Si tu proposes une alternative, candidate_key doit être une clé présente dans candidates, ou bien market et selection doivent décrire un marché réel. N'invente pas de probabilité.",
-            "value_analysis vaut true seulement si tu compares le pronostic à une cote bookmaker réelle présente dans les candidates.",
+            "Le pronostic Python initial reste conservé quoi que tu décides : tu ne le remplaces JAMAIS.",
+            "RÈGLES D'ÉVALUATION :",
+            "1. decision : 'validated' | 'not_validated' | 'insufficient_information'.",
+            "2. 'validated' : tu valides le pronostic Python car les statistiques fournies le soutiennent fermement.",
+            "3. 'not_validated' : tu ne valides pas le pronostic Python car il présente des risques excessifs ou injustifiés.",
+            "4. OBLIGATION D'ALTERNATIVE EN CAS DE NON VALIDATION :",
+            "   Si ta décision est 'not_validated', tu DOIS examiner attentivement la liste des candidates fournies et proposer un pronostic alternatif mieux justifié (par exemple : double chance au lieu de victoire sèche, over 1.5 au lieu de over 2.5, BTTS, DNB, total buts, etc.).",
+            "   Tu renseignes 'candidate_key' avec la clé exacte issue de candidates, ou 'alternative_market' et 'alternative_selection' décrivant un marché réel.",
+            "   Tu fournis 'alternative_reason' expliquant clairement pourquoi cette alternative est préférable au pronostic initial.",
+            "   Si et seulement si ABSOLUMENT AUCUNE alternative n'est raisonnablement justifiable, tu laisses candidate_key null et expliques pourquoi dans 'reasoning'. L'absence d'alternative ne doit pas être systématique.",
+            "5. 'insufficient_information' : les données ne permettent pas de trancher rigoureusement.",
             "Réponds UNIQUEMENT avec un objet JSON valide.",
-            "decision : validated | not_validated | insufficient_information.",
-            "validated : le pronostic Python est cohérent avec les données fournies.",
-            "not_validated : tu ne valides pas le pronostic. candidate_key peut être null si tu n'as pas d'alternative suffisamment justifiée.",
-            "insufficient_information : les données ne permettent pas de trancher. Ce n'est pas une validation.",
-            "Champs : decision, candidate_key (clé existante ou null), reasoning (français, court), supporting_factors (tableau), risk_factors (tableau), confidence_in_revision (low|medium|high), value_analysis (booléen).",
+            "Champs obligatoires : decision, candidate_key (clé existante ou null), alternative_market (string ou null), alternative_selection (string ou null), alternative_reason (string ou null), reasoning (français, concis), supporting_factors (array), risk_factors (array), confidence_in_revision (low|medium|high), value_analysis (booléen).",
         ]);
 
         $prompt = "DOCUMENT STATISTIQUE DU MATCH (Source de vérité) :\n"
             . "Rencontre : " . ($context['home_team'] ?? 'Domicile') . " vs " . ($context['away_team'] ?? 'Extérieur') . "\n"
             . "Espérance de buts (xG Dixon-Coles) : Domicile = " . ($context['python_result']['expected_goals']['home'] ?? 'N/A') . ", Extérieur = " . ($context['python_result']['expected_goals']['away'] ?? 'N/A') . "\n"
             . "Sélection initiale proposée par Python : " . json_encode($context['initial_candidate'] ?? [], JSON_UNESCAPED_UNICODE) . "\n\n"
-            . "CANDIDATES DISPONIBLES (marchés calculés par Python, avec cotes lorsqu'elles existent) :\n"
+            . "CANDIDATS DISPONIBLES (marchés calculés par Python, avec cotes lorsqu'elles existent) :\n"
             . json_encode($context['candidates'] ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n\n"
-            . "Consigne : examine la cohérence du pronostic Python. Valide-le, refuse-le, ou indique que l'information est insuffisante. Une alternative est facultative.";
+            . "Consigne : Examine la proposition Python. Si tu réponds 'not_validated', sélectionne obligatoirement la meilleure alternative parmi les candidats et justifie-la.";
         $contextHash = hash('sha256', json_encode($context));
         $apiKey = $this->getApiKey();
         $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
 
         foreach ($modelsToTry as $currentModel) {
             try {
-                $response = Http::timeout(12)
+                $response = Http::timeout(25)
                     ->withHeaders(['Content-Type' => 'application/json', 'x-goog-api-key' => $apiKey])
                     ->post("https://generativelanguage.googleapis.com/v1beta/models/{$currentModel}:generateContent", [
                         'contents' => [['role' => 'user', 'parts' => [['text' => $prompt]]]],
@@ -536,6 +537,7 @@ class GeminiExplanationService
                     'candidate_key' => $candidateKey,
                     'alternative_market' => is_string($decoded['alternative_market'] ?? null) ? $decoded['alternative_market'] : null,
                     'alternative_selection' => is_string($decoded['alternative_selection'] ?? null) ? $decoded['alternative_selection'] : null,
+                    'alternative_reason' => is_string($decoded['alternative_reason'] ?? $decoded['justification'] ?? null) ? substr($decoded['alternative_reason'] ?? $decoded['justification'], 0, 2000) : null,
                     'reasoning' => is_string($decoded['reasoning'] ?? null) ? substr($decoded['reasoning'], 0, 2000) : '',
                     'supporting_factors' => array_values(array_filter((array) ($decoded['supporting_factors'] ?? []), 'is_string')),
                     'risk_factors' => array_values(array_filter((array) ($decoded['risk_factors'] ?? []), 'is_string')),
@@ -559,8 +561,8 @@ class GeminiExplanationService
                 ]);
 
                 return $normalized;
-            } catch (Exception $exception) {
-                Log::warning('Gemini prediction review failed.', ['model' => $currentModel, 'exception' => $exception::class]);
+            } catch (\Throwable $exception) {
+                Log::warning('Gemini prediction review failed.', ['model' => $currentModel, 'exception' => $exception::class, 'message' => $exception->getMessage()]);
             }
         }
 

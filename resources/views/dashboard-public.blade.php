@@ -208,13 +208,53 @@
                                 <a href="{{ route('matches.show', $match->id) }}" onclick="openMatchModal({{ $match->id }}); return false;" class="pick-card">
                                     <div class="pick-card-top"><span>{{ $match->league->name ?? 'Football' }}</span><span>{{ $match->match_date_utc->timezone('Africa/Douala')->format('d M · H:i') }}</span></div>
                                     <div class="teams"><strong>{{ $match->homeTeam->name }}</strong><span>vs</span><strong>{{ $match->awayTeam->name }}</strong></div>
-                                    <div class="pick-verdict">
-                                        <span class="lock-dot"></span>
-                                        <strong>{{ $pick['label'] }}</strong>
-                                        @if(!empty($pick['odds']))
-                                            <span class="mono text-xs font-bold text-[#C3A16A] px-2 py-0.5 rounded bg-[#C3A16A]/10 border border-[#C3A16A]/30">@ {{ number_format($pick['odds'], 2) }}</span>
+                                    <!-- Bloc Pronostic Python -->
+                                    <div class="space-y-1 pt-1">
+                                        <div class="flex items-center justify-between gap-1.5">
+                                            <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider mono bg-[#88B69A]/15 text-[#88B69A] border border-[#88B69A]/30">Pronostic Python</span>
+                                            @if(!empty($pick['odds']))
+                                                <span class="mono text-xs font-bold text-[#C3A16A]">@ {{ number_format($pick['odds'], 2) }}</span>
+                                            @endif
+                                        </div>
+                                        <div class="pick-verdict">
+                                            <span class="lock-dot"></span>
+                                            <strong>{{ $pick['label'] }}</strong>
+                                            <span class="pick-prob">{{ round($pick['prob'] * 100) }}%</span>
+                                        </div>
+                                    </div>
+
+                                    <!-- Bloc Verdict et Alternative Gemini -->
+                                    @php $badge = $pick['gemini'] ?? ['state' => 'not_evaluated', 'label' => 'Non évalué par Gemini']; @endphp
+                                    <div class="pt-2 border-t border-[#303A32]/40 space-y-1.5 text-xs">
+                                        <div class="flex items-center justify-between gap-1.5">
+                                            <span class="text-[10px] uppercase font-semibold text-[#A2ACA3] mono">Verdict Gemini :</span>
+                                            <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider mono {{ $badge['state'] === 'validated' ? 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40' : ($badge['state'] === 'not_validated' ? 'bg-[#D68D86]/20 text-[#D68D86] border border-[#D68D86]/40' : 'bg-[#A2ACA3]/15 text-[#A2ACA3] border border-[#A2ACA3]/30') }}">
+                                                {{ $badge['state'] === 'validated' ? 'VALIDÉ' : ($badge['state'] === 'not_validated' ? 'NON VALIDÉ' : 'NON ÉVALUÉ') }}
+                                            </span>
+                                        </div>
+
+                                        @if(!empty($pick['gemini_alternative']))
+                                            <div class="p-2 rounded bg-[#101513] border border-[#C3A16A]/30 space-y-1">
+                                                <div class="flex items-center justify-between gap-1">
+                                                    <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider mono bg-[#C3A16A]/20 text-[#C3A16A] border border-[#C3A16A]/40">Alternative Gemini</span>
+                                                    @if(!empty($pick['gemini_alternative']['probability']))
+                                                        <span class="mono text-[10px] text-[#C3A16A] font-bold">{{ round($pick['gemini_alternative']['probability'] * 100) }}%</span>
+                                                    @endif
+                                                </div>
+                                                <div class="text-[11px] font-bold text-[#F0F0E8]">
+                                                    {{ $pick['gemini_alternative']['label'] }}
+                                                </div>
+                                                @if(!empty($pick['gemini_alternative']['justification']))
+                                                    <p class="text-[10px] text-[#A2ACA3] leading-tight italic">
+                                                        Justification : {{ $pick['gemini_alternative']['justification'] }}
+                                                    </p>
+                                                @endif
+                                            </div>
+                                        @elseif(!empty($pick['gemini_reason']) && $badge['state'] === 'not_validated')
+                                            <p class="text-[10px] text-[#A2ACA3] italic leading-tight">
+                                                Justification : {{ $pick['gemini_reason'] }}
+                                            </p>
                                         @endif
-                                        <span class="pick-prob">{{ round($pick['prob'] * 100) }}%</span>
                                     </div>
                                     <div class="pick-footer"><span class="reliability">{{ $pick['source'] }} · {{ $pick['market'] }}</span><span class="score-pill">{{ $group['title'] }}</span></div>
                                 </a>
@@ -259,7 +299,7 @@
     <section class="section-block big-parlay-section">
         <div class="section-heading">
             <div><span class="eyebrow">SÉLECTION ÉLARGIE</span><h2>Gros combinés</h2><p>Une sélection de 10 matchs réels quand les données le permettent, diversifiée entre championnats et marchés. Une prédiction à fiabilité limitée est signalée, jamais masquée.</p></div>
-            <span class="big-parlay-meta">{{ $bigParlayPickCount }} sélections · {{ $bigParlayStatus['validated_predictions'] }}/{{ $bigParlayStatus['future_matches'] }} matchs validés</span>
+            <span class="big-parlay-meta">{{ $bigParlayPickCount }} sélections · {{ $bigParlayStatus['validated_predictions'] }}/{{ $bigParlayStatus['future_matches'] }} matchs exploitables</span>
         </div>
 
         @foreach($bigParlayGroups as $risk => $group)

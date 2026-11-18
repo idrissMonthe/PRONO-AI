@@ -109,4 +109,65 @@ class Prediction extends Model
     {
         return $this->hasOne(PredictionRevision::class, 'initial_prediction_id');
     }
+
+    /**
+     * Contrat de données multimarchés et révision Gemini.
+     */
+    public function getPythonPredictionAttribute(): ?array
+    {
+        if (! $this->published_market || ! $this->published_selection) {
+            return null;
+        }
+
+        $storedPython = data_get($this->market_metrics_json, 'gemini_review.python');
+        $label = $storedPython['label'] ?? ($this->published_market . ' ' . $this->published_selection);
+
+        return [
+            'market' => $this->published_market,
+            'selection' => $this->published_selection,
+            'line' => $this->published_line !== null ? (float) $this->published_line : null,
+            'probability' => $this->published_probability !== null ? (float) $this->published_probability : null,
+            'label' => $label,
+            'odds' => isset($this->market_metrics_json['published_odds']) ? (float) $this->market_metrics_json['published_odds'] : null,
+            'odds_source' => $this->market_metrics_json['published_odds_source'] ?? null,
+            'origin' => 'PYTHON',
+        ];
+    }
+
+    public function getGeminiReviewStatusAttribute(): string
+    {
+        $status = data_get($this->market_metrics_json, 'gemini_review.status')
+            ?: $this->review_decision;
+
+        return (string) ($status ?: 'not_evaluated');
+    }
+
+    public function getGeminiReasonAttribute(): ?string
+    {
+        return data_get($this->market_metrics_json, 'gemini_review.explanation')
+            ?: data_get($this->ai_estimate_json, 'justification');
+    }
+
+    public function getGeminiAlternativeMarketAttribute(): ?string
+    {
+        return data_get($this->market_metrics_json, 'gemini_review.alternative.market')
+            ?: data_get($this->ai_estimate_json, 'market');
+    }
+
+    public function getGeminiAlternativeSelectionAttribute(): ?string
+    {
+        return data_get($this->market_metrics_json, 'gemini_review.alternative.selection')
+            ?: data_get($this->ai_estimate_json, 'selection');
+    }
+
+    public function getGeminiAlternativeReasonAttribute(): ?string
+    {
+        return data_get($this->market_metrics_json, 'gemini_review.alternative.justification')
+            ?: data_get($this->ai_estimate_json, 'justification');
+    }
+
+    public function getGeminiEvaluatedAtAttribute(): ?\Carbon\Carbon
+    {
+        return $this->reviewed_at_utc;
+    }
 }

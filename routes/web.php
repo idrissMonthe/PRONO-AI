@@ -4,7 +4,6 @@ use App\Http\Controllers\ComparatorController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DataManagementController;
 use App\Http\Controllers\GeminiController;
-use App\Http\Controllers\LaboratoryController;
 use App\Http\Controllers\MatchController;
 use App\Http\Controllers\OddsMarketController;
 use App\Http\Controllers\ParlayController;
@@ -44,11 +43,11 @@ Route::prefix('parlays')->name('parlays.')->group(function () {
     Route::get('/{id}', [ParlayController::class, 'show'])->name('show');
 });
 
-// 6. Evaluation Laboratory & Model Registry
+// 6. Evaluation Laboratory — désactivé, redirigé vers le tableau de bord
 Route::prefix('laboratory')->name('laboratory.')->group(function () {
-    Route::get('/', [LaboratoryController::class, 'index'])->name('index');
-    Route::post('/run-backtest', [LaboratoryController::class, 'runBacktest'])->middleware('throttle:heavy')->name('run-backtest');
-    Route::post('/promote', [LaboratoryController::class, 'promoteModel'])->middleware('throttle:writes')->name('promote');
+    Route::get('/', fn () => redirect()->route('dashboard'))->name('index');
+    Route::post('/run-backtest', fn () => redirect()->route('dashboard'))->name('run-backtest');
+    Route::post('/promote', fn () => redirect()->route('dashboard'))->name('promote');
 });
 
 // 6. Data Management & Entity Resolution

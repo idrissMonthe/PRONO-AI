@@ -347,7 +347,7 @@ class GeneratePredictionsCommand extends Command
                         'prediction_stage' => 'final',
                         'prediction_origin' => $finalOrigin,
                         'source_model' => $result['model']['version'] ?? 'python',
-                        'ai_estimate_json' => ($alternative['origin'] ?? null) === 'AI_ESTIMATE' ? $alternative : null,
+                        'ai_estimate_json' => is_array($alternative) ? $alternative : null,
                         'missing_data_json' => array_values(array_unique(array_merge($quality['missing'] ?? [], $review['missing_data'] ?? []))),
                         'uncertainty_tier' => $review['confidence_in_revision'] ?? ($result['confidence_tier'] ?? 'low'),
                         'supersedes_id' => $initialPrediction->id,

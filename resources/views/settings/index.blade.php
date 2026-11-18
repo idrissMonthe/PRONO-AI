@@ -178,9 +178,6 @@
                 <a href="{{ route('data.index') }}" class="px-3 py-1.5 rounded bg-[#222B25] border border-[#303A32] hover:border-[#C3A16A] text-[#F0F0E8] mono text-[11px] transition-colors">
                     Données & Alias
                 </a>
-                <a href="{{ route('laboratory.index') }}" class="px-3 py-1.5 rounded bg-[#222B25] border border-[#303A32] hover:border-[#C3A16A] text-[#F0F0E8] mono text-[11px] transition-colors">
-                    Laboratoire M0-M7
-                </a>
             </div>
         </div>
     </div>

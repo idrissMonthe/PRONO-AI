@@ -186,12 +186,13 @@ class PredictionRevisionService
 
     public static function statusLabel(?string $status): string
     {
-        return match ($status) {
-            self::STATUS_VALIDATED => 'Validé',
-            self::STATUS_WITH_ALTERNATIVE, self::STATUS_WITHOUT_ALTERNATIVE => 'Non validé',
-            self::STATUS_INSUFFICIENT => 'Informations insuffisantes',
-            self::STATUS_FAILED => 'Échec de l’analyse',
-            default => 'Validation non effectuée',
+        return match (strtoupper((string) $status)) {
+            self::STATUS_VALIDATED, 'VALIDATED' => 'Validé par Gemini',
+            self::STATUS_WITH_ALTERNATIVE, 'NOT_VALIDATED_WITH_ALTERNATIVE' => 'Non validé par Gemini (alternative proposée)',
+            self::STATUS_WITHOUT_ALTERNATIVE, 'NOT_VALIDATED_WITHOUT_ALTERNATIVE', 'NOT_VALIDATED' => 'Non validé par Gemini',
+            self::STATUS_INSUFFICIENT, 'INSUFFICIENT_INFORMATION', 'INSUFFICIENT_DATA' => 'Non évalué par Gemini (informations insuffisantes)',
+            self::STATUS_FAILED, 'FAILED', 'REVIEW_FAILED' => 'Non évalué par Gemini (service indisponible)',
+            default => 'Non évalué par Gemini',
         };
     }
 
@@ -265,18 +266,43 @@ class PredictionRevisionService
         }
 
         $stored = data_get($prediction->market_metrics_json, 'gemini_review');
+        if (! is_array($stored) || ! isset($stored['status'])) {
+            return null;
+        }
 
-        return is_array($stored) && isset($stored['status']) ? $stored : null;
+        // Le libellé est toujours dérivé du statut, jamais lu tel quel : les
+        // revues historiques conservent leur statut mais adoptent le
+        // vocabulaire courant (validé / non validé / non évalué).
+        $stored['status_label'] = self::statusLabel($stored['status']);
+
+        return $stored;
     }
 
     public function candidatesFromResult(array $result, array $oddsContext = []): array
     {
         $markets = $result['markets'] ?? [];
+        $seenKeys = [];
         $candidates = [];
-        $add = function (string $market, string $selection, string $label, $probability, ?float $line = null, ?float $odds = null) use (&$candidates): void {
+        $add = function (
+            string $market,
+            string $selection,
+            string $label,
+            $probability,
+            ?float $line = null,
+            ?float $odds = null,
+            ?string $family = null,
+            ?float $reliability = null,
+            ?string $coverage = 'full'
+        ) use (&$candidates, &$seenKeys): void {
             if (! is_numeric($probability)) return;
             $probability = (float) $probability;
             if ($probability <= 0 || $probability >= 1) return;
+
+            $key = $market.':'.$selection.($line !== null ? ':'.$line : '');
+            if (isset($seenKeys[$key])) {
+                return;
+            }
+            $seenKeys[$key] = true;
 
             // Cote réelle si fournie, sinon estimation explicite (marquée
             // comme telle : elle ne sera jamais affichée comme un prix bookmaker).
@@ -286,17 +312,15 @@ class PredictionRevisionService
                 $odds = round(max(1.02, (1.0 / $probability) * 0.94), 2);
             } else {
                 $odds = round($odds, 2);
-            }
-
-            // Garde-fou : quand le modèle et le bookmaker divergent fortement
-            // (ex. 91 % face à une cote de 2,04), la sélection est écartée
-            // plutôt que publiée comme une certitude.
-            if ($isBookmakerOdds && abs($probability - (1.0 / $odds)) > 0.22) {
-                return;
+                // Désaccord trop fort entre le modèle et le marché : candidat
+                // écarté plutôt que publié comme une certitude.
+                if (abs($probability - (1.0 / $odds)) > 0.22) {
+                    return;
+                }
             }
 
             $candidates[] = [
-                'candidate_key' => $market.':'.$selection.($line !== null ? ':'.$line : ''),
+                'candidate_key' => $key,
                 'market' => $market,
                 'selection' => $selection,
                 'label' => $label,
@@ -305,10 +329,32 @@ class PredictionRevisionService
                 'odds' => $odds,
                 'odds_source' => $isBookmakerOdds ? 'bookmaker' : 'estimated',
                 'expected_value' => $isBookmakerOdds ? round(($probability * $odds) - 1.0, 4) : null,
+                'family' => $family ?: $this->marketFamily($market, $selection),
+                'reliability' => $reliability !== null ? round((float) $reliability, 4) : 0.65,
+                'coverage' => $coverage ?: 'full',
                 'calibration_status' => 'insufficient_sample',
                 'high_confidence' => false,
             ];
         };
+
+        // 0. Marchés étendus issus du moteur Python (MarketEngine : 86 marchés)
+        if (! empty($result['market_predictions']) && is_array($result['market_predictions'])) {
+            foreach ($result['market_predictions'] as $pred) {
+                if (! is_array($pred) || empty($pred['market_id']) || empty($pred['selection'])) {
+                    continue;
+                }
+                $mId = (string) $pred['market_id'];
+                $sel = (string) $pred['selection'];
+                $prob = $pred['probability'] ?? null;
+                $line = isset($pred['line']) && is_numeric($pred['line']) ? (float) $pred['line'] : null;
+                $pLabel = (string) ($pred['selection_label'] ?? $pred['market_name'] ?? $sel);
+                $rel = isset($pred['reliability']) ? (float) $pred['reliability'] : null;
+                $cov = isset($pred['coverage']) ? (string) $pred['coverage'] : 'full';
+                $fam = isset($pred['family']) ? (string) $pred['family'] : null;
+
+                $add($mId, $sel, $pLabel, $prob, $line, null, $fam, $rel, $cov);
+            }
+        }
 
         // 1N2
         foreach (['home' => 'Victoire domicile', 'draw' => 'Match nul', 'away' => 'Victoire extérieur'] as $key => $label) {
@@ -527,32 +573,46 @@ class PredictionRevisionService
             return null;
         }
 
-        $floor = (float) config('services.hybrid_prediction.publish_probability_floor', 0.55);
-        $ceiling = (float) config('services.hybrid_prediction.publish_probability_ceiling', 0.85);
+        $floor = (float) config('services.hybrid_prediction.publish_probability_floor', 0.50);
+        $ceiling = (float) config('services.hybrid_prediction.publish_probability_ceiling', 0.88);
         $inBand = array_values(array_filter(
             $candidates,
-            fn (array $candidate): bool => (float) $candidate['probability'] >= $floor
-                && (float) $candidate['probability'] <= $ceiling
+            fn (array $c): bool => (float) $c['probability'] >= $floor
+                && (float) $c['probability'] <= $ceiling
         ));
         $aboveFloor = array_values(array_filter(
             $candidates,
-            fn (array $candidate): bool => (float) $candidate['probability'] >= $floor
+            fn (array $c): bool => (float) $c['probability'] >= $floor
         ));
         $pool = $inBand !== [] ? $inBand : ($aboveFloor !== [] ? $aboveFloor : $candidates);
 
-        $valued = array_values(array_filter(
-            $pool,
-            fn (array $candidate): bool => ($candidate['odds_source'] ?? null) === 'bookmaker'
-                && is_numeric($candidate['expected_value'] ?? null)
-                && (float) $candidate['expected_value'] > 0
-        ));
-        if ($valued !== []) {
-            usort($valued, fn (array $left, array $right): int => ((float) $right['expected_value']) <=> ((float) $left['expected_value']));
+        // Score multi-critères statistique équitable :
+        // 1. Probabilité calibrée (45%)
+        // 2. Fiabilité de la famille (35%)
+        // 3. Couverture des données (15%)
+        // 4. Bonus d'espérance mathématique si cote bookmaker réelle disponible (+EV)
+        $scoreFn = function (array $c): float {
+            $prob = (float) $c['probability'];
+            $rel = (float) ($c['reliability'] ?? 0.65);
+            $cov = match ($c['coverage'] ?? 'full') {
+                'full' => 1.0,
+                'partial' => 0.75,
+                'thin' => 0.40,
+                default => 0.70,
+            };
 
-            return $this->withReliability($valued[0]);
-        }
+            $evBonus = 0.0;
+            if (($c['odds_source'] ?? '') === 'bookmaker' && is_numeric($c['expected_value'] ?? null)) {
+                $ev = (float) $c['expected_value'];
+                if ($ev > 0) {
+                    $evBonus = min(0.10, $ev * 0.35);
+                }
+            }
 
-        usort($pool, fn (array $left, array $right): int => ((float) $right['probability']) <=> ((float) $left['probability']));
+            return (0.45 * $prob) + (0.35 * $rel) + (0.15 * $cov) + $evBonus;
+        };
+
+        usort($pool, fn (array $a, array $b): int => $scoreFn($b) <=> $scoreFn($a));
 
         return $this->withReliability($pool[0]);
     }
@@ -700,6 +760,11 @@ class PredictionRevisionService
             return null;
         }
 
+        $justification = (string) ($review['alternative_reason']
+            ?? $review['justification']
+            ?? $review['reasoning']
+            ?? '');
+
         return [
             'candidate_key' => $key,
             'market' => $market,
@@ -708,7 +773,7 @@ class PredictionRevisionService
             'label' => $review['label'] ?? null,
             'probability' => $review['alternative_probability'] ?? null,
             'value_analysis' => (bool) ($review['value_analysis'] ?? false),
-            'justification' => $review['reasoning'] ?? '',
+            'justification' => $justification,
             'risk_factors' => $review['risk_factors'] ?? [],
         ];
     }
@@ -738,7 +803,7 @@ class PredictionRevisionService
             return null;
         }
 
-        $justification = (string) ($proposal['justification'] ?? $proposal['reasoning'] ?? '');
+        $justification = (string) ($proposal['justification'] ?? $proposal['alternative_reason'] ?? $proposal['reasoning'] ?? '');
         $risks = array_values(array_filter((array) ($proposal['risk_factors'] ?? $proposal['risks'] ?? []), 'is_string'));
         $valueRequested = (bool) ($proposal['value_analysis'] ?? false);
 
@@ -757,8 +822,8 @@ class PredictionRevisionService
                 'probability' => $matched['probability'],
                 'origin' => 'PYTHON',
                 'ai_probability' => null,
-                'odds' => $bookmaker ? $matched['odds'] : null,
-                'odds_source' => $bookmaker ? 'bookmaker' : null,
+                'odds' => $matched['odds'] ?? null,
+                'odds_source' => $matched['odds_source'] ?? null,
                 'justification' => $justification,
                 'risks' => array_values(array_unique($risks)),
                 'technically_valid' => ! ($valueRequested && ! $bookmaker),
@@ -803,13 +868,18 @@ class PredictionRevisionService
         }
 
         return match ($market) {
-            '1N2' => in_array($selection, ['home', 'draw', 'away'], true),
+            '1N2', '1x2', 'half_time_result', 'ht_1x2' => in_array($selection, ['home', 'draw', 'away'], true),
             'double_chance' => in_array($selection, ['1X', 'X2', '12'], true),
-            'btts' => in_array($selection, ['yes', 'no'], true),
-            'dnb' => in_array($selection, ['home', 'away'], true),
-            'totals', 'asian_totals' => (bool) preg_match('/^(over|under)_\d+_\d+$/', $selection),
-            'team_totals', 'asian_team_totals' => (bool) preg_match('/^(home|away)_(OVER|UNDER)_\d+(?:\.\d+)?$/', $selection),
-            'asian_handicap' => (bool) preg_match('/^AH_(HOME|AWAY)_-?\d+(?:\.\d+)?$/', $selection),
+            'btts', 'both_teams_to_score', 'half_time_btts' => in_array($selection, ['yes', 'no'], true),
+            'dnb', 'draw_no_bet' => in_array($selection, ['home', 'away'], true),
+            'clean_sheet', 'win_to_nil' => in_array($selection, ['home', 'away'], true),
+            'totals', 'over_under', 'asian_totals', 'half_time_totals' => (bool) preg_match('/^(over|under)(?:_\d+_\d+|:\d+(?:\.\d+)?)$/i', $selection),
+            'team_totals', 'team_total_goals', 'asian_team_totals' => (bool) preg_match('/^(home|away)_(OVER|UNDER|over|under)(?:_\d+(?:\.\d+)?|:\d+(?:\.\d+)?)$/i', $selection),
+            'asian_handicap', 'european_handicap' => true,
+            'result_total_combo', 'result_btts_combo', 'result_goals_combo', 'htft_combo', 'combos' => true,
+            'corners', 'total_corners', 'cards', 'total_cards', 'shots', 'total_shots', 'fouls', 'offsides' => true,
+            'players', 'anytime_goalscorer', 'player_carded' => true,
+            'exact_score' => (bool) preg_match('/^\d+-\d+$/', $selection),
             default => false,
         };
     }
