@@ -65,7 +65,8 @@ mis à jour 380 lignes au lieu d'en créer. C'est précisément le comportement 
 
 Script : `storage/tmp/e2e_real_data.php` (hors dépôt, outil de vérification).
 
-1. Lecture de `team_match_stats` en MySQL pour un match réel (Arsenal FC – Aston Villa, 2016-05-15).
+1. Lecture de `team_match_stats` en MySQL pour un match réel (Crystal Palace FC – Liverpool FC,
+   2026-11-08, rencontres et statistiques réellement en base).
 2. Construction du contexte par les **méthodes réelles** de `GeneratePredictionsCommand`
    (`countContext`, `periodContext`, `playerContext`) via réflexion.
 3. Appel HTTP réel à `POST /v1/predict` du service FastAPI local (aucun mock).
@@ -73,26 +74,35 @@ Script : `storage/tmp/e2e_real_data.php` (hors dépôt, outil de vérification).
 Résultat observé :
 
 ```
+Match: Crystal Palace FC - Liverpool FC (2026-11-08 14:00:00)
 Comptages transmis: shots, shots_on_target
-Periodes: absent | Joueurs: 0
-Marchés publiés: 0
-Statut: abstain=false raison="sparse_team_history_without_market" qualite="degraded"
+Periodes: sample=22 | Joueurs: 0
+Marchés publiés: 180
+Par famille: result 7, goals 41, handicap 23, combos 11, periods 27, statistics 40, time 31
+Couverture: players -> no_player_data
 ```
 
-Interprétation honnête : la donnée arrive bien jusqu'au service, mais le modèle Dixon-Coles
-du service n'avait pas ces clubs dans son état entraîné, donc **aucun marché n'est publié** —
-c'est le comportement anti-invention attendu, pas une réussite de bout en bout.
+La chaîne complète fonctionne donc sur données réelles : comptages MySQL → contexte Laravel →
+service Python → marchés classés (`statistics` en `partial`, `periods` en `partial`,
+`time` en `thin`), sans invention : la famille `players` est explicitement écartée faute
+d'historique individuel.
 
-Deux corrections ont été apportées pendant cette vérification :
+Trois corrections ont été apportées pendant cette vérification :
 
 - `countContext()` plantait en SQL (`Unknown column 's.offsides'`) sur une base non migrée →
   filtrage par `Schema::hasColumn` avec cache statique ;
 - `POST /v1/train` rejetait en 422 toute rencontre de plus de 3 650 jours
   (`days_ago le=3650`), ce qui rendait **impossible** l'entraînement sur StatsBomb 2015-16 →
-  borne portée à 36 500 jours (`ai-service/app/schemas.py`).
+  borne portée à 36 500 jours (`ai-service/app/schemas.py`) ;
+- sur 300 rencontres mêlant plusieurs compétitions, l'optimiseur L-BFGS-B épuisait son budget
+  par défaut (« TOTAL NO. OF F,G EVALUATIONS EXCEEDS LIMIT ») → budget porté à
+  `max(15 000, 120 × nombre de paramètres)` (`ai-service/app/core/poisson_regressor.py`).
 
-Après correction, l'entraînement sur 300 rencontres réelles a été lancé ; il dépasse la limite
-de 5 minutes d'une commande interactive et doit être exécuté en tâche de fond (voir §6).
+Limite restante : l'entraînement sur l'intégralité de la base (534 rencontres, 7 compétitions,
+plus de 200 équipes dont beaucoup n'ont qu'un match) échoue encore sur ce budget et dépasse
+10 minutes. L'entraînement sur 30 rencontres récentes réussit ; c'est cet état qui a servi à
+la vérification ci-dessus. Un entraînement par compétition reste nécessaire avant de généraliser
+(voir `docs/data-source-priorities.md`).
 
 ## 4. Tests de reprise et d'erreur
 

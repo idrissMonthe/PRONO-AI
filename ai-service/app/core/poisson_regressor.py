@@ -149,7 +149,17 @@ class DixonColesModel:
             value = float(loss + reg)
             return value if np.isfinite(value) else float("inf")
 
-        res = minimize(nll, x0, method="L-BFGS-B", bounds=bounds, options={"maxiter": 250})
+        # Le budget d'évaluations doit suivre le nombre de paramètres : sur un
+        # historique de plusieurs centaines de matchs et d'équipes, la limite
+        # par défaut (15 000) est atteinte avant convergence et l'ajustement
+        # échoue sur un simple budget, sans que le modèle soit en cause.
+        res = minimize(
+            nll,
+            x0,
+            method="L-BFGS-B",
+            bounds=bounds,
+            options={"maxiter": 250, "maxfun": max(15000, 120 * total_params)},
+        )
 
         fit_message = str(getattr(res, "message", "Unknown optimizer result"))
         optimized_params = np.asarray(getattr(res, "x", []), dtype=float)
