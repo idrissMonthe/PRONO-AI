@@ -9,11 +9,11 @@ affiche.
 | Indicateur | Valeur |
 | --- | --- |
 | Familles auditées | 10 (résultat, buts, handicap, périodes, corners, cartons, statistiques, joueurs, intervalles, combinaisons) + live |
-| Définitions de marchés au registre | 75 |
-| Marchés `supported` (toutes rencontres couvertes) | 17 |
-| Marchés `conditional` | 38 |
+| Définitions de marchés au registre | 86 |
+| Marchés `supported` (toutes rencontres couvertes) | 18 |
+| Marchés `conditional` | 47 |
 | Marchés `insufficient` | 6 |
-| Marchés `unsupported` | 14 |
+| Marchés `unsupported` | 15 |
 | Marchés live activés | 0 |
 | Modèles indépendants créés | 0 (5 moteurs de distribution réutilisables) |
 

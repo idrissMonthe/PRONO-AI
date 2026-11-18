@@ -200,7 +200,7 @@ contradictoires du même match sont écartées.
   "market_categories": {"prudent": [], "equilibre": [], "audacieux": []},
   "market_coverage": {"families": {}, "skipped": {}},
   "combinations": {},
-  "market_registry": {"market_count": 75, "live_enabled": false},
+  "market_registry": {"market_count": 86, "live_enabled": false},
   "period_profile": {"coverage": "partial", "sample_size": 120, "first_half_share": 0.44}
 }
 ```
