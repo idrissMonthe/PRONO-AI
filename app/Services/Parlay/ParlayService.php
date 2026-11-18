@@ -404,6 +404,13 @@ class ParlayService
                     'price_basis'     => 'bookmaker',
                 ];
             }
+
+            // E. Familles étendues (corners, cartons, tirs). Une sélection
+            // n'entre dans un combiné que si une cote bookmaker réelle existe
+            // pour la même ligne : aucune cote n'est estimée ici.
+            foreach ($this->extendedMarketCandidates($match, $pred, $homeDisplay, $awayDisplay) as $extendedCandidate) {
+                $candidates[] = $extendedCandidate;
+            }
         }
 
         $candidates = array_map(function (array $candidate): array {
@@ -1004,6 +1011,97 @@ class ParlayService
         }
 
         return $this->marketIdCache[$code];
+    }
+
+    /**
+     * Candidats issus des familles étendues calculées par le moteur Python.
+     * Le prix doit provenir d'un snapshot bookmaker de la même ligne :
+     * sans prix réel, la sélection est écartée du combiné.
+     */
+    private function extendedMarketCandidates(
+        FootballMatch $match,
+        Prediction $prediction,
+        string $homeDisplay,
+        string $awayDisplay
+    ): array {
+        $definitions = [
+            'total_corners' => ['codes' => ['corners', 'total_corners'], 'group' => 'Corners', 'unit' => 'corners'],
+            'total_yellow_cards' => ['codes' => ['yellow_cards', 'cards'], 'group' => 'Cartons', 'unit' => 'cartons'],
+            'total_cards' => ['codes' => ['cards', 'yellow_cards'], 'group' => 'Cartons', 'unit' => 'cartons'],
+            'total_shots' => ['codes' => ['shots', 'total_shots'], 'group' => 'Statistiques', 'unit' => 'tirs'],
+        ];
+        $items = $prediction->derived_markets_json['market_predictions'] ?? [];
+        if (! is_array($items)) {
+            return [];
+        }
+
+        $candidates = [];
+        foreach ($items as $item) {
+            if (! is_array($item)) {
+                continue;
+            }
+            $marketId = (string) ($item['market_id'] ?? '');
+            if (! isset($definitions[$marketId]) || ! isset($item['line'])) {
+                continue;
+            }
+            $line = (float) $item['line'];
+            $selection = strtoupper((string) ($item['selection'] ?? ''));
+            $direction = str_starts_with($selection, 'OVER') ? 'OVER' : (str_starts_with($selection, 'UNDER') ? 'UNDER' : null);
+            if ($direction === null) {
+                continue;
+            }
+            $probability = (float) ($item['probability'] ?? 0);
+            $reliability = (float) ($item['reliability'] ?? 0);
+            $coverage = (string) ($item['coverage'] ?? 'none');
+            if ($probability < 0.40 || $reliability < 0.60 || ! in_array($coverage, ['full', 'partial'], true)) {
+                continue;
+            }
+
+            $odd = null;
+            $source = null;
+            $updatedAt = null;
+            foreach ($definitions[$marketId]['codes'] as $code) {
+                $snapshot = $this->oddsFor($match, $code)->first(
+                    fn ($candidate) => strtoupper((string) $candidate->selection) === $direction
+                        && $candidate->line !== null
+                        && abs((float) $candidate->line - $line) < 0.01
+                );
+                if ($snapshot) {
+                    $odd = (float) $snapshot->decimal_odds;
+                    $source = $snapshot->bookmaker->name ?? null;
+                    $updatedAt = $snapshot->snapshot_time_utc?->toIso8601String();
+                    break;
+                }
+            }
+            if ($odd === null || $odd <= 1.15 || ! $this->modelAgreesWithMarket($probability, $odd)) {
+                continue;
+            }
+
+            $prefix = $direction === 'OVER' ? 'Plus de ' : 'Moins de ';
+            $candidates[] = [
+                'match_id'        => $match->id,
+                'match_label'     => "{$homeDisplay} vs {$awayDisplay}",
+                'league'          => $match->league->name ?? 'Ligue',
+                'match_date_utc'  => $match->match_date_utc->toIso8601String(),
+                'selection'       => $marketId.'_'.$direction.'_'.$line,
+                'selection_label' => $prefix.rtrim(rtrim(number_format($line, 2, ',', ''), '0'), ',').' '.$definitions[$marketId]['unit'],
+                'market_group'    => $definitions[$marketId]['group'],
+                'model_prob'      => round($probability, 4),
+                'model_prob_pct'  => round($probability * 100, 1),
+                'model_version'   => $prediction->modelVersion->version_name ?? 'M3_MARKET_SPECIALISTS_v6',
+                'odds'            => round($odd, 2),
+                'odds_source'     => $source ?? 'Pinnacle',
+                'odds_updated_at' => $updatedAt ?? now()->toIso8601String(),
+                'fair_odds'       => round(1.0 / max(0.01, $probability), 2),
+                'ev_pct'          => round((($probability * $odd) - 1.0) * 100, 2),
+                'price_basis'     => 'bookmaker',
+                'market_id'       => $marketId,
+                'reliability'     => round($reliability, 4),
+                'coverage'        => $coverage,
+            ];
+        }
+
+        return $candidates;
     }
 
     private function parlayFamily(string $group, string $selection): string

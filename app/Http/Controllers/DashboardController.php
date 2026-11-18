@@ -242,6 +242,14 @@ class DashboardController extends Controller
                 continue;
             }
 
+            // Les familles étendues (corners, cartons, périodes…) sont
+            // classées par le moteur Python. Elles enrichissent les catégories
+            // même si le pronostic officiel n'est pas affichable dans la carte
+            // (market/selection non reconnu par le libellé historique).
+            foreach ($this->extendedPicks($prediction, $match) as $extendedRisk => $extendedPick) {
+                $groups[$extendedRisk][] = $extendedPick;
+            }
+
             // Une prédiction abstentionniste reste affichée : elle utilise ses
             // marchés calculés et porte une étiquette de fiabilité limitée.
             if ($prediction->published_market && ! $prediction->is_abstained) {
@@ -341,6 +349,15 @@ class DashboardController extends Controller
                 ];
             }
 
+            // Sélections étendues déjà classées par le moteur de marché.
+            foreach ($this->extendedPicks($prediction, $match) as $extendedRisk => $extendedPick) {
+                $candidates[$extendedRisk][] = array_merge($extendedPick, [
+                    'preclassified' => true,
+                    'prob' => (float) $extendedPick['prob'],
+                    'source' => $sourceLabel,
+                ]);
+            }
+
             foreach ($candidates as $risk => $options) {
                 $options = collect($options)
                     ->filter(fn (array $option) => is_numeric($option['prob']))
@@ -357,9 +374,12 @@ class DashboardController extends Controller
                 if ($risk === 'audacieux' && $source === 'Modèle') {
                     $minimum = 0.12;
                 }
-                $eligible = $options->filter(fn (array $option): bool => $option['prob'] >= $minimum
-                    && $option['prob'] <= $maximum);
-                $pick = $this->selectMarketOption($eligible, $risk, $source, (int) $match->id);
+                // Une sélection déjà classée par le moteur de marché garde sa
+                // catégorie : le seuil mécanique ne la rétrograde pas.
+                $preclassified = $options->firstWhere('preclassified', true);
+                $eligible = $options->filter(fn (array $option): bool => isset($option['preclassified'])
+                    || ($option['prob'] >= $minimum && $option['prob'] <= $maximum));
+                $pick = $preclassified ?: $this->selectMarketOption($eligible, $risk, $source, (int) $match->id);
                 if ($pick) {
                     $groups[$risk][] = $pick;
                 }
@@ -369,7 +389,9 @@ class DashboardController extends Controller
         foreach ($groups as $risk => $picks) {
             $groups[$risk] = collect($picks)
                 ->sortByDesc('prob')
-                ->unique(fn (array $pick) => $pick['match']->id)
+                // Un même match peut apporter deux familles distinctes, jamais
+                // la même sélection répétée.
+                ->unique(fn (array $pick) => $pick['match']->id.'|'.($pick['market'] ?? ''))
                 ->take(4)
                 ->values()
                 ->all();
@@ -401,6 +423,45 @@ class DashboardController extends Controller
             'AI_ASSISTED_PYTHON' => 'Hybride',
             default => 'Statistiques Python',
         };
+    }
+
+    /**
+     * Sélections des familles étendues, déjà classées et fiabilisées par le
+     * moteur Python. Aucune n'est recalculée ici.
+     */
+    private function extendedPicks(Prediction $prediction, FootballMatch $match): array
+    {
+        $categories = $prediction->derived_markets_json['market_categories'] ?? [];
+        if (! is_array($categories)) {
+            return [];
+        }
+
+        $picks = [];
+        foreach (['prudent', 'equilibre', 'audacieux'] as $risk) {
+            foreach (($categories[$risk] ?? []) as $item) {
+                if (! is_array($item) || ! is_numeric($item['probability'] ?? null)) {
+                    continue;
+                }
+                if (($item['coverage'] ?? 'none') === 'none') {
+                    continue;
+                }
+                $picks[$risk] = [
+                    'key' => ($item['market_id'] ?? 'market').':'.($item['selection'] ?? ''),
+                    'label' => (string) ($item['selection_label'] ?? $item['market_name'] ?? 'Marché'),
+                    'prob' => (float) $item['probability'],
+                    'odds' => null,
+                    'market' => (string) ($item['market_name'] ?? $item['market_id'] ?? 'Marché'),
+                    'market_family' => (string) ($item['family'] ?? ''),
+                    'reliability' => $item['reliability'] ?? null,
+                    'coverage' => $item['coverage'] ?? null,
+                    'match' => $match,
+                    'source' => 'Moteur marchés',
+                ];
+                break;
+            }
+        }
+
+        return $picks;
     }
 
     private function publishedPick(FootballMatch $match, Prediction $prediction): ?array

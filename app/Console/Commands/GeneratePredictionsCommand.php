@@ -142,6 +142,10 @@ class GeneratePredictionsCommand extends Command
                     // Référence xG de la compétition ; le service se rabat sur
                     // la référence globale si elle est trop peu échantillonnée.
                     'competition' => $match->league?->code,
+                    // Contexte réel des marchés étendus. Absent = famille non
+                    // calculée ; aucune moyenne n'est inventée côté Python.
+                    'period_share' => $this->periodContext($match),
+                    'counts' => $this->countContext($match),
                 ]);
 
                 // Sélections plutôt qu'identifiants de marché : ces ids sont
@@ -204,7 +208,7 @@ class GeneratePredictionsCommand extends Command
                 ];
 
                 $probabilities = $result['probabilities'] ?? null;
-                $review = $revisionService->review($result, [
+                $review =                 $revisionService->review($result, [
                     'match_id' => (string) $match->id,
                     'home_team' => $match->homeTeam->name,
                     'away_team' => $match->awayTeam->name,
@@ -290,7 +294,13 @@ class GeneratePredictionsCommand extends Command
                             'method' => $result['uncertainty_method'] ?? 'unavailable',
                             'valid_replicates' => (int) ($result['uncertainty_replicates'] ?? 0),
                         ],
-                        'derived_markets_json' => $result['markets'] ?? [],
+                        'derived_markets_json' => array_merge($result['markets'] ?? [], [
+                            'market_categories' => $result['market_categories'] ?? [],
+                            'market_predictions' => $result['market_predictions'] ?? [],
+                            'market_coverage' => $result['market_coverage'] ?? [],
+                            'combinations' => $result['combinations'] ?? [],
+                            'period_profile' => $result['period_profile'] ?? null,
+                        ]),
                         'top_scores_json' => $result['top_scores'] ?? [],
                         'quality_score' => $result['quality']['score'] ?? 0,
                         'quality_tier' => $result['quality']['tier'] ?? 'insufficient',
@@ -413,6 +423,11 @@ class GeneratePredictionsCommand extends Command
                 $generated++;
                 $this->line("✓ {$match->homeTeam->short_name} – {$match->awayTeam->short_name} ({$prediction->confidence_tier})");
             } catch (Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('oracle:generate-predictions failed', [
+                    'match_id' => $match->id,
+                    'exception' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                ]);
                 $match->forceFill([
                     'analysis_status' => 'NO_ANALYSIS',
                     'analysis_source' => 'system_error',
@@ -428,4 +443,105 @@ class GeneratePredictionsCommand extends Command
         return self::SUCCESS;
     }
 
+    /**
+     * Part réelle des buts inscrits avant la pause dans la compétition.
+     * Retourne null sous 5 rencontres avec score de mi-temps : la famille
+     * « périodes » n'est alors pas publiée.
+     */
+    private function periodContext(FootballMatch $match): ?array
+    {
+        $rows = FootballMatch::query()
+            ->where('league_id', $match->league_id)
+            ->where('status', 'FINISHED')
+            ->whereNotNull('ht_home_score')
+            ->whereNotNull('ht_away_score')
+            ->where('match_date_utc', '<', $match->match_date_utc)
+            ->orderByDesc('match_date_utc')
+            ->limit(200)
+            ->get(['ht_home_score', 'ht_away_score', 'home_score', 'away_score']);
+
+        if ($rows->count() < 5) {
+            return null;
+        }
+
+        $firstHalf = 0;
+        $fullTime = 0;
+        foreach ($rows as $row) {
+            $firstHalf += (int) $row->ht_home_score + (int) $row->ht_away_score;
+            $fullTime += (int) $row->home_score + (int) $row->away_score;
+        }
+        if ($fullTime <= 0) {
+            return null;
+        }
+
+        return [
+            'first_half_share' => round(min(0.62, max(0.30, $firstHalf / $fullTime)), 4),
+            'sample_size' => $rows->count(),
+            'first_half_goals' => $firstHalf,
+            'full_time_goals' => $fullTime,
+            'source' => 'observed_first_half_scores',
+        ];
+    }
+
+    /**
+     * Moyennes et variances réelles des comptages par équipe (30 derniers
+     * matchs). Une colonne sans au moins 3 valeurs n'est pas transmise.
+     */
+    private function countContext(FootballMatch $match): array
+    {
+        // Colonnes réellement présentes dans team_match_stats. Les hors-jeu
+        // n'y figurent pas : aucun marché offsides n'est publié.
+        $columns = ['corners', 'yellow_cards', 'red_cards', 'shots', 'shots_on_target', 'fouls'];
+        $rows = DB::table('team_match_stats as s')
+            ->join('matches as m', 'm.id', '=', 's.match_id')
+            ->whereIn('s.team_id', [$match->home_team_id, $match->away_team_id])
+            ->where('m.status', 'FINISHED')
+            ->where('m.match_date_utc', '<', $match->match_date_utc)
+            ->orderByDesc('m.match_date_utc')
+            ->limit(400)
+            ->get(array_merge(['s.team_id'], array_map(fn (string $column) => 's.'.$column, $columns)));
+
+        $context = [];
+        foreach (['home' => $match->home_team_id, 'away' => $match->away_team_id] as $side => $teamId) {
+            $teamRows = $rows->where('team_id', $teamId)->take(30);
+            foreach ($columns as $column) {
+                $values = $teamRows->pluck($column)
+                    ->filter(fn ($value) => $value !== null && is_numeric($value))
+                    ->map(fn ($value) => (float) $value)
+                    ->values();
+                if ($values->count() < 3) {
+                    continue;
+                }
+                $mean = (float) $values->avg();
+                $variance = $values->count() > 1
+                    ? (float) $values->map(fn (float $value) => ($value - $mean) ** 2)->sum() / ($values->count() - 1)
+                    : $mean;
+                $context[$column][$side] = [
+                    'mean' => round(max(0.2, $mean), 3),
+                    'variance' => round(max($variance, $mean + 0.01), 3),
+                    'sample_size' => $values->count(),
+                ];
+            }
+
+            // Total cartons = jaunes + rouges, uniquement sur les lignes où
+            // les deux valeurs sont réellement présentes.
+            $cards = $teamRows
+                ->filter(fn ($row) => $row->yellow_cards !== null && $row->red_cards !== null)
+                ->map(fn ($row) => (float) $row->yellow_cards + (float) $row->red_cards)
+                ->values();
+            if ($cards->count() >= 3) {
+                $mean = (float) $cards->avg();
+                $variance = $cards->count() > 1
+                    ? (float) $cards->map(fn (float $value) => ($value - $mean) ** 2)->sum() / ($cards->count() - 1)
+                    : $mean;
+                $context['cards'][$side] = [
+                    'mean' => round(max(0.2, $mean), 3),
+                    'variance' => round(max($variance, $mean + 0.01), 3),
+                    'sample_size' => $cards->count(),
+                ];
+            }
+        }
+
+        return $context;
+    }
 }

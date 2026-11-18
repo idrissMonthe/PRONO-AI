@@ -57,6 +57,12 @@ class PredictRequest(BaseModel):
     competition_goals_per_match: Optional[float] = Field(default=None, ge=0.4, le=6.0)
     # Code de compétition interne : sert à choisir la bonne référence xG.
     competition: Optional[str] = Field(default=None, max_length=20)
+    # Contexte optionnel des marchés étendus. Absent = ces familles ne sont
+    # pas publiées (aucune valeur n'est inventée).
+    period_share: Optional[Dict[str, Any]] = None
+    counts: Optional[Dict[str, Any]] = None
+    players: Optional[List[Dict[str, Any]]] = None
+    market_calibration: Optional[Dict[str, float]] = None
 
     @field_validator("home_team", "away_team")
     @classmethod
@@ -107,6 +113,13 @@ class PredictResponse(BaseModel):
     uncertainty_replicates: int = 0
     # Couverture statistique réelle du pronostic (xG et historique d'équipe).
     xg: Optional[Dict[str, Any]] = None
+    # Marchés calculés automatiquement, leur classement et leur couverture.
+    market_predictions: List[Dict[str, Any]] = Field(default_factory=list)
+    market_categories: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    market_coverage: Dict[str, Any] = Field(default_factory=dict)
+    combinations: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
+    market_registry: Dict[str, Any] = Field(default_factory=dict)
+    period_profile: Optional[Dict[str, Any]] = None
 
 
 class DevigRequest(BaseModel):
@@ -156,6 +169,10 @@ class TrainingMatch(BaseModel):
     away_goals: int = Field(ge=0, le=30)
     days_ago: float = Field(ge=0, le=3650)
     is_neutral: bool = False
+    # Scores à la mi-temps : servent uniquement à estimer la répartition des
+    # buts entre les périodes. Nuls quand la source ne les fournit pas.
+    ht_home_score: Optional[int] = Field(default=None, ge=0, le=30)
+    ht_away_score: Optional[int] = Field(default=None, ge=0, le=30)
     # xG reste optionnel : une source qui ne le fournit pas laisse ces champs
     # nuls, et le moteur conserve alors Dixon-Coles sans invention de valeur.
     home_xg: Optional[float] = Field(default=None, ge=0.0, le=10.0)

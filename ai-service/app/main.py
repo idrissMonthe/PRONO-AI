@@ -36,6 +36,11 @@ from app.core.xg_features import (
     adjust_lambdas_with_xg,
 )
 from app.core.market_specialists import MarketSpecialists
+from app.core.market_registry import registry_summary
+from app.core.market_engine import MarketEngine
+from app.core.period_model import PeriodModel
+from app.core.selection_engine import rank_categories
+from app.core.combination_engine import build_combinations
 from app.schemas import (
     DevigRequest,
     DevigResponse,
@@ -103,6 +108,7 @@ elo_engine = EloEngine(k_factor=20.0, default_home_adv=65.0)
 elo_ratings: Dict[str, float] = {}
 recent_form: Dict[str, List[float]] = {}
 market_specialists = MarketSpecialists()
+period_profile = PeriodModel()
 bootstrap_cache: Dict[str, dict] = {}
 # xG history is rebuilt at every training run. The adjustment stays disabled
 # unless XG_ADJUSTMENT_WEIGHT is set to a value validated by the backtest.
@@ -154,6 +160,7 @@ def load_model_state() -> None:
         recent_form.clear()
         recent_form.update({k: [float(x) for x in v] for k, v in state.get("recent_form", {}).items()})
         market_specialists.load_state(state.get("market_specialists", {}))
+        period_profile.load(state.get("period_share"))
         xg_builder.reset()
         for item in state.get("xg_matches", []) or []:
             if not isinstance(item, dict):
@@ -208,6 +215,7 @@ def save_model_state() -> None:
         "elo_ratings": elo_ratings,
         "recent_form": recent_form,
         "market_specialists": market_specialists.state(),
+        "period_share": period_profile.state.to_dict(),
         # Historique xG compact : permet de recalculer des fenêtres glissantes
         # au moment de la prédiction sans re-télécharger les événements.
         "xg_matches": [
@@ -337,6 +345,13 @@ def train(req: TrainRequest):
         # the caller instead of claiming that retraining succeeded.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     market_specialists.fit(training_rows)
+
+    # La part de buts en première période est estimée sur les scores de
+    # mi-temps réellement fournis, puis persistée avec le modèle.
+    period_model = PeriodModel()
+    period_model.fit(req.matches)
+    period_model_state = period_model.state.to_dict()
+    period_profile.state = period_model.state
 
     # xG : reconstruit l'historique chronologique. Une source sans xG laisse
     # simplement les champs à None ; aucune valeur n'est extrapolée.
@@ -518,6 +533,35 @@ def predict(req: PredictRequest):
     )
     warnings.append("dixon_coles_joint_preserved")
     markets = extract_match_markets_from_matrix(matrix)
+
+    # Marchés étendus : construits depuis la matrice finale, la distribution
+    # par période et les comptages réellement fournis par Laravel. Une famille
+    # sans données ne produit aucune sélection.
+    period_model = PeriodModel()
+    period_model.state = period_profile.state
+    if req.period_share is not None:
+        period_model.load(req.period_share)
+    engine = MarketEngine(req.market_calibration or {})
+    extended = engine.generate(
+        str(req.match_id or "match-sim"),
+        matrix,
+        lh,
+        la,
+        champion_model.rho,
+        context={
+            "team_names": {"home": req.home_team, "away": req.away_team},
+            "quality_score": req.quality_score,
+            "counts": req.counts or {},
+            "players": req.players or [],
+            "sample_size": len(champion_model.training_matches),
+        },
+        period_model=period_model,
+    )
+    categories = rank_categories(extended["predictions"], limit_per_category=6)
+    combinations = build_combinations(
+        extended["predictions"],
+        {str(req.match_id or "match-sim"): matrix},
+    )
     p_home = markets["1N2"]["home"]
     p_draw = markets["1N2"]["draw"]
     p_away = markets["1N2"]["away"]
@@ -661,6 +705,24 @@ def predict(req: PredictRequest):
         "uncertainty_method": intervals.get("method", "unavailable"),
         "uncertainty_replicates": int(intervals.get("valid_replicates", 0)),
         "xg": xg_report,
+        "market_predictions": extended["predictions"],
+        "market_categories": categories,
+        "market_coverage": extended["coverage"],
+        "combinations": combinations,
+        "market_registry": registry_summary(),
+        "period_profile": period_model.state.to_dict(),
+    }
+
+
+@app.get("/v1/markets/registry", dependencies=[Depends(require_internal_secret)])
+def markets_registry():
+    """Catalogue centralisé des marchés et de leur statut de couverture."""
+    from app.core.market_registry import MARKETS, FAMILIES
+
+    return {
+        "summary": registry_summary(),
+        "families": FAMILIES,
+        "markets": [definition.to_dict() for definition in MARKETS],
     }
 
 
