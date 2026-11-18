@@ -1,6 +1,6 @@
 # Rapport de backtesting walk-forward
 
-Généré le 2026-11-17T16:13:19.618701+00:00 par `ai-service/scripts/backtest_walkforward.py`.
+Généré le 2026-11-18T04:24:58.173950+00:00 par `ai-service/scripts/backtest_walkforward.py`.
 
 ## Protocole
 
