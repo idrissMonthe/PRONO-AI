@@ -16,6 +16,7 @@ use App\Models\PredictionRevision;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 class GeneratePredictionsCommand extends Command
@@ -146,6 +147,7 @@ class GeneratePredictionsCommand extends Command
                     // calculée ; aucune moyenne n'est inventée côté Python.
                     'period_share' => $this->periodContext($match),
                     'counts' => $this->countContext($match),
+                    'players' => $this->playerContext($match),
                 ]);
 
                 // Sélections plutôt qu'identifiants de marché : ces ids sont
@@ -489,9 +491,13 @@ class GeneratePredictionsCommand extends Command
      */
     private function countContext(FootballMatch $match): array
     {
-        // Colonnes réellement présentes dans team_match_stats. Les hors-jeu
-        // n'y figurent pas : aucun marché offsides n'est publié.
-        $columns = ['corners', 'yellow_cards', 'red_cards', 'shots', 'shots_on_target', 'fouls'];
+        // Colonnes réellement présentes dans team_match_stats. Les lignes où
+        // elles sont NULL (source sans l'information) ne comptent pas : aucune
+        // valeur absente n'est convertie en zéro.
+        $columns = array_values(array_filter(
+            ['corners', 'yellow_cards', 'red_cards', 'shots', 'shots_on_target', 'fouls', 'offsides'],
+            fn (string $column): bool => $this->statColumnExists($column)
+        ));
         $rows = DB::table('team_match_stats as s')
             ->join('matches as m', 'm.id', '=', 's.match_id')
             ->whereIn('s.team_id', [$match->home_team_id, $match->away_team_id])
@@ -543,5 +549,97 @@ class GeneratePredictionsCommand extends Command
         }
 
         return $context;
+    }
+
+    /**
+     * Vérifie une seule fois par processus qu'une colonne statistique existe.
+     * Une base antérieure à la migration `offsides` continue de fonctionner
+     * sans publier de marchés hors-jeu, au lieu de lever une erreur SQL.
+     */
+    private function statColumnExists(string $column): bool
+    {
+        static $cache = [];
+        if (! array_key_exists($column, $cache)) {
+            $cache[$column] = Schema::hasColumn('team_match_stats', $column);
+        }
+
+        return $cache[$column];
+    }
+
+    /**
+     * Historique individuel réel (compositions, titularisations, minutes,
+     * buts, tirs, cartons) sur les 20 dernières rencontres de chaque équipe.
+     *
+     * Un joueur n'est transmis qu'à partir de 5 matchs avec un temps de jeu
+     * connu ; les taux sont calculés par 90 minutes réellement jouées. La
+     * titularisation n'est marquée confirmée que si une composition officielle
+     * existe pour cette rencontre.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function playerContext(FootballMatch $match): array
+    {
+        $rows = DB::table('player_match_stats as p')
+            ->join('matches as m', 'm.id', '=', 'p.match_id')
+            ->whereIn('p.team_id', [$match->home_team_id, $match->away_team_id])
+            ->where('m.status', 'FINISHED')
+            ->where('m.match_date_utc', '<', $match->match_date_utc)
+            ->orderByDesc('m.match_date_utc')
+            ->limit(800)
+            ->get([
+                'p.team_id', 'p.external_player_id', 'p.player_name', 'p.is_starter',
+                'p.minutes_played', 'p.goals', 'p.shots', 'p.shots_on_target',
+                'p.xg', 'p.yellow_cards', 'p.red_cards',
+            ]);
+
+        if ($rows->isEmpty()) {
+            return [];
+        }
+
+        $confirmed = $match->playerAvailabilities
+            ->where('status', 'confirmed_starting')
+            ->mapWithKeys(fn ($availability) => [
+                strtolower(trim((string) $availability->player_name)).'|'.$availability->team_id => true,
+            ]);
+
+        $players = [];
+        foreach (['home' => $match->home_team_id, 'away' => $match->away_team_id] as $side => $teamId) {
+            $byPlayer = $rows->where('team_id', $teamId)->groupBy('external_player_id');
+
+            foreach ($byPlayer as $playerRows) {
+                $recent = $playerRows->take(20);
+                $played = $recent->filter(fn ($row) => $row->minutes_played !== null && (int) $row->minutes_played > 0);
+                $sample = $played->count();
+                if ($sample < 5) {
+                    continue;
+                }
+
+                $minutes = (int) $played->sum('minutes_played');
+                if ($minutes <= 0) {
+                    continue;
+                }
+
+                $per90 = fn (float $total): float => round($total * 90 / $minutes, 3);
+                $name = (string) $recent->first()->player_name;
+                $starts = $played->filter(fn ($row) => (bool) $row->is_starter)->count();
+
+                $players[] = [
+                    'name' => $name,
+                    'team' => $side,
+                    'sample_size' => $sample,
+                    'start_probability' => round($starts / $sample, 3),
+                    'lineup_confirmed' => $confirmed->has(strtolower(trim($name)).'|'.$teamId),
+                    'expected_minutes' => round($minutes / $sample, 1),
+                    'goals_per90' => $per90((float) $played->sum('goals')),
+                    'shots_per90' => $per90((float) $played->sum('shots')),
+                    'shots_on_target_per90' => $per90((float) $played->sum('shots_on_target')),
+                    'cards_per90' => $per90((float) $played->sum('yellow_cards') + (float) $played->sum('red_cards')),
+                ];
+            }
+        }
+
+        usort($players, fn (array $a, array $b) => $b['sample_size'] <=> $a['sample_size']);
+
+        return array_slice($players, 0, 40);
     }
 }

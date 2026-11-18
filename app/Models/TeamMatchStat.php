@@ -18,6 +18,7 @@ class TeamMatchStat extends Model
         'shots_on_target',
         'corners',
         'fouls',
+        'offsides',
         'yellow_cards',
         'red_cards',
         'xg',

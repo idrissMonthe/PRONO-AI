@@ -147,3 +147,73 @@ def test_combinations_do_not_multiply_same_match_probabilities(client):
                 assert len(combination["selections"]) == 2
                 leg_probabilities = [leg["probability"] for leg in combination["selections"]]
                 assert combination["joint_probability"] <= min(leg_probabilities) + 1e-6
+
+
+def test_predict_publishes_statistics_markets_from_fouls_and_offsides(client):
+    """Chaîne des comptages extraits de StatsBomb : fouls/offsides/hors-jeu."""
+    train(client)
+    counts = {
+        "fouls": {
+            "home": {"mean": 11.2, "variance": 15.4, "sample_size": 20},
+            "away": {"mean": 12.6, "variance": 18.1, "sample_size": 20},
+        },
+        "offsides": {
+            "home": {"mean": 2.1, "variance": 3.4, "sample_size": 20},
+            "away": {"mean": 1.8, "variance": 2.9, "sample_size": 20},
+        },
+        "shots": {
+            "home": {"mean": 13.5, "variance": 20.0, "sample_size": 20},
+            "away": {"mean": 10.4, "variance": 16.2, "sample_size": 20},
+        },
+    }
+    payload = client.post(
+        "/v1/predict",
+        json={"home_team": "Alpha FC", "away_team": "Beta FC", "quality_score": 95.0, "counts": counts},
+        headers=HEADERS,
+    ).json()
+    ids = {item["market_id"] for item in payload["market_predictions"]}
+    assert "fouls" in ids
+    assert "offsides" in ids
+    for item in payload["market_predictions"]:
+        if item["market_id"] in {"fouls", "offsides"}:
+            assert item["data_sources"] == ["team_match_stats"]
+
+
+def test_predict_publishes_player_markets_from_real_player_history(client):
+    """Chaîne des statistiques individuelles : payload joueurs -> marchés joueurs."""
+    train(client)
+    players = [
+        {
+            "name": "Alpha FC Neuf",
+            "team": "home",
+            "sample_size": 14,
+            "start_probability": 0.92,
+            "expected_minutes": 84.0,
+            "goals_per90": 0.58,
+            "shots_per90": 2.6,
+            "shots_on_target_per90": 1.1,
+            "cards_per90": 0.12,
+        },
+        {
+            "name": "Beta FC Milieu",
+            "team": "away",
+            "sample_size": 15,
+            "start_probability": 0.88,
+            "expected_minutes": 80.0,
+            "cards_per90": 0.34,
+        },
+    ]
+    payload = client.post(
+        "/v1/predict",
+        json={
+            "home_team": "Alpha FC",
+            "away_team": "Beta FC",
+            "quality_score": 95.0,
+            "players": players,
+        },
+        headers=HEADERS,
+    ).json()
+    ids = {item["market_id"] for item in payload["market_predictions"]}
+    assert "player_anytime_scorer" in ids
+    assert "player_carded" in ids
+    assert "players" in payload["market_coverage"]["families"]

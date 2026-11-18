@@ -167,7 +167,9 @@ class TrainingMatch(BaseModel):
     away_team: str = Field(min_length=1, max_length=100)
     home_goals: int = Field(ge=0, le=30)
     away_goals: int = Field(ge=0, le=30)
-    days_ago: float = Field(ge=0, le=3650)
+    # Borne volontairement large : une donnée historique (StatsBomb 2015-16)
+    # peut dépasser dix ans et reste utilisable pour l'entraînement.
+    days_ago: float = Field(ge=0, le=36500)
     is_neutral: bool = False
     # Scores à la mi-temps : servent uniquement à estimer la répartition des
     # buts entre les périodes. Nuls quand la source ne les fournit pas.

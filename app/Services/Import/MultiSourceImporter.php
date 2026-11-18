@@ -10,6 +10,7 @@ use App\Models\Season;
 use App\Models\Team;
 use App\Models\TeamMatchStat;
 use App\Services\FootballData\FootballDataService;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -142,7 +143,11 @@ class MultiSourceImporter
     }
 
     /**
-     * Importe les statistiques de tirs/xG d'un match StatsBomb déjà stocké.
+     * Importe les faits d'un match StatsBomb déjà stocké : tirs, xG, corners,
+     * fautes, cartons, hors-jeu, score à la pause et temps de jeu individuel.
+     *
+     * L'écriture est idempotente : `team_match_stats` est unique par
+     * (match, équipe) et `player_match_stats` par (match, fournisseur, joueur).
      */
     public function importStats(NormalizedMatch $match, StatsBombConnector $connector, bool $dryRun = false): bool
     {
@@ -157,7 +162,7 @@ class MultiSourceImporter
             return false;
         }
 
-        $stats = $connector->shotStats($match);
+        $stats = $connector->eventStats($match);
         if ($stats['home'] === null && $stats['away'] === null) {
             return false;
         }
@@ -166,7 +171,9 @@ class MultiSourceImporter
             return true;
         }
 
-        foreach (['home' => $stored->home_team_id, 'away' => $stored->away_team_id] as $side => $teamId) {
+        $teamIds = ['home' => $stored->home_team_id, 'away' => $stored->away_team_id];
+
+        foreach ($teamIds as $side => $teamId) {
             $values = $stats[$side];
             if ($values === null) {
                 continue;
@@ -178,7 +185,52 @@ class MultiSourceImporter
                     'is_home' => $side === 'home',
                     'shots' => $values['shots'],
                     'shots_on_target' => $values['shots_on_target'],
-                    'xg' => round($values['xg'], 2),
+                    'xg' => round((float) $values['xg'], 2),
+                    'corners' => $values['corners'],
+                    'fouls' => $values['fouls'],
+                    'offsides' => $values['offsides'],
+                    'yellow_cards' => $values['yellow_cards'],
+                    'red_cards' => $values['red_cards'],
+                ]
+            );
+        }
+
+        // Le score à la pause n'est écrit que s'il a réellement été observé
+        // dans les événements et qu'il manque encore en base.
+        $ht = $stats['ht_goals'];
+        if (is_array($ht) && $stored->ht_home_score === null && $stored->ht_away_score === null) {
+            $stored->forceFill([
+                'ht_home_score' => (int) $ht['home'],
+                'ht_away_score' => (int) $ht['away'],
+            ])->saveQuietly();
+        }
+
+        foreach ($stats['players'] as $player) {
+            $side = $player['team'] ?? null;
+            if (! isset($teamIds[$side])) {
+                continue;
+            }
+
+            DB::table('player_match_stats')->updateOrInsert(
+                [
+                    'match_id' => $stored->id,
+                    'provider' => StatsBombConnector::SOURCE,
+                    'external_player_id' => $player['external_id'],
+                ],
+                [
+                    'team_id' => $teamIds[$side],
+                    'player_name' => $player['name'],
+                    'position' => $player['position'] ?? null,
+                    'is_starter' => $player['is_starter'],
+                    'minutes_played' => $player['minutes_played'],
+                    'goals' => $player['goals'],
+                    'shots' => $player['shots'],
+                    'shots_on_target' => $player['shots_on_target'],
+                    'xg' => round((float) $player['xg'], 3),
+                    'yellow_cards' => $player['yellow_cards'],
+                    'red_cards' => $player['red_cards'],
+                    'updated_at' => now(),
+                    'created_at' => now(),
                 ]
             );
         }

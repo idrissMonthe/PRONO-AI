@@ -22,6 +22,9 @@ class StatsBombConnector
     /** Issues de tir considérées comme cadrées par StatsBomb. */
     private const ON_TARGET_OUTCOMES = ['Goal', 'Saved', 'Saved To Post'];
 
+    /** Périodes d'événements retenues : 1 = première mi-temps, 2 = seconde. */
+    private const REGULATION_PERIODS = [1, 2];
+
     public function __construct(private readonly array $config)
     {
     }
@@ -107,16 +110,57 @@ class StatsBombConnector
     /**
      * Agrège les tirs d'un match : total, cadrés et somme des xG par équipe.
      *
+     * Conservé pour la compatibilité : les valeurs proviennent du même fichier
+     * d'événements que eventStats(), lu une seule fois par match.
+     *
      * @return array{home: array{shots:int, shots_on_target:int, xg:float}|null, away: array{shots:int, shots_on_target:int, xg:float}|null}
      */
     public function shotStats(NormalizedMatch $match): array
+    {
+        $stats = $this->eventStats($match);
+
+        $pick = static function (?array $side): ?array {
+            if ($side === null) {
+                return null;
+            }
+
+            return [
+                'shots' => $side['shots'],
+                'shots_on_target' => $side['shots_on_target'],
+                'xg' => $side['xg'],
+            ];
+        };
+
+        return ['home' => $pick($stats['home']), 'away' => $pick($stats['away'])];
+    }
+
+    /**
+     * Agrège l'ensemble des faits exploitables du fichier d'événements.
+     *
+     * Types StatsBomb réellement présents dans les données ouvertes :
+     * - `Shot` (dont `shot.outcome.name`, `shot.statsbomb_xg`) ;
+     * - `Pass` avec `pass.type.name = Corner` (corners) ;
+     * - `Pass` avec `pass.outcome.name = Pass Offside` (hors-jeu) ;
+     * - `Foul Committed` (fautes et cartons infligés) ;
+     * - `Bad Behaviour` (cartons hors contact, `bad_behaviour.card.name`) ;
+     * - `Starting XI` (`tactics.lineup`) et `Substitution` (temps de jeu) ;
+     * - `Own Goal For` (but contre son camp compté pour l'équipe).
+     *
+     * Aucune valeur n'est déduite d'une absence : si le fichier d'événements
+     * est indisponible, home/away restent null.
+     *
+     * @return array{home: array<string, mixed>|null, away: array<string, mixed>|null, players: array<int, array<string, mixed>>, ht_goals: array{home:int, away:int}|null, max_minute: int|null}
+     */
+    public function eventStats(NormalizedMatch $match): array
     {
         $matchId = (int) ($match->metadata['statsbomb_match_id'] ?? 0);
         $homeId = (int) ($match->metadata['statsbomb_home_team_id'] ?? 0);
         $awayId = (int) ($match->metadata['statsbomb_away_team_id'] ?? 0);
 
+        $empty = ['home' => null, 'away' => null, 'players' => [], 'ht_goals' => null, 'max_minute' => null];
+
         if ($matchId <= 0 || $homeId <= 0 || $awayId <= 0) {
-            return ['home' => null, 'away' => null];
+            return $empty;
         }
 
         $url = $this->baseUrl()."/events/{$matchId}.json";
@@ -125,40 +169,255 @@ class StatsBombConnector
         if ($events === null) {
             Log::warning('StatsBomb: événements indisponibles après tentatives.', ['match_id' => $matchId]);
 
-            return ['home' => null, 'away' => null];
+            return $empty;
         }
 
-        $stats = [
-            'home' => ['shots' => 0, 'shots_on_target' => 0, 'xg' => 0.0],
-            'away' => ['shots' => 0, 'shots_on_target' => 0, 'xg' => 0.0],
+        $teamStats = [
+            'home' => $this->emptyTeamStats(),
+            'away' => $this->emptyTeamStats(),
         ];
+        $htGoals = ['home' => 0, 'away' => 0];
+        $htGoalsObserved = false;
+        $players = [];
+        $subOffMinute = [];
+        $maxMinute = 0;
 
         foreach ($events as $event) {
-            if (! is_array($event) || ($event['type']['name'] ?? null) !== 'Shot') {
+            if (! is_array($event)) {
+                continue;
+            }
+
+            $type = $event['type']['name'] ?? null;
+            if (! is_string($type)) {
                 continue;
             }
 
             $teamId = (int) ($event['team']['id'] ?? 0);
             $side = $teamId === $homeId ? 'home' : ($teamId === $awayId ? 'away' : null);
+            $period = (int) ($event['period'] ?? 0);
+            $minute = (int) ($event['minute'] ?? 0);
+
+            if (in_array($period, self::REGULATION_PERIODS, true)) {
+                $maxMinute = max($maxMinute, $minute);
+            }
+
+            // Un fichier d'événements complet rend le score à la pause
+            // observable, y compris 0-0 : une première période sans but n'est
+            // pas une donnée manquante.
+            if ($period === 1) {
+                $htGoalsObserved = true;
+            }
+
+            // Composition initiale : ne dépend pas d'un tir ou d'un but.
+            if ($type === 'Starting XI' && $side !== null) {
+                foreach ((array) ($event['tactics']['lineup'] ?? []) as $entry) {
+                    $playerId = (int) ($entry['player']['id'] ?? 0);
+                    $playerName = $entry['player']['name'] ?? null;
+                    if ($playerId <= 0 || ! is_string($playerName)) {
+                        continue;
+                    }
+                    $players[$playerId] = $this->playerRow($playerId, $playerName, $side, true)
+                        + ['position' => $entry['position']['name'] ?? null];
+                }
+
+                continue;
+            }
+
+            if ($type === 'Substitution' && $side !== null) {
+                $outId = (int) ($event['player']['id'] ?? 0);
+                if ($outId > 0) {
+                    $subOffMinute[$outId] = $minute;
+                }
+                $in = $event['substitution']['replacement'] ?? [];
+                $inId = (int) ($in['id'] ?? 0);
+                if ($inId > 0 && is_string($in['name'] ?? null)) {
+                    $players[$inId] = $this->playerRow($inId, (string) $in['name'], $side, false)
+                        + ['position' => null, 'on_minute' => $minute];
+                }
+
+                continue;
+            }
+
             if ($side === null) {
                 continue;
             }
 
-            $stats[$side]['shots']++;
-            $outcome = $event['shot']['outcome']['name'] ?? null;
-            if (in_array($outcome, self::ON_TARGET_OUTCOMES, true)) {
-                $stats[$side]['shots_on_target']++;
+            $playerId = (int) ($event['player']['id'] ?? 0);
+            $playerName = $event['player']['name'] ?? null;
+            if ($playerId > 0 && is_string($playerName) && ! isset($players[$playerId])) {
+                // Joueur apparu sans composition (données partielles) : il est
+                // enregistré, sans inventer une titularisation.
+                $players[$playerId] = $this->playerRow($playerId, $playerName, $side, null)
+                    + ['position' => $event['position']['name'] ?? null];
             }
-            $xg = $event['shot']['statsbomb_xg'] ?? null;
-            if (is_numeric($xg)) {
-                $stats[$side]['xg'] += (float) $xg;
+
+            if ($type === 'Shot') {
+                $teamStats[$side]['shots']++;
+                $outcome = $event['shot']['outcome']['name'] ?? null;
+                $xg = $event['shot']['statsbomb_xg'] ?? null;
+                if (in_array($outcome, self::ON_TARGET_OUTCOMES, true)) {
+                    $teamStats[$side]['shots_on_target']++;
+                }
+                if (is_numeric($xg)) {
+                    $teamStats[$side]['xg'] += (float) $xg;
+                }
+
+                if ($playerId > 0) {
+                    $players[$playerId]['shots']++;
+                    if (in_array($outcome, self::ON_TARGET_OUTCOMES, true)) {
+                        $players[$playerId]['shots_on_target']++;
+                    }
+                    if (is_numeric($xg)) {
+                        $players[$playerId]['xg'] = round($players[$playerId]['xg'] + (float) $xg, 3);
+                    }
+                }
+
+                if ($outcome === 'Goal') {
+                    if ($playerId > 0) {
+                        $players[$playerId]['goals']++;
+                    }
+                    if ($period === 1) {
+                        $htGoals[$side]++;
+                        $htGoalsObserved = true;
+                    }
+                }
+
+                continue;
+            }
+
+            if ($type === 'Own Goal For') {
+                // But contre son camp crédité à l'équipe qui en bénéficie.
+                $teamStats[$side]['goals'] = ($teamStats[$side]['goals'] ?? 0) + 1;
+                if ($period === 1) {
+                    $htGoals[$side]++;
+                    $htGoalsObserved = true;
+                }
+
+                continue;
+            }
+
+            if ($type === 'Pass') {
+                if (($event['pass']['type']['name'] ?? null) === 'Corner') {
+                    $teamStats[$side]['corners']++;
+                }
+                if (($event['pass']['outcome']['name'] ?? null) === 'Pass Offside') {
+                    $teamStats[$side]['offsides']++;
+                }
+
+                continue;
+            }
+
+            if ($type === 'Foul Committed') {
+                $teamStats[$side]['fouls']++;
+                $card = $event['foul_committed']['card']['name'] ?? null;
+                $this->applyCard($teamStats[$side], $players[$playerId] ?? null, $card, $players, $playerId);
+
+                continue;
+            }
+
+            if ($type === 'Bad Behaviour') {
+                $card = $event['bad_behaviour']['card']['name'] ?? null;
+                $this->applyCard($teamStats[$side], $players[$playerId] ?? null, $card, $players, $playerId);
+            }
+        }
+
+        // Temps de jeu : un titulaire sort au remplacement, un entrant commence
+        // à sa minute d'entrée. La fin du match est la dernière minute observée.
+        if ($maxMinute > 0) {
+            foreach ($players as $id => $row) {
+                if ($row['is_starter'] === false) {
+                    $on = (int) ($row['on_minute'] ?? 0);
+                    $players[$id]['minutes_played'] = max(0, $maxMinute - $on);
+                } elseif ($row['is_starter'] === true) {
+                    $off = $subOffMinute[$id] ?? $maxMinute;
+                    $players[$id]['minutes_played'] = max(0, $off);
+                }
+                unset($players[$id]['on_minute']);
             }
         }
 
         return [
-            'home' => $stats['home'],
-            'away' => $stats['away'],
+            'home' => $teamStats['home'],
+            'away' => $teamStats['away'],
+            'players' => array_values($players),
+            'ht_goals' => $htGoalsObserved ? $htGoals : null,
+            'max_minute' => $maxMinute > 0 ? $maxMinute : null,
         ];
+    }
+
+    /** @return array<string, mixed> */
+    private function emptyTeamStats(): array
+    {
+        return [
+            'shots' => 0,
+            'shots_on_target' => 0,
+            'xg' => 0.0,
+            'goals' => 0,
+            'corners' => 0,
+            'fouls' => 0,
+            'offsides' => 0,
+            'yellow_cards' => 0,
+            'red_cards' => 0,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function playerRow(int $id, string $name, string $side, ?bool $starter): array
+    {
+        return [
+            'external_id' => self::SOURCE.':'.$id,
+            'name' => $name,
+            'team' => $side,
+            'is_starter' => $starter,
+            'goals' => 0,
+            'shots' => 0,
+            'shots_on_target' => 0,
+            'xg' => 0.0,
+            'yellow_cards' => 0,
+            'red_cards' => 0,
+            'minutes_played' => null,
+        ];
+    }
+
+    /**
+     * Reporte un carton sur l'équipe et le joueur.
+     *
+     * Un second jaune est compté comme un jaune ET un rouge (expulsion), ce qui
+     * correspond au décompte des marchés cartons.
+     *
+     * @param  array<string, mixed>  $team
+     * @param  array<string, mixed>|null  $player
+     * @param  array<int, array<string, mixed>>  $players
+     */
+    private function applyCard(array &$team, ?array $player, ?string $card, array &$players, int $playerId): void
+    {
+        unset($player);
+        $yellow = 0;
+        $red = 0;
+        switch ($card) {
+            case 'Yellow Card':
+                $yellow = 1;
+                break;
+            case 'Second Yellow':
+                $yellow = 1;
+                $red = 1;
+                break;
+            case 'Red Card':
+                $red = 1;
+                break;
+            default:
+                return;
+        }
+
+        $team['yellow_cards'] += $yellow;
+        $team['red_cards'] += $red;
+
+        if ($playerId <= 0 || ! isset($players[$playerId])) {
+            return;
+        }
+
+        $players[$playerId]['yellow_cards'] += $yellow;
+        $players[$playerId]['red_cards'] += $red;
     }
 
     /**
