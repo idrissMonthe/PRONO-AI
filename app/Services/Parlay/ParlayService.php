@@ -19,7 +19,8 @@ class ParlayService
 
     public function __construct(
         protected GeminiExplanationService $geminiService,
-        protected PredictionRevisionService $revisionService
+        protected PredictionRevisionService $revisionService,
+        protected MarketDiversitySelector $diversitySelector
     ) {}
 
     /**
@@ -901,152 +902,42 @@ class ParlayService
     }
 
     /**
-     * Réduit la corrélation d’un combiné et empêche une famille de marché de
-     * monopoliser le coupon : plafonds par famille, plafond cumulé des marchés
-     * de résultat (1X2 + double chance), plafond par type de sélection et
-     * limite de trois choix par championnat.
+     * Réduit la corrélation d’un combiné via le sélecteur de diversité partagé
+     * avec le dashboard : plafonds par famille, plafond cumulé des marchés de
+     * résultat, plafond par type de sélection et trois choix par championnat.
+     *
+     * @param  array<int, array<string, mixed>>  $selections
+     * @return array<int, array<string, mixed>>
      */
     private function diversifySelections(array $selections, int $limit): array
     {
-        $pool = collect($selections)
-            ->map(function (array $selection): array {
-                $selection['market_family'] = $this->selectionFamily(
-                    (string) ($selection['market_group'] ?? ''),
-                    (string) ($selection['selection'] ?? '')
-                );
-                $selection['selection_type'] = $this->selectionType($selection);
+        $candidates = [];
+        foreach ($selections as $selection) {
+            $group = (string) ($selection['market_group'] ?? '');
+            $teams = array_filter(array_map(
+                'trim',
+                preg_split('/\s+vs\s+/u', (string) ($selection['match_label'] ?? '')) ?: []
+            ));
+            $family = $this->diversitySelector->family($group);
+            $type = $this->diversitySelector->selectionType(
+                $group,
+                (string) ($selection['selection_label'] ?? ''),
+                $teams
+            );
 
-                return $selection;
-            })
-            ->values()
-            ->all();
-
-        $selected = [];
-        $usedMatches = [];
-        $familyCounts = ['1x2' => 0, 'double_chance' => 0];
-        $typeCounts = [];
-        $leagueCounts = [];
-
-        $familyCap = 3;
-        $combinedResultCap = max(1, (int) floor($limit / 2));
-        // Sur un coupon court, deux lignes du même type seraient déjà une redite.
-        $typeCap = $limit <= 3 ? 1 : 2;
-        $leagueCap = 3;
-
-        $tryAdd = function (array $selection, bool $enforceCaps, ?int $maxType = null, ?int $maxLeague = null) use (
-            &$selected,
-            &$usedMatches,
-            &$familyCounts,
-            &$typeCounts,
-            &$leagueCounts,
-            $familyCap,
-            $combinedResultCap,
-            $typeCap,
-            $leagueCap
-        ): void {
-            $matchId = $selection['match_id'] ?? null;
-            if ($matchId !== null && in_array($matchId, $usedMatches, true)) {
-                return;
-            }
-
-            $family = (string) ($selection['market_family'] ?? 'other');
-            $type = (string) ($selection['selection_type'] ?? 'autre');
-            $league = (string) ($selection['league'] ?? 'unknown');
-            $isResult = in_array($family, ['1x2', 'double_chance'], true);
-
-            if ($enforceCaps) {
-                if ($isResult
-                    && (($familyCounts[$family] ?? 0) >= $familyCap
-                        || (($familyCounts['1x2'] ?? 0) + ($familyCounts['double_chance'] ?? 0)) >= $combinedResultCap)) {
-                    return;
-                }
-                if (($typeCounts[$type] ?? 0) >= ($maxType ?? $typeCap)) {
-                    return;
-                }
-                if (($leagueCounts[$league] ?? 0) >= ($maxLeague ?? $leagueCap)) {
-                    return;
-                }
-            }
-
-            $selected[] = $selection;
-            if ($matchId !== null) {
-                $usedMatches[] = $matchId;
-            }
-            if ($isResult) {
-                $familyCounts[$family] = ($familyCounts[$family] ?? 0) + 1;
-            }
-            $typeCounts[$type] = ($typeCounts[$type] ?? 0) + 1;
-            $leagueCounts[$league] = ($leagueCounts[$league] ?? 0) + 1;
-        };
-
-        // 1. Sélection stricte, avec priorité aux marchés autres que le résultat.
-        $ordered = collect($pool)
-            ->sortBy(fn (array $selection): int => in_array($selection['market_family'] ?? '', ['1x2', 'double_chance'], true) ? 1 : 0)
-            ->values();
-        foreach ($ordered as $selection) {
-            if (count($selected) >= $limit) break;
-            $tryAdd($selection, true);
+            $candidates[] = [
+                'match' => $selection['match_id'] ?? null,
+                'family' => $family,
+                'type' => $type,
+                'league' => (string) ($selection['league'] ?? 'unknown'),
+                'payload' => array_merge($selection, [
+                    'market_family' => $family,
+                    'selection_type' => $type,
+                ]),
+            ];
         }
 
-        // 2. Un type répété est toléré une troisième fois, sans plafond de ligue.
-        foreach ($pool as $selection) {
-            if (count($selected) >= $limit) break;
-            $tryAdd($selection, true, $typeCap + 1, PHP_INT_MAX);
-        }
-
-        // 3. Dernier recours : uniquement si les marchés disponibles ne
-        // permettent pas d'atteindre la taille demandée.
-        foreach ($pool as $selection) {
-            if (count($selected) >= $limit) break;
-            $tryAdd($selection, false);
-        }
-
-        return $selected;
-    }
-
-    /**
-     * Famille de marché d'une sélection modèle (les libellés viennent des
-     * marchés calculés par le moteur Python).
-     */
-    private function selectionFamily(string $group, string $selection): string
-    {
-        $normalized = mb_strtolower(trim($group), 'UTF-8');
-
-        return match (true) {
-            in_array($normalized, ['1n2', '1x2', 'résultat', 'resultat'], true) => '1x2',
-            $normalized === 'double chance' => 'double_chance',
-            in_array($normalized, ['total buts', 'totaux', 'total_goals'], true) => 'totals',
-            $normalized === 'buts par équipe' => 'team_totals',
-            $normalized === 'btts' => 'btts',
-            $normalized === 'clean sheet' => 'clean_sheet',
-            $normalized === 'marge de buts' => 'goal_margin',
-            in_array($normalized, ['handicap', 'handicap asiatique'], true) => 'handicap',
-            $normalized === 'combiné' => 'combos',
-            default => $normalized !== '' ? $normalized : 'other',
-        };
-    }
-
-    /**
-     * Type de sélection indépendant des équipes : « Plus de 1,5 but » reste le
-     * même type d'un match à l'autre et ne peut donc pas remplir le coupon.
-     */
-    private function selectionType(array $selection): string
-    {
-        $label = (string) ($selection['selection_label'] ?? '');
-        $teams = array_filter(array_map(
-            'trim',
-            preg_split('/\s+vs\s+/u', (string) ($selection['match_label'] ?? '')) ?: []
-        ));
-
-        foreach ($teams as $team) {
-            if ($team !== '') {
-                $label = str_replace($team, '⌁', $label);
-            }
-        }
-
-        $label = trim((string) preg_replace('/\s+/u', ' ', (string) preg_replace('/^⌁\s*/u', '', $label)));
-
-        return ((string) ($selection['market_group'] ?? 'autre')).'|'.$label;
+        return $this->diversitySelector->select($candidates, $limit, ['league_cap' => 3]);
     }
 
     /**

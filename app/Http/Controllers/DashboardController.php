@@ -8,6 +8,7 @@ use App\Models\Prediction;
 use App\Models\SystemAlert;
 use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
+use App\Services\Parlay\MarketDiversitySelector;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\MarketNormalizationService;
 use App\Services\Prediction\PredictionClient;
@@ -19,6 +20,10 @@ use Illuminate\Http\Request;
 
 class DashboardController extends Controller
 {
+    public function __construct(
+        private readonly MarketDiversitySelector $diversitySelector
+    ) {}
+
     public function results(Request $request)
     {
         $data = $request->validate([
@@ -775,65 +780,6 @@ class DashboardController extends Controller
     /**
      * Construit trois versions de combinés, de la plus sûre à la plus risquée.
      */
-    /**
-     * Famille de marché pour le plafond 1N2 dans les gros combinés.
-     */
-    private function parlayMarketFamily(string $market): string
-    {
-        // Les clés doivent être en minuscules : la recherche se fait sur la
-        // version minuscule du libellé (« 1N2 » devenait « 1n2 » et échappait
-        // au plafond des marchés de résultat).
-        $map = [
-            '1n2' => '1x2', '1x2' => '1x2', 'h2h' => '1x2', 'result' => '1x2', 'resultat' => '1x2',
-            'résultat' => '1x2', 'résultats' => '1x2',
-            'home' => '1x2', 'away' => '1x2', 'draw' => '1x2',
-            'double chance' => 'double_chance', 'double_chance' => 'double_chance',
-            'dnb' => 'dnb',
-            'btts' => 'btts',
-            'total buts' => 'totals', 'totaux' => 'totals', 'totals' => 'totals', 'total_goals' => 'totals',
-            'asian_totals' => 'totals',
-            'buts par équipe' => 'team_totals', 'team_totals' => 'team_totals',
-            'clean sheet' => 'clean_sheet', 'clean_sheet' => 'clean_sheet',
-            'marge de buts' => 'goal_margin', 'goal_margin' => 'goal_margin',
-            'handicap' => 'handicap', 'asian_handicap' => 'handicap', 'european_handicap' => 'handicap',
-            'combiné' => 'combos', 'combine' => 'combos', 'combos' => 'combos',
-            'ht_result' => 'half_time', 'half_time' => 'half_time',
-            'score exact' => 'score_exact', 'exact_score' => 'score_exact',
-            'corners' => 'corners', 'cartons' => 'cards', 'cards' => 'cards',
-            'statistiques' => 'stats', 'tirs' => 'stats',
-        ];
-        $key = mb_strtolower(trim($market), 'UTF-8');
-
-        return $map[$key] ?? ($key !== '' ? $key : 'other');
-    }
-
-    /**
-     * Type de sélection indépendant des équipes : « Plus de 1,5 but » reste le
-     * même type d'un match à l'autre, ce qui évite un coupon rempli de lignes
-     * identiques alors que d'autres marchés sont disponibles.
-     */
-    private function parlaySelectionType(array $pick): string
-    {
-        $label = (string) ($pick['label'] ?? '');
-        $match = $pick['match'] ?? null;
-
-        $names = [];
-        if ($match && $match->homeTeam) {
-            $names[] = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
-        }
-        if ($match && $match->awayTeam) {
-            $names[] = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
-        }
-
-        foreach (array_filter($names, fn (?string $name): bool => $name !== null && $name !== '') as $name) {
-            $label = str_replace($name, '⌁', $label);
-        }
-
-        $label = trim((string) preg_replace('/\s+/u', ' ', (string) preg_replace('/^⌁\s*/u', '', $label)));
-
-        return ((string) ($pick['market'] ?? 'autre')).'|'.$label;
-    }
-
     private function buildBigParlayPicks(): array
     {
         $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction'])
@@ -843,9 +789,6 @@ class DashboardController extends Controller
                 ->where('is_official', true))
             ->orderBy('match_date_utc')
             ->get();
-
-        // Plafond par famille de résultat (1X2 et double chance) dans un coupon.
-        $parlay1X2Cap = 3;
 
         $candidates = $matches->map(function (FootballMatch $match): ?array {
             $prediction = $match->officialPrediction;
@@ -958,7 +901,7 @@ class DashboardController extends Controller
                     $publishedEntry = array_merge($published, [
                         'is_official' => true,
                         'source' => 'Révision validée',
-                        'family' => $this->parlayMarketFamily($prediction->published_market),
+                        'family' => $this->diversitySelector->family($prediction->published_market),
                     ]);
                     if ($published['prob'] >= 0.65) {
                         $safeOptions[] = $publishedEntry;
@@ -1008,109 +951,60 @@ class DashboardController extends Controller
             }
         }
 
-        $resultFamilies = ['1x2', 'double_chance'];
-
         foreach ($tiers as $risk => $picks) {
             $tierCandidates = collect($picks)
                 ->map(function (array $pick): array {
-                    $pick['family'] = $this->parlayMarketFamily((string) ($pick['market'] ?? ''));
-                    $pick['selection_type'] = $this->parlaySelectionType($pick);
+                    $pick['family'] = $this->diversitySelector->family((string) ($pick['market'] ?? ''));
+                    $pick['selection_type'] = $this->diversitySelector->selectionType(
+                        (string) ($pick['market'] ?? ''),
+                        (string) ($pick['label'] ?? ''),
+                        $this->parlayTeamNames($pick)
+                    );
 
                     return $pick;
                 })
                 ->sortByDesc('prob')
                 ->values();
 
-            $selected = [];
-            $usedMatches = [];
-            $resultCounts = ['1x2' => 0, 'double_chance' => 0];
-            $typeCounts = [];
-
-            // Un coupon de dix sélections ne peut pas reposer sur les seules
-            // victoires et doubles chances : plafond par famille et plafond
-            // cumulé des marchés de résultat.
-            $familyCap = $parlay1X2Cap;
-            $combinedResultCap = 5;
-            // Deux sélections identiques (même marché et même libellé) suffisent.
-            $typeCap = 2;
-
-            $tryAdd = function (array $pick, bool $enforceCap, ?int $maxType = null) use (
-                &$selected,
-                &$usedMatches,
-                &$resultCounts,
-                &$typeCounts,
-                $resultFamilies,
-                $familyCap,
-                $combinedResultCap,
-                $typeCap
-            ): void {
-                $matchId = $pick['match']->id ?? null;
-                if ($matchId !== null && in_array($matchId, $usedMatches, true)) {
-                    return;
-                }
-
-                $family = (string) ($pick['family'] ?? 'other');
-                $isResult = in_array($family, $resultFamilies, true);
-                $type = (string) ($pick['selection_type'] ?? 'autre');
-                $typeLimit = $maxType ?? $typeCap;
-                if ($enforceCap) {
-                    if ($isResult
-                        && (($resultCounts[$family] ?? 0) >= $familyCap
-                            || (($resultCounts['1x2'] ?? 0) + ($resultCounts['double_chance'] ?? 0)) >= $combinedResultCap)) {
-                        return;
-                    }
-                    if (($typeCounts[$type] ?? 0) >= $typeLimit) {
-                        return;
-                    }
-                }
-
-                $selected[] = $pick;
-                if ($matchId !== null) {
-                    $usedMatches[] = $matchId;
-                }
-                if ($isResult) {
-                    $resultCounts[$family] = ($resultCounts[$family] ?? 0) + 1;
-                }
-                $typeCounts[$type] = ($typeCounts[$type] ?? 0) + 1;
-            };
-
-            // 1. Un choix par championnat.
-            foreach ($tierCandidates->groupBy('league_key')->map(fn ($league) => $league->first())->values() as $pick) {
-                if (count($selected) >= 10) break;
-                $tryAdd($pick, true);
-            }
-
-            // 2. Complément en priorité avec les marchés de buts/statistiques.
-            foreach ($tierCandidates->reject(
-                fn (array $pick): bool => in_array((string) ($pick['family'] ?? ''), $resultFamilies, true)
-            ) as $pick) {
-                if (count($selected) >= 10) break;
-                $tryAdd($pick, true);
-            }
-
-            // 3. Puis les marchés de résultat, dans la limite des plafonds.
-            foreach ($tierCandidates as $pick) {
-                if (count($selected) >= 10) break;
-                $tryAdd($pick, true);
-            }
-
-            // 4. Puis un type répété reste toléré une troisième fois.
-            foreach ($tierCandidates as $pick) {
-                if (count($selected) >= 10) break;
-                $tryAdd($pick, true, $typeCap + 1);
-            }
-
-            // 5. Dernier recours : uniquement si les marchés disponibles ne
-            // permettent pas d'atteindre dix sélections.
-            foreach ($tierCandidates as $pick) {
-                if (count($selected) >= 10) break;
-                $tryAdd($pick, false);
-            }
+            // Sélecteur partagé avec /parlays : plafonds par famille, plafond
+            // cumulé des marchés de résultat, plafond par type de sélection et
+            // rotation d'un choix par championnat.
+            $selected = $this->diversitySelector->select(
+                $tierCandidates->map(fn (array $pick): array => [
+                    'match' => $pick['match']->id ?? null,
+                    'family' => (string) ($pick['family'] ?? 'other'),
+                    'type' => (string) ($pick['selection_type'] ?? 'autre'),
+                    'league' => (string) ($pick['league_key'] ?? 'unknown'),
+                    'payload' => $pick,
+                ])->all(),
+                10,
+                ['rotate_league' => true]
+            );
 
             $tiers[$risk] = collect($selected)->sortBy('prob')->values()->all();
         }
 
         return $tiers;
+    }
+
+    /**
+     * Noms d'équipes tels qu'affichés, pour normaliser le type de sélection.
+     *
+     * @return array<int, string>
+     */
+    private function parlayTeamNames(array $pick): array
+    {
+        $match = $pick['match'] ?? null;
+        $names = [];
+
+        if ($match && $match->homeTeam) {
+            $names[] = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
+        }
+        if ($match && $match->awayTeam) {
+            $names[] = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
+        }
+
+        return array_values(array_filter($names, fn (?string $name): bool => $name !== null && $name !== ''));
     }
 
 

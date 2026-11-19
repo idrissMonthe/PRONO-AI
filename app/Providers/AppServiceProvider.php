@@ -6,6 +6,7 @@ use App\Services\AIExplanation\GeminiExplanationService;
 use App\Services\FootballData\FootballDataService;
 use App\Services\Integrity\HashChainService;
 use App\Services\Odds\OddsService;
+use App\Services\Parlay\MarketDiversitySelector;
 use App\Services\Parlay\ParlayService;
 use App\Services\Prediction\PredictionClient;
 use App\Services\Prediction\PredictionRevisionService;
@@ -43,7 +44,8 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(ParlayService::class, function ($app) {
             return new ParlayService(
                 $app->make(GeminiExplanationService::class),
-                $app->make(PredictionRevisionService::class)
+                $app->make(PredictionRevisionService::class),
+                $app->make(MarketDiversitySelector::class)
             );
         });
 
