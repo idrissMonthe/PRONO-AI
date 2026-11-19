@@ -282,8 +282,11 @@ class PredictionRevisionServiceTest extends TestCase
         $this->assertStringContainsString('pas pu être effectuée', $review['reasoning']);
     }
 
-    public function test_gemini_api_failure_is_not_a_validation(): void
+    public function test_gemini_fallback_is_a_local_validation_not_a_gemini_one(): void
     {
+        // Quand Gemini est indisponible, la revue déterministe rend une vraie
+        // décision : elle est conservée et étiquetée localement, au lieu d'être
+        // jetée comme un échec technique (ce qui bloquait les combinés).
         $review = $this->reviewed([
             'fallback' => true,
             'decision' => 'keep',
@@ -291,10 +294,24 @@ class PredictionRevisionServiceTest extends TestCase
             'risk_factors' => ['ai_review_unavailable'],
         ], ['1N2' => ['home' => 0.61, 'draw' => 0.22, 'away' => 0.17]]);
 
-        $this->assertSame(PredictionRevisionService::STATUS_FAILED, $review['gemini_status']);
+        $this->assertSame(PredictionRevisionService::STATUS_VALIDATED_LOCAL, $review['gemini_status']);
         $this->assertSame(0.61, $review['python_candidate']['probability']);
-        $this->assertFalse($review['parlay_eligible']);
+        $this->assertTrue($review['parlay_eligible']);
         $this->assertNotSame(PredictionRevisionService::STATUS_VALIDATED, $review['gemini_status']);
+        $this->assertSame('Validé par le moteur local (Gemini indisponible)', PredictionRevisionService::statusLabel($review['gemini_status']));
+    }
+
+    public function test_undecodable_gemini_answer_is_still_a_technical_failure(): void
+    {
+        $review = $this->reviewed([
+            'fallback' => true,
+            'decision' => 'review_failed',
+            'provider' => 'deterministic_fallback',
+            'risk_factors' => ['ai_review_unavailable'],
+        ], ['1N2' => ['home' => 0.61, 'draw' => 0.22, 'away' => 0.17]]);
+
+        $this->assertSame(PredictionRevisionService::STATUS_FAILED, $review['gemini_status']);
+        $this->assertFalse($review['parlay_eligible']);
     }
 
     public function test_alternative_uses_the_python_probability_instead_of_an_invented_one(): void
@@ -398,7 +415,11 @@ class PredictionRevisionServiceTest extends TestCase
             ],
         ]);
 
+        config()->set('services.hybrid_prediction.allow_gemini_alternative_in_parlays', false);
         $this->assertTrue($service->pythonPickEligibleForParlay($validated));
+        $this->assertTrue($service->pythonPickEligibleForParlay(new \App\Models\Prediction([
+            'review_decision' => PredictionRevisionService::STATUS_VALIDATED_LOCAL,
+        ])));
         $this->assertFalse($service->pythonPickEligibleForParlay($refused));
         $this->assertFalse($service->pythonPickEligibleForParlay(new \App\Models\Prediction([
             'review_decision' => PredictionRevisionService::STATUS_FAILED,

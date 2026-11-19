@@ -241,12 +241,26 @@
                                     </div>
 
                                     <!-- Bloc Verdict et Alternative Gemini -->
-                                    @php $badge = $pick['gemini'] ?? ['state' => 'not_evaluated', 'label' => 'Non évalué par Gemini']; @endphp
+                                    @php
+                                        $badge = $pick['gemini'] ?? ['state' => 'not_evaluated', 'label' => 'Non évalué par Gemini'];
+                                        $badgeClass = match ($badge['state']) {
+                                            'validated' => 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40',
+                                            'validated_local' => 'bg-[#C3A16A]/15 text-[#C3A16A] border border-[#C3A16A]/40',
+                                            'not_validated' => 'bg-[#D68D86]/20 text-[#D68D86] border border-[#D68D86]/40',
+                                            default => 'bg-[#A2ACA3]/15 text-[#A2ACA3] border border-[#A2ACA3]/30',
+                                        };
+                                        $badgeText = match ($badge['state']) {
+                                            'validated' => 'VALIDÉ',
+                                            'validated_local' => 'VALIDÉ LOCAL',
+                                            'not_validated' => 'NON VALIDÉ',
+                                            default => 'NON ÉVALUÉ',
+                                        };
+                                    @endphp
                                     <div class="pt-2 border-t border-[#303A32]/40 space-y-1.5 text-xs">
                                         <div class="flex items-center justify-between gap-1.5">
                                             <span class="text-[10px] uppercase font-semibold text-[#A2ACA3] mono">Verdict Gemini :</span>
-                                            <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider mono {{ $badge['state'] === 'validated' ? 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40' : ($badge['state'] === 'not_validated' ? 'bg-[#D68D86]/20 text-[#D68D86] border border-[#D68D86]/40' : 'bg-[#A2ACA3]/15 text-[#A2ACA3] border border-[#A2ACA3]/30') }}">
-                                                {{ $badge['state'] === 'validated' ? 'VALIDÉ' : ($badge['state'] === 'not_validated' ? 'NON VALIDÉ' : 'NON ÉVALUÉ') }}
+                                            <span class="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider mono {{ $badgeClass }}" title="{{ $badge['label'] }}">
+                                                {{ $badgeText }}
                                             </span>
                                         </div>
 

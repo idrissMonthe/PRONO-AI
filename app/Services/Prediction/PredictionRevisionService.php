@@ -16,6 +16,15 @@ class PredictionRevisionService
 
     public const STATUS_VALIDATED = 'VALIDATED';
 
+    /**
+     * Validation produite par le moteur de règles local lorsque Gemini est
+     * indisponible (quota, réseau). Elle n'est jamais présentée comme une
+     * validation Gemini, mais elle reste une évaluation réelle : la traiter
+     * comme un échec supprimait l'alternative et rendait le pronostic
+     * inutilisable dans les combinés.
+     */
+    public const STATUS_VALIDATED_LOCAL = 'VALIDATED_LOCAL_RULES';
+
     public const STATUS_WITH_ALTERNATIVE = 'NOT_VALIDATED_WITH_ALTERNATIVE';
 
     public const STATUS_WITHOUT_ALTERNATIVE = 'NOT_VALIDATED_WITHOUT_ALTERNATIVE';
@@ -89,14 +98,20 @@ class PredictionRevisionService
             ],
         ]));
 
-        if (! is_array($aiReview) || ($aiReview['fallback'] ?? true)) {
+        // Un simple `fallback` signale que la réponse ne vient pas de Gemini ;
+        // il ne signifie pas qu'aucune évaluation n'a eu lieu. Seule une
+        // décision inexploitable reste un échec, sinon la revue déterministe
+        // (et son alternative) serait jetée alors qu'elle a bien été calculée.
+        $canonical = is_array($aiReview) ? $this->canonicalDecision($aiReview) : 'failed';
+
+        if (! is_array($aiReview) || $canonical === 'failed') {
             return $this->assemble(
                 self::STATUS_FAILED,
                 $initial,
                 null,
                 'La validation Gemini n’a pas pu être effectuée. L’absence de réponse n’est pas une validation.',
                 array_values(array_unique(array_merge(
-                    $aiReview['risk_factors'] ?? [],
+                    (array) ($aiReview['risk_factors'] ?? []),
                     ['ai_review_unavailable'],
                     $this->qualityRisks($quality)
                 ))),
@@ -108,15 +123,20 @@ class PredictionRevisionService
             );
         }
 
-        $canonical = $this->canonicalDecision($aiReview);
         $risks = array_values(array_filter((array) ($aiReview['risk_factors'] ?? []), 'is_string'));
         $reasoning = is_string($aiReview['reasoning'] ?? null) && $aiReview['reasoning'] !== ''
             ? $aiReview['reasoning']
             : 'Gemini n’a pas fourni d’explication.';
 
         if ($canonical === 'validated') {
+            // La provenance est conservée : une validation locale n'est pas
+            // une validation signée par Gemini.
+            $validatedStatus = (string) ($aiReview['provider'] ?? 'google_gemini') === 'google_gemini'
+                ? self::STATUS_VALIDATED
+                : self::STATUS_VALIDATED_LOCAL;
+
             return $this->assemble(
-                self::STATUS_VALIDATED,
+                $validatedStatus,
                 $initial,
                 null,
                 $reasoning,
@@ -143,21 +163,6 @@ class PredictionRevisionService
                 $aiReview['model'] ?? null,
                 $aiReview,
                 $aiReview['supporting_factors'] ?? []
-            );
-        }
-
-        if ($canonical === 'failed') {
-            return $this->assemble(
-                self::STATUS_FAILED,
-                $initial,
-                null,
-                'La validation Gemini n’a pas pu être effectuée. L’absence de réponse n’est pas une validation.',
-                array_values(array_unique(array_merge($risks, ['ai_review_unavailable'], $this->qualityRisks($quality)))),
-                $candidates,
-                'low',
-                (string) ($aiReview['provider'] ?? 'deterministic_fallback'),
-                $aiReview['model'] ?? self::POLICY_VERSION,
-                $aiReview
             );
         }
 
@@ -188,6 +193,7 @@ class PredictionRevisionService
     {
         return match (strtoupper((string) $status)) {
             self::STATUS_VALIDATED, 'VALIDATED' => 'Validé par Gemini',
+            self::STATUS_VALIDATED_LOCAL, 'VALIDATED_LOCAL_RULES' => 'Validé par le moteur local (Gemini indisponible)',
             self::STATUS_WITH_ALTERNATIVE, 'NOT_VALIDATED_WITH_ALTERNATIVE' => 'Non validé par Gemini (alternative proposée)',
             self::STATUS_WITHOUT_ALTERNATIVE, 'NOT_VALIDATED_WITHOUT_ALTERNATIVE', 'NOT_VALIDATED' => 'Non validé par Gemini',
             self::STATUS_INSUFFICIENT, 'INSUFFICIENT_INFORMATION', 'INSUFFICIENT_DATA' => 'Non évalué par Gemini (informations insuffisantes)',
@@ -305,10 +311,6 @@ class PredictionRevisionService
             }
 
             $key = $market.':'.$selection.($line !== null ? ':'.$line : '');
-            if (isset($seenKeys[$key])) {
-                return;
-            }
-            $seenKeys[$key] = true;
 
             // Cote réelle si fournie, sinon estimation explicite (marquée
             // comme telle : elle ne sera jamais affichée comme un prix bookmaker).
@@ -324,6 +326,22 @@ class PredictionRevisionService
                     return;
                 }
             }
+
+            if (isset($seenKeys[$key])) {
+                // Un identifiant de marché dupliqué ne doit pas priver le
+                // candidat de sa cote bookmaker : la cote réelle remplace
+                // toujours l'estimation équivalente.
+                $existingIndex = $seenKeys[$key];
+                if (($candidates[$existingIndex]['odds_source'] ?? '') === 'bookmaker' || ! $isBookmakerOdds) {
+                    return;
+                }
+                $candidates[$existingIndex]['odds'] = $odds;
+                $candidates[$existingIndex]['odds_source'] = 'bookmaker';
+                $candidates[$existingIndex]['expected_value'] = round(($probability * $odds) - 1.0, 4);
+
+                return;
+            }
+            $seenKeys[$key] = count($candidates);
 
             $candidates[] = [
                 'candidate_key' => $key,
@@ -350,7 +368,11 @@ class PredictionRevisionService
                 if (! is_array($pred) || empty($pred['market_id']) || empty($pred['selection'])) {
                     continue;
                 }
-                $mId = (string) $pred['market_id'];
+                // Le moteur Python emploie parfois un alias (`1x2`, `draw_no_bet`)
+                // pour le même marché que les blocs canoniques ci-dessous : sans
+                // normalisation, le candidat sans cote bookmaker gagnait la
+                // déduplication et l'alternative devenait inutilisable.
+                $mId = $this->canonicalMarketId((string) $pred['market_id']);
                 $sel = (string) $pred['selection'];
                 $prob = $pred['probability'] ?? null;
                 $line = isset($pred['line']) && is_numeric($pred['line']) ? (float) $pred['line'] : null;
@@ -759,7 +781,7 @@ class PredictionRevisionService
             'missing_data' => array_values(array_filter($missing, 'is_string')),
             'confidence_in_revision' => in_array($confidence, ['low', 'medium', 'high'], true) ? $confidence : 'low',
             'required_recalculation' => ($alternative['origin'] ?? null) === 'PYTHON',
-            'parlay_eligible' => $status === self::STATUS_VALIDATED && $python !== null,
+            'parlay_eligible' => in_array($status, [self::STATUS_VALIDATED, self::STATUS_VALIDATED_LOCAL], true) && $python !== null,
             'candidates' => $candidates,
             'provider' => $provider,
             'model' => $model,
@@ -920,6 +942,21 @@ class PredictionRevisionService
             'players', 'anytime_goalscorer', 'player_carded' => true,
             'exact_score' => (bool) preg_match('/^\d+-\d+$/', $selection),
             default => false,
+        };
+    }
+
+    /**
+     * Identifiants de marché équivalents renvoyés par le moteur Python.
+     */
+    private function canonicalMarketId(string $market): string
+    {
+        return match (strtolower(trim($market))) {
+            '1x2', 'h2h', 'result' => '1N2',
+            'draw_no_bet' => 'dnb',
+            'team_total_goals' => 'team_totals',
+            'asian_team_total_goals' => 'asian_team_totals',
+            'both_teams_to_score' => 'btts',
+            default => $market,
         };
     }
 

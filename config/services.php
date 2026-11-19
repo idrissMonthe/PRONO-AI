@@ -57,7 +57,10 @@ return [
         'allow_ai_in_parlays' => env('PREDICTION_ALLOW_AI_IN_PARLAYS', true),
         // Une alternative Gemini n'entre dans un combiné que si ce réglage est actif
         // et après les contrôles de marché. Elle ne remplace pas le pronostic Python.
-        'allow_gemini_alternative_in_parlays' => env('PREDICTION_ALLOW_GEMINI_ALTERNATIVE_IN_PARLAYS', false),
+        // Une alternative refusée par Gemini ne vaut pas validation, mais elle
+        // reste un marché calculé par Python avec sa propre probabilité : elle
+        // peut donc alimenter les combinés, contrairement à une revue échouée.
+        'allow_gemini_alternative_in_parlays' => env('PREDICTION_ALLOW_GEMINI_ALTERNATIVE_IN_PARLAYS', true),
         // Bande dans laquelle un marché peut devenir le pronostic publié.
         // Au-dessus du plafond, la ligne reste analysée mais ne masque pas
         // un autre marché déjà situé dans la bande.

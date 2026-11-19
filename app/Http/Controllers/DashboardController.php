@@ -459,6 +459,12 @@ class DashboardController extends Controller
                 'state' => 'validated',
                 'label' => 'Validé par Gemini',
             ],
+            // Validation produite par le moteur de règles local quand Gemini
+            // est indisponible : évaluation réelle, mais jamais attribuée à Gemini.
+            PredictionRevisionService::STATUS_VALIDATED_LOCAL => [
+                'state' => 'validated_local',
+                'label' => 'Validé par le moteur local (Gemini indisponible)',
+            ],
             PredictionRevisionService::STATUS_WITH_ALTERNATIVE,
             PredictionRevisionService::STATUS_WITHOUT_ALTERNATIVE => [
                 'state' => 'not_validated',

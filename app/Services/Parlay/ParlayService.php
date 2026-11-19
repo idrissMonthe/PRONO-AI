@@ -546,7 +546,10 @@ class ParlayService
                 ->where('is_official', true)
                 ->where('is_abstained', false))
             ->orderBy('match_date_utc')
-            ->take(12)
+            // Un coupon de dix sélections exige un bassin d'au moins dix
+            // matchs exploitables : le limiter à douze rendait le gros
+            // combiné structurellement impossible.
+            ->take(40)
             ->get();
 
         if ($matches->count() < 2) {
@@ -564,7 +567,7 @@ class ParlayService
                         fn ($sub) => $sub->where('is_abstained', false)
                     ))
                 ->orderBy('match_date_utc')
-                ->take(16)
+                ->take(60)
                 ->get();
         }
 
@@ -1012,7 +1015,7 @@ class ParlayService
         return match (true) {
             in_array($normalized, ['1n2', '1x2', 'résultat', 'resultat'], true) => '1x2',
             $normalized === 'double chance' => 'double_chance',
-            in_array($normalized, ['total buts', 'totaux'], true) => 'totals',
+            in_array($normalized, ['total buts', 'totaux', 'total_goals'], true) => 'totals',
             $normalized === 'buts par équipe' => 'team_totals',
             $normalized === 'btts' => 'btts',
             $normalized === 'clean sheet' => 'clean_sheet',
