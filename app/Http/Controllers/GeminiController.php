@@ -46,48 +46,33 @@ class GeminiController extends Controller
      */
     public function testConnection(): JsonResponse
     {
-        if (!$this->geminiService->isConfigured()) {
-            return response()->json([
-                'success' => false,
-                'configured' => false,
-                'message' => 'Clé API Gemini non configurée dans .env (GEMINI_API_KEY).',
-                'provider' => 'deterministic_template',
-            ], 422);
+        $ping = $this->geminiService->ping();
+
+        $httpCode = 200;
+        if (! $ping['success']) {
+            if (! $ping['configured']) {
+                $httpCode = 422;
+            } elseif (in_array($ping['http_status'], [401, 403], true)) {
+                $httpCode = 401;
+            } elseif ($ping['http_status'] === 429) {
+                $httpCode = 429;
+            } else {
+                $httpCode = 502;
+            }
         }
 
-        $startTime = microtime(true);
-
-        $testContext = [
-            'home_team' => 'Test FC',
-            'away_team' => 'Demo United',
-            'expected_goals' => ['home' => 1.5, 'away' => 1.0],
-            'probabilities' => [
-                'home' => ['p' => 0.50],
-                'draw' => ['p' => 0.28],
-                'away' => ['p' => 0.22],
-            ],
-            'top_scores' => [['score' => '1-0', 'p' => 0.15]],
-            'quality' => ['score' => 100],
-        ];
-
-        $result = $this->geminiService->explainMatch(
-            $testContext,
-            'beginner',
-            'Peux-tu confirmer en une phrase courte que la connexion à l\'API fonctionne bien ?'
-        );
-
-        $latencyMs = round((microtime(true) - $startTime) * 1000);
-
         return response()->json([
-            'success' => $result['provider'] === 'google_gemini',
-            'configured' => true,
-            'latency_ms' => $latencyMs,
-            'provider' => $result['provider'],
-            'model' => $result['model'] ?? config('services.gemini.model'),
-            'verified' => $result['verified'] ?? true,
-            'is_fallback' => $result['is_fallback'] ?? false,
-            'sample_response' => $result['text'] ?? '',
-        ]);
+            'success'     => (bool) $ping['success'],
+            'configured'  => (bool) $ping['configured'],
+            'connected'   => (bool) ($ping['connected'] ?? false),
+            'provider'    => (string) ($ping['provider'] ?? 'google_gemini'),
+            'model'       => (string) ($ping['model'] ?? config('services.gemini.model', 'gemini-3.8-flash')),
+            'http_status' => $ping['http_status'],
+            'error_code'  => $ping['error_code'],
+            'message'     => (string) $ping['message'],
+            'latency_ms'  => $ping['latency_ms'] ?? null,
+            'is_fallback' => (bool) ($ping['is_fallback'] ?? false),
+        ], $httpCode);
     }
 
     /**

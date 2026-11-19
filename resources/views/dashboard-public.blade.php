@@ -6,9 +6,9 @@
             'audacieux' => ['title' => 'Audacieux', 'subtitle' => 'Plus risqués, pour tenter un scénario intéressant', 'class' => 'pick-tier-audacieux'],
         ];
         $bigParlayGroups = [
-            'prudent' => ['title' => 'Version prudente', 'subtitle' => 'Doubles chances et marchés à probabilité élevée', 'class' => 'pick-tier-prudent'],
-            'equilibre' => ['title' => 'Version équilibrée', 'subtitle' => 'Résultats 1N2 et marchés intermédiaires', 'class' => 'pick-tier-equilibre'],
-            'audacieux' => ['title' => 'Version audacieuse', 'subtitle' => 'Issues moins probables mais plausibles, sans privilégier systématiquement le nul', 'class' => 'pick-tier-audacieux'],
+            'prudent' => ['title' => 'Version prudente', 'subtitle' => 'Marchés de buts et probabilités élevées, sans excès de doubles chances', 'class' => 'pick-tier-prudent'],
+            'equilibre' => ['title' => 'Version équilibrée', 'subtitle' => 'Totaux, BTTS, buts par équipe et résultats mesurés', 'class' => 'pick-tier-equilibre'],
+            'audacieux' => ['title' => 'Version audacieuse', 'subtitle' => 'Scénarios moins probables mais plausibles, répartis sur plusieurs marchés', 'class' => 'pick-tier-audacieux'],
         ];
         $pickCount = collect($dailyPicks)->flatten(1)->count();
         $liveFlashPickCount = count($liveFlashPicks);
@@ -58,18 +58,18 @@
         </div>
     @endif
 
-    <!-- Combinés du Jour Automatiques (Section 9 & 28) -->
-    @if($dailyParlays->isNotEmpty())
-        <section class="section-block">
-            <div class="section-heading">
-                <div>
-                    <span class="eyebrow">PROPOSITIONS DE COMBINÉS</span>
-                    <h2>Propositions de combinés</h2>
-                    <p>Combinaisons calculées mathématiquement (probabilité conjointe, estimation réaliste du risque et valeur attendue).</p>
-                </div>
-                <a href="{{ route('parlays.index') }}" class="text-link">Gérer & régénérer →</a>
+    <!-- Propositions de combinés — Section toujours visible -->
+    <section class="section-block" id="daily-parlays">
+        <div class="section-heading">
+            <div>
+                <span class="eyebrow">PROPOSITIONS DE COMBINÉS</span>
+                <h2>Propositions de combinés</h2>
+                <p>Combinaisons calculées mathématiquement (probabilité conjointe, estimation réaliste du risque et valeur attendue).</p>
             </div>
+            <a href="{{ route('parlays.index') }}" class="text-link">Gérer &amp; régénérer →</a>
+        </div>
 
+        @if($dailyParlays->isNotEmpty())
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 @foreach($dailyParlays->take(3) as $parlay)
                     <div class="p-4 rounded-xl bg-[#141A17] border border-[#303A32] hover:border-[#C3A16A]/60 transition-all flex flex-col justify-between space-y-3.5">
@@ -138,8 +138,25 @@
                     </div>
                 @endforeach
             </div>
-        </section>
-    @endif
+        @else
+            <div class="p-6 rounded-xl bg-[#141A17] border border-[#303A32] flex flex-col items-center justify-center text-center space-y-3">
+                <div class="w-10 h-10 rounded-full bg-[#222B25] flex items-center justify-center text-[#A2ACA3]">
+                    <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                    </svg>
+                </div>
+                <div>
+                    <h3 class="text-sm font-semibold text-[#F0F0E8]">Aucun combiné n'a encore été généré pour aujourd'hui</h3>
+                    <p class="text-xs text-[#A2ACA3] mt-1 max-w-md">
+                        Les combinés sont automatiquement construits dès que des prédictions multimarchés fiables sont disponibles.
+                    </p>
+                </div>
+                <a href="{{ route('parlays.index') }}" class="px-4 py-2 rounded-lg bg-[#222B25] hover:bg-[#2c372f] border border-[#303A32] hover:border-[#C3A16A]/50 text-xs font-semibold text-[#F0F0E8] transition-all mono">
+                    Accéder à l'espace combinés &amp; générer →
+                </a>
+            </div>
+        @endif
+    </section>
 
     <!-- Opportunités de Valeur Détectées (EV > 0) -->
     @if(count($edges) > 0)

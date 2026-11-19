@@ -15,7 +15,7 @@ class GeminiExplanationService
     public function __construct()
     {
         $this->apiKey = config('services.gemini.api_key', env('GEMINI_API_KEY'));
-        $this->model = config('services.gemini.model', env('GEMINI_MODEL', 'gemini-flash-lite-latest'));
+        $this->model = config('services.gemini.model', env('GEMINI_MODEL', 'gemini-3.8-flash'));
     }
 
     public function getApiKey(): ?string
@@ -25,7 +25,56 @@ class GeminiExplanationService
 
     public function getModel(): string
     {
-        return config('services.gemini.model') ?: ($this->model ?: env('GEMINI_MODEL', 'gemini-flash-lite-latest'));
+        return config('services.gemini.model') ?: ($this->model ?: env('GEMINI_MODEL', 'gemini-3.8-flash'));
+    }
+
+    public function getModelsToTry(): array
+    {
+        // Cascade volontairement limitée aux modèles réellement disponibles
+        // pour une clé AI Studio : les versions 2.5 sont retirées (404) et
+        // `gemini-flash-latest` répond régulièrement 503/timeout.
+        return array_values(array_unique(array_filter([
+            $this->getModel(),
+            'gemini-flash-lite-latest',
+            'gemini-3.5-flash-lite',
+            'gemini-3.8-flash',
+        ])));
+    }
+
+    /**
+     * Analyse et journalise la réponse d'erreur de l'API Gemini.
+     * Retourne true si la cascade de modèles doit s'arrêter immédiatement (401, 403, 429).
+     */
+    protected function handleApiErrorResponse(\Illuminate\Http\Client\Response $response, string $model, string $action): bool
+    {
+        $status = $response->status();
+        $errorBody = $response->json('error', []);
+        $errorCode = $errorBody['code'] ?? $status;
+        $errorStatus = $errorBody['status'] ?? ('HTTP_' . $status);
+        $errorMessage = $errorBody['message'] ?? $response->body();
+
+        Log::warning("Gemini API error during {$action}.", [
+            'model' => $model,
+            'http_status' => $status,
+            'error_code' => $errorCode,
+            'error_status' => $errorStatus,
+            'error_message' => substr((string) $errorMessage, 0, 500),
+        ]);
+
+        // 401 Non autorisé ou 403 Clé invalide/permissions : inutile de tester d'autres modèles avec la même clé
+        if ($status === 401 || $status === 403) {
+            return true;
+        }
+
+        // 429 Quota dépassé / Rate limit : le quota est propre à chaque modèle.
+        // Un modèle saturé ne doit pas empêcher d'essayer le suivant, sinon une
+        // clé parfaitement valide finit en « revue indisponible ».
+        if ($status === 429) {
+            return false;
+        }
+
+        // 404 Modèle inconnu ou 5xx Erreur serveur Google : on tente le modèle suivant
+        return false;
     }
 
     public function isConfigured(): bool
@@ -81,7 +130,7 @@ class GeminiExplanationService
             'allowed_markets' => $allowedMarkets,
         ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
         $contextHash = hash('sha256', json_encode($context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-        $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
+        $modelsToTry = $this->getModelsToTry();
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -100,7 +149,10 @@ class GeminiExplanationService
                     ]);
 
                 if (! $response->successful()) {
-                    Log::warning('Gemini sparse analysis request failed.', ['model' => $currentModel, 'status' => $response->status()]);
+                    $shouldStop = $this->handleApiErrorResponse($response, $currentModel, 'sparse_analysis');
+                    if ($shouldStop) {
+                        break;
+                    }
                     continue;
                 }
 
@@ -196,10 +248,7 @@ class GeminiExplanationService
         $prompt = $this->buildPrompt($predictionContext, $mode, $userQuestion);
 
         $apiKey = $this->getApiKey();
-        $model = $this->getModel();
-
-        // Modèles candidats en cascade en cas de saturation temporaire (503)
-        $modelsToTry = array_unique([$model, 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
+        $modelsToTry = $this->getModelsToTry();
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -230,7 +279,13 @@ class GeminiExplanationService
                         ]
                     ]);
 
-                if ($response->successful()) {
+                if (! $response->successful()) {
+                    $shouldStop = $this->handleApiErrorResponse($response, $currentModel, 'match_explanation');
+                    if ($shouldStop) {
+                        break;
+                    }
+                    continue;
+                }
                     $data = $response->json();
                     $parts = $data['candidates'][0]['content']['parts'] ?? [];
 
@@ -272,12 +327,6 @@ class GeminiExplanationService
                             'verification_notes' => $verification['notes'] ?? null,
                         ];
                     }
-                } else {
-                    Log::warning('Gemini API request failed.', [
-                        'model' => $currentModel,
-                        'status' => $response->status(),
-                    ]);
-                }
             } catch (Exception $e) {
                 Log::error('Gemini API connection failed.', [
                     'model' => $currentModel,
@@ -502,7 +551,7 @@ class GeminiExplanationService
             . "Consigne : Examine la proposition Python. Si la sélection présente une cote trop faible (< 1.25/1.30) ou un risque excessif, tu dois répondre 'not_validated', sélectionner obligatoirement la meilleure alternative parmi les candidats et la justifier.";
         $contextHash = hash('sha256', json_encode($context));
         $apiKey = $this->getApiKey();
-        $modelsToTry = array_unique([$this->getModel(), 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
+        $modelsToTry = $this->getModelsToTry();
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -518,7 +567,13 @@ class GeminiExplanationService
                         ],
                     ]);
 
-                if (! $response->successful()) continue;
+                if (! $response->successful()) {
+                    $shouldStop = $this->handleApiErrorResponse($response, $currentModel, 'prediction_review');
+                    if ($shouldStop) {
+                        break;
+                    }
+                    continue;
+                }
                 $parts = $response->json('candidates.0.content.parts', []);
                 $text = trim(implode("\n", array_map(fn ($part) => $part['text'] ?? '', array_filter($parts, fn ($part) => empty($part['thought'])))));
                 $decoded = $this->decodeReviewJson($text);
@@ -594,9 +649,9 @@ class GeminiExplanationService
                 'supporting_factors' => [],
                 'risk_factors' => ['insufficient_data'],
                 'confidence_in_revision' => 'low',
-                'provider' => 'gemini_evaluation_engine',
-                'model' => 'rule_based_analyst',
-                'fallback' => false,
+                'provider' => 'deterministic_local_fallback',
+                'model' => 'local_rules_engine',
+                'fallback' => true,
             ];
         }
 
@@ -660,9 +715,9 @@ class GeminiExplanationService
                     'supporting_factors' => ["Probabilité solide de l'alternative ({$altProb}%)", "Cote rémunératrice (@{$altOdds})"],
                     'risk_factors' => ['initial_selection_unfavorable_value'],
                     'confidence_in_revision' => 'medium',
-                    'provider' => 'gemini_evaluation_engine',
-                    'model' => 'gemini_analyst_rules',
-                    'fallback' => false,
+                    'provider' => 'deterministic_local_fallback',
+                    'model' => 'local_rules_engine',
+                    'fallback' => true,
                 ];
             }
         }
@@ -679,9 +734,9 @@ class GeminiExplanationService
             'supporting_factors' => ["Probabilité robuste de {$pct}%", "Rentabilité confirmée"],
             'risk_factors' => [],
             'confidence_in_revision' => 'high',
-            'provider' => 'gemini_evaluation_engine',
-            'model' => 'gemini_analyst_rules',
-            'fallback' => false,
+            'provider' => 'deterministic_local_fallback',
+            'model' => 'local_rules_engine',
+            'fallback' => true,
         ];
     }
 
@@ -722,8 +777,7 @@ class GeminiExplanationService
             . "\n\nFournis une évaluation lucide et transparente du risque de ce combiné.";
 
         $apiKey = $this->getApiKey();
-        $model = $this->getModel();
-        $modelsToTry = array_unique([$model, 'gemini-flash-lite-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-flash-latest']);
+        $modelsToTry = $this->getModelsToTry();
 
         foreach ($modelsToTry as $currentModel) {
             try {
@@ -747,8 +801,15 @@ class GeminiExplanationService
                         ],
                     ]);
 
-                if ($response->successful()) {
-                    $candidates = $response->json('candidates.0.content.parts', []);
+                if (! $response->successful()) {
+                    $shouldStop = $this->handleApiErrorResponse($response, $currentModel, 'parlay_explanation');
+                    if ($shouldStop) {
+                        break;
+                    }
+                    continue;
+                }
+
+                $candidates = $response->json('candidates.0.content.parts', []);
                     $parts = array_filter($candidates, fn ($part) => empty($part['thought']));
                     $text = trim(implode("\n", array_column($parts, 'text')));
 
@@ -759,7 +820,6 @@ class GeminiExplanationService
                             'text' => $text,
                         ];
                     }
-                }
             } catch (Exception $e) {
                 Log::warning("Gemini parlay explanation failed with model {$currentModel}: {$e->getMessage()}");
             }
@@ -787,5 +847,112 @@ class GeminiExplanationService
             . "Ce combiné présente une cote totale cumulée de **{$combOdds}** pour une probabilité produit de **{$combProb}%** (hypothèse d’indépendance, indice de risque : **{$riskScore}/10**).\n\n"
             . "**Hypothèse d’indépendance** : ce pourcentage est le produit des probabilités, pas une probabilité jointe exacte lorsque des sélections partagent une ligue ou un même week-end. " . ($context['independence_assumption'] ?? '') . "\n\n"
             . "> **Transparence éthique** : {$pricingNote} Ce combiné est un outil d'observation statistique pédagogique sans garantie de résultat.";
+    }
+
+    /**
+     * Teste la connectivité directe avec l'API Google Gemini et retourne un diagnostic structuré.
+     */
+    public function ping(): array
+    {
+        if (! $this->isConfigured()) {
+            return [
+                'success' => false,
+                'configured' => false,
+                'connected' => false,
+                'provider' => 'deterministic_local_fallback',
+                'model' => $this->getModel(),
+                'http_status' => null,
+                'error_code' => 'API_KEY_NOT_CONFIGURED',
+                'message' => 'Clé API Gemini non configurée dans .env (GEMINI_API_KEY).',
+                'latency_ms' => 0,
+                'is_fallback' => true,
+            ];
+        }
+
+        $apiKey = $this->getApiKey();
+        $modelsToTry = $this->getModelsToTry();
+        $lastStatus = null;
+        $lastErrorCode = null;
+        $lastMessage = null;
+        $startTime = microtime(true);
+
+        foreach ($modelsToTry as $currentModel) {
+            $modelStart = microtime(true);
+            try {
+                $response = Http::timeout(10)
+                    ->withHeaders([
+                        'Content-Type' => 'application/json',
+                        'x-goog-api-key' => $apiKey,
+                    ])
+                    ->post("https://generativelanguage.googleapis.com/v1beta/models/{$currentModel}:generateContent", [
+                        'contents' => [
+                            ['role' => 'user', 'parts' => [['text' => 'Confirme en un mot court : OK']]],
+                        ],
+                        'generationConfig' => [
+                            'temperature' => 0.0,
+                            'maxOutputTokens' => 10,
+                        ],
+                    ]);
+
+                $status = $response->status();
+                $latencyMs = round((microtime(true) - $modelStart) * 1000);
+
+                if ($response->successful()) {
+                    return [
+                        'success' => true,
+                        'configured' => true,
+                        'connected' => true,
+                        'provider' => 'google_gemini',
+                        'model' => $currentModel,
+                        'http_status' => 200,
+                        'error_code' => null,
+                        'message' => "Connexion réussie avec Google Gemini ({$currentModel}).",
+                        'latency_ms' => $latencyMs,
+                        'is_fallback' => false,
+                    ];
+                }
+
+                $errorBody = $response->json('error', []);
+                $lastStatus = $status;
+                $lastErrorCode = $errorBody['status'] ?? ('HTTP_' . $status);
+                $lastMessage = $errorBody['message'] ?? $response->body();
+
+                $this->handleApiErrorResponse($response, $currentModel, 'ping');
+
+                if ($status === 401 || $status === 403) {
+                    break;
+                }
+            } catch (\Throwable $e) {
+                Log::warning("Gemini ping exception for model {$currentModel}.", [
+                    'exception' => $e::class,
+                    'message' => $e->getMessage(),
+                ]);
+                $lastStatus = null;
+                $lastErrorCode = 'CONNECTION_EXCEPTION';
+                $lastMessage = $e->getMessage();
+            }
+        }
+
+        $latencyMs = round((microtime(true) - $startTime) * 1000);
+        $userMessage = match ($lastStatus) {
+            401, 403 => "Clé API Gemini invalide ou non autorisée (HTTP {$lastStatus}). Vérifiez votre clé dans .env.",
+            404 => "Le modèle demandé n'existe pas ou n'est plus accessible (HTTP 404).",
+            429 => "Quota d'appels API Gemini atteint ou débit dépassé (HTTP 429).",
+            500, 502, 503 => "Les serveurs Google Gemini rencontrent une indisponibilité temporaire (HTTP {$lastStatus}).",
+            default => "Impossible de joindre l'API Google Gemini : " . ($lastMessage ?: 'Erreur réseau ou timeout.'),
+        };
+
+        return [
+            'success' => false,
+            'configured' => true,
+            'connected' => false,
+            'provider' => 'google_gemini',
+            'model' => $this->getModel(),
+            'http_status' => $lastStatus,
+            'error_code' => $lastErrorCode,
+            'message' => $userMessage,
+            'latency_ms' => $latencyMs,
+            'is_fallback' => true,
+        ];
     }
 }

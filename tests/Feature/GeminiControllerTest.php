@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Services\AIExplanation\GeminiExplanationService;
 use Database\Seeders\DatabaseSeeder;
 use Database\Seeders\SampleMatchesSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -34,14 +35,42 @@ class GeminiControllerTest extends TestCase
 
     public function test_gemini_test_connection_endpoint(): void
     {
+        // L'endpoint fait désormais un vrai ping : on simule la réponse pour
+        // ne dépendre ni d'une clé réelle ni du réseau pendant les tests.
+        $this->mock(GeminiExplanationService::class, function ($mock) {
+            $mock->shouldReceive('ping')->once()->andReturn([
+                'success' => true,
+                'configured' => true,
+                'connected' => true,
+                'provider' => 'google_gemini',
+                'model' => 'gemini-flash-lite-latest',
+                'http_status' => 200,
+                'error_code' => null,
+                'message' => 'Connexion réussie avec Google Gemini.',
+                'latency_ms' => 120,
+                'is_fallback' => false,
+            ]);
+        });
+
         $response = $this->postJson('/api/gemini/test');
 
         $response->assertStatus(200)
+            ->assertJson([
+                'success' => true,
+                'configured' => true,
+                'connected' => true,
+                'provider' => 'google_gemini',
+            ])
             ->assertJsonStructure([
                 'success',
                 'configured',
+                'connected',
                 'provider',
-                'sample_response',
+                'model',
+                'http_status',
+                'message',
+                'latency_ms',
+                'is_fallback',
             ]);
     }
 

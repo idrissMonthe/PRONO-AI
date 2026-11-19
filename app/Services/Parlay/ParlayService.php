@@ -523,13 +523,17 @@ class ParlayService
             ));
         }
 
+        if ($createdParlays->isEmpty()) {
+            return $this->generateModelMarketParlays($targetDate);
+        }
+
         return $createdParlays;
     }
 
     /**
      * Génère les marchés modélisés manquants sans dupliquer les coupons déjà enregistrés.
      */
-    private function generateModelMarketParlays(Carbon $targetDate): Collection
+    public function generateModelMarketParlays(Carbon $targetDate): Collection
     {
         $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction.modelVersion'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
@@ -679,35 +683,36 @@ class ParlayService
             return $options;
         }
 
-        // Les coupons utilisent la sélection Python lorsque Gemini l'a validée,
-        // ou un pronostic historique antérieur à ce statut.
+        // Les coupons intègrent la sélection Python officielle si elle existe et n'est pas un carton,
+        // tout en laissant les autres marchés multimarchés participer au combiné.
         if ($pythonEligible && $prediction->published_market && $prediction->published_selection) {
-            $published = collect($this->revisionService->candidatesFromResult([
-                'markets' => $markets,
-                'top_scores' => $prediction->top_scores_json ?? [],
-            ]))->first(fn (array $candidate): bool => $candidate['market'] === $prediction->published_market
-                && $candidate['selection'] === $prediction->published_selection);
-            if (! $published) return [];
+            if (! \App\Services\Prediction\MarketNormalizationService::isCardsMarket($prediction->published_market, $prediction->published_family ?? null)) {
+                $published = collect($this->revisionService->candidatesFromResult([
+                    'markets' => $markets,
+                    'top_scores' => $prediction->top_scores_json ?? [],
+                ]))->first(fn (array $candidate): bool => $candidate['market'] === $prediction->published_market
+                    && $candidate['selection'] === $prediction->published_selection);
+                if ($published) {
+                    $label = $published['label'];
+                    if ($published['market'] === '1N2') {
+                        $label = match ($published['selection']) {
+                            'home' => "Victoire {$home}",
+                            'away' => "Victoire {$away}",
+                            'draw' => 'Match Nul',
+                            default => $published['label'],
+                        };
+                    } elseif ($published['market'] === 'double_chance') {
+                        $label = match ($published['selection']) {
+                            '1X' => "{$home} ou Nul",
+                            'X2' => "Nul ou {$away}",
+                            '12' => "Pas de nul",
+                            default => $published['label'],
+                        };
+                    }
 
-            $label = $published['label'];
-            if ($published['market'] === '1N2') {
-                $label = match ($published['selection']) {
-                    'home' => "Victoire {$home}",
-                    'away' => "Victoire {$away}",
-                    'draw' => 'Match Nul',
-                    default => $published['label'],
-                };
-            } elseif ($published['market'] === 'double_chance') {
-                $label = match ($published['selection']) {
-                    '1X' => "{$home} ou Nul",
-                    'X2' => "Nul ou {$away}",
-                    '12' => "Pas de nul",
-                    default => $published['label'],
-                };
+                    $add($published['selection'], $label, $published['market'], $published['probability']);
+                }
             }
-
-            $add($published['selection'], $label, $published['market'], $published['probability']);
-            return $options;
         }
 
         foreach ([1.5, 2.5, 3.5, 4.5] as $threshold) {
@@ -884,13 +889,22 @@ class ParlayService
     {
         $selected = [];
         $leagueCounts = [];
+        $market1X2Count = 0;
         foreach ($selections as $selection) {
             $league = (string) ($selection['league'] ?? 'unknown');
             if (($leagueCounts[$league] ?? 0) >= 3 && count($selections) - count($selected) > ($limit - count($selected))) {
                 continue;
             }
+            $is1X2 = in_array($selection['market_group'] ?? '', ['1N2', '1X2'], true)
+                || in_array($selection['selection'] ?? '', ['HOME', 'AWAY', 'DRAW', 'home', 'away', 'draw'], true);
+            if ($is1X2 && $market1X2Count >= 3 && count($selections) - count($selected) > ($limit - count($selected))) {
+                continue;
+            }
             $selected[] = $selection;
             $leagueCounts[$league] = ($leagueCounts[$league] ?? 0) + 1;
+            if ($is1X2) {
+                $market1X2Count++;
+            }
             if (count($selected) >= $limit) break;
         }
 

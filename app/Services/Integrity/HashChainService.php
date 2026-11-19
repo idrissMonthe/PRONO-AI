@@ -47,8 +47,8 @@ class HashChainService
      */
     public function verifyLedgerIntegrity(): array
     {
-        $chains = PredictionHashChain::with('prediction')->orderBy('id', 'asc')->get();
-        if ($chains->isEmpty()) {
+        $totalBlocks = PredictionHashChain::count();
+        if ($totalBlocks === 0) {
             return [
                 'status' => 'valid',
                 'total_blocks' => 0,
@@ -57,65 +57,106 @@ class HashChainService
             ];
         }
 
+        // La vérification est incrémentale : charger toutes les prédictions en
+        // une fois (avec leurs JSON de marchés, jusqu'à plusieurs centaines de
+        // Ko chacun) épuisait la mémoire du processus web. Seules les colonnes
+        // intervenant dans l'empreinte sont lues, par paquets bornés.
         $expectedPrev = str_repeat('0', 64);
-        foreach ($chains as $chain) {
-            if ($chain->prev_hash !== $expectedPrev) {
-                return [
-                    'status' => 'compromised',
-                    'total_blocks' => $chains->count(),
-                    'message' => "Rupture de chaîne détectée au bloc #{$chain->id}.",
-                    'broken_at_id' => $chain->id,
-                ];
-            }
+        $failure = null;
 
-            $prediction = $chain->prediction;
-            if (!$prediction) {
-                return [
-                    'status' => 'compromised',
-                    'total_blocks' => $chains->count(),
-                    'message' => "Prédiction manquante pour le bloc #{$chain->id}.",
-                    'broken_at_id' => $chain->id,
-                ];
-            }
+        PredictionHashChain::query()
+            ->select(['id', 'prediction_id', 'current_hash', 'prev_hash'])
+            ->orderBy('id', 'asc')
+            ->chunkById(200, function ($chains) use (&$expectedPrev, &$failure, $totalBlocks) {
+                $predictions = Prediction::query()
+                    ->whereIn('id', $chains->pluck('prediction_id')->all())
+                    ->get([
+                        'id',
+                        'match_id',
+                        'model_version_id',
+                        'prob_home',
+                        'prob_draw',
+                        'prob_away',
+                        'home_lambda',
+                        'away_lambda',
+                        'content_hash',
+                        'prev_hash',
+                    ])
+                    ->keyBy('id');
 
-            if ($prediction->content_hash !== $chain->current_hash || $prediction->prev_hash !== $chain->prev_hash) {
-                return [
-                    'status' => 'compromised',
-                    'total_blocks' => $chains->count(),
-                    'message' => "Empreinte incohérente entre la prédiction et le bloc #{$chain->id}.",
-                    'broken_at_id' => $chain->id,
-                ];
-            }
+                foreach ($chains as $chain) {
+                    if ($chain->prev_hash !== $expectedPrev) {
+                        $failure = [
+                            'status' => 'compromised',
+                            'total_blocks' => $totalBlocks,
+                            'message' => "Rupture de chaîne détectée au bloc #{$chain->id}.",
+                            'broken_at_id' => $chain->id,
+                        ];
 
-            $payload = json_encode([
-                'id' => $prediction->id,
-                'match_id' => $prediction->match_id,
-                'model_version_id' => $prediction->model_version_id,
-                'prob_home' => (string) $prediction->prob_home,
-                'prob_draw' => (string) $prediction->prob_draw,
-                'prob_away' => (string) $prediction->prob_away,
-                'home_lambda' => (string) $prediction->home_lambda,
-                'away_lambda' => (string) $prediction->away_lambda,
-                'prev_hash' => $expectedPrev,
-            ]);
+                        return false;
+                    }
 
-            $recalculated = hash('sha256', $payload);
-            if ($recalculated !== $chain->current_hash) {
-                return [
-                    'status' => 'compromised',
-                    'total_blocks' => $chains->count(),
-                    'message' => "Altération rétroactive détectée sur le bloc #{$chain->id}.",
-                    'broken_at_id' => $chain->id,
-                ];
-            }
+                    $prediction = $predictions->get($chain->prediction_id);
+                    if (! $prediction) {
+                        $failure = [
+                            'status' => 'compromised',
+                            'total_blocks' => $totalBlocks,
+                            'message' => "Prédiction manquante pour le bloc #{$chain->id}.",
+                            'broken_at_id' => $chain->id,
+                        ];
 
-            $expectedPrev = $chain->current_hash;
+                        return false;
+                    }
+
+                    if ($prediction->content_hash !== $chain->current_hash || $prediction->prev_hash !== $chain->prev_hash) {
+                        $failure = [
+                            'status' => 'compromised',
+                            'total_blocks' => $totalBlocks,
+                            'message' => "Empreinte incohérente entre la prédiction et le bloc #{$chain->id}.",
+                            'broken_at_id' => $chain->id,
+                        ];
+
+                        return false;
+                    }
+
+                    $payload = json_encode([
+                        'id' => $prediction->id,
+                        'match_id' => $prediction->match_id,
+                        'model_version_id' => $prediction->model_version_id,
+                        'prob_home' => (string) $prediction->prob_home,
+                        'prob_draw' => (string) $prediction->prob_draw,
+                        'prob_away' => (string) $prediction->prob_away,
+                        'home_lambda' => (string) $prediction->home_lambda,
+                        'away_lambda' => (string) $prediction->away_lambda,
+                        'prev_hash' => $expectedPrev,
+                    ]);
+
+                    $recalculated = hash('sha256', $payload);
+                    if ($recalculated !== $chain->current_hash) {
+                        $failure = [
+                            'status' => 'compromised',
+                            'total_blocks' => $totalBlocks,
+                            'message' => "Altération rétroactive détectée sur le bloc #{$chain->id}.",
+                            'broken_at_id' => $chain->id,
+                        ];
+
+                        return false;
+                    }
+
+                    $expectedPrev = $chain->current_hash;
+                }
+
+                return true;
+            });
+
+        if ($failure !== null) {
+            return $failure;
         }
 
         return [
             'status' => 'valid',
-            'total_blocks' => $chains->count(),
-            'message' => "Chaîne cryptographique vérifiée avec succès. {$chains->count()} prédiction(s) intègre(s).",
+            'total_blocks' => $totalBlocks,
+            'message' => "Chaîne cryptographique vérifiée avec succès. {$totalBlocks} prédiction(s) intègre(s).",
             'broken_at_id' => null,
         ];
     }
