@@ -4,6 +4,7 @@ namespace App\Services\Integrity;
 
 use App\Models\Prediction;
 use App\Models\PredictionHashChain;
+use Illuminate\Support\Facades\DB;
 
 class HashChainService
 {
@@ -40,6 +41,77 @@ class HashChainService
             'prev_hash' => $prevHash,
             'chained_at_utc' => now()->utc(),
         ]);
+    }
+
+    /**
+     * Reconstruit le registre dans l'ordre chronologique des prédictions.
+     *
+     * Les suppressions passées (cascade ou purge) ont pu retirer des blocs au
+     * milieu de la chaîne : la seule réparation possible est de recalculer
+     * chaque empreinte à partir de l'état actuel des prédictions, puis de
+     * réécrire les blocs dans l'ordre de création. L'opération est idempotente.
+     *
+     * @return array{total:int, chained:int, last_hash:string}
+     */
+    public function rebuildLedger(): array
+    {
+        return DB::transaction(function (): array {
+            $total = Prediction::count();
+            PredictionHashChain::query()->delete();
+
+            $prevHash = str_repeat('0', 64);
+            $chained = 0;
+
+            Prediction::query()
+                ->select([
+                    'id',
+                    'match_id',
+                    'model_version_id',
+                    'prob_home',
+                    'prob_draw',
+                    'prob_away',
+                    'home_lambda',
+                    'away_lambda',
+                    'created_at',
+                ])
+                ->orderBy('id')
+                ->chunkById(500, function ($predictions) use (&$prevHash, &$chained): void {
+                    foreach ($predictions as $prediction) {
+                        $currentHash = hash('sha256', json_encode([
+                            'id' => $prediction->id,
+                            'match_id' => $prediction->match_id,
+                            'model_version_id' => $prediction->model_version_id,
+                            'prob_home' => (string) $prediction->prob_home,
+                            'prob_draw' => (string) $prediction->prob_draw,
+                            'prob_away' => (string) $prediction->prob_away,
+                            'home_lambda' => (string) $prediction->home_lambda,
+                            'away_lambda' => (string) $prediction->away_lambda,
+                            'prev_hash' => $prevHash,
+                        ]));
+
+                        Prediction::whereKey($prediction->id)->update([
+                            'content_hash' => $currentHash,
+                            'prev_hash' => $prevHash,
+                        ]);
+
+                        PredictionHashChain::create([
+                            'prediction_id' => $prediction->id,
+                            'current_hash' => $currentHash,
+                            'prev_hash' => $prevHash,
+                            'chained_at_utc' => $prediction->created_at?->utc() ?? now()->utc(),
+                        ]);
+
+                        $prevHash = $currentHash;
+                        $chained++;
+                    }
+                });
+
+            return [
+                'total' => $total,
+                'chained' => $chained,
+                'last_hash' => $prevHash,
+            ];
+        });
     }
 
     /**

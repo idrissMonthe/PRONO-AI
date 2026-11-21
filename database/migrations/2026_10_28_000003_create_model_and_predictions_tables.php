@@ -44,7 +44,9 @@ return new class extends Migration
 
         Schema::create('predictions', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('match_id')->constrained('matches')->cascadeOnDelete();
+            // RESTRICT : la suppression d'un match ne doit jamais emporter ses
+            // prédictions (et donc casser le registre) via une cascade SQL.
+            $table->foreignId('match_id')->constrained('matches')->restrictOnDelete();
             $table->foreignId('model_version_id')->constrained('model_versions')->cascadeOnDelete();
             $table->string('calibration_version', 50)->nullable();
             $table->boolean('is_official')->default(false)->index();
@@ -87,7 +89,9 @@ return new class extends Migration
 
         Schema::create('prediction_hash_chains', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('prediction_id')->constrained('predictions')->cascadeOnDelete();
+            // RESTRICT : un bloc du registre ne peut pas disparaître avec sa
+            // prédiction par une cascade SQL.
+            $table->foreignId('prediction_id')->constrained('predictions')->restrictOnDelete();
             $table->string('current_hash', 64)->unique();
             $table->string('prev_hash', 64);
             $table->dateTime('chained_at_utc');

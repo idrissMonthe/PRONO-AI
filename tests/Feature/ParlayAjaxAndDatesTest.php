@@ -237,6 +237,24 @@ class ParlayAjaxAndDatesTest extends TestCase
         $this->assertGreaterThanOrEqual(1, $response->json('count'));
     }
 
+    public function test_parlays_index_rejects_malformed_dates_without_server_error(): void
+    {
+        foreach (['abc', '2026-13-45'] as $invalidDate) {
+            $response = $this->get(route('parlays.index', ['date' => $invalidDate]));
+
+            $response->assertStatus(302);
+            $response->assertSessionHasErrors('date');
+        }
+    }
+
+    public function test_parlays_index_accepts_an_absent_date(): void
+    {
+        $this->get(route('parlays.index'))
+            ->assertOk()
+            ->assertViewHas('date', fn ($date): bool => $date instanceof Carbon
+                && $date->toDateString() === Carbon::now('Africa/Douala')->toDateString());
+    }
+
     public function test_artisan_generate_parlays_command_runs_successfully(): void
     {
         $this->artisan('oracle:generate-parlays')

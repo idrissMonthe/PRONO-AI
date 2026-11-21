@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\FootballMatch;
+use App\Services\Integrity\HashChainService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -53,6 +54,14 @@ class DedupeMatchesCommand extends Command
                 });
                 $merged++;
             }
+        }
+
+        if (! $this->option('dry-run') && $merged > 0) {
+            // Les prédictions déplacées changent de match_id, donc leur
+            // empreinte : la chaîne est réécrite dans l'ordre chronologique
+            // pour rester vérifiable après la fusion.
+            $result = app(HashChainService::class)->rebuildLedger();
+            $this->info("Chaîne d’intégrité reconstruite : {$result['chained']} bloc(s).");
         }
 
         $this->info($this->option('dry-run') ? "Doublons détectés : {$merged} ligne(s)." : "Doublons fusionnés : {$merged}.");

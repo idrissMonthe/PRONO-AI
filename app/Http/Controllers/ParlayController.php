@@ -13,6 +13,8 @@ class ParlayController extends Controller
 {
     public function index(Request $request, ParlayService $parlayService)
     {
+        $request->validate(['date' => ['nullable', 'date_format:Y-m-d']]);
+
         $tz = 'Africa/Douala';
         $dateStr = $request->get('date', Carbon::now($tz)->toDateString());
         $date = Carbon::parse($dateStr, $tz);

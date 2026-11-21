@@ -10,6 +10,7 @@ use App\Models\OddsSnapshot;
 use App\Models\Prediction;
 use App\Models\PredictionEvaluation;
 use App\Services\Prediction\PredictionSettlementService;
+use Carbon\Carbon;
 use Database\Seeders\DatabaseSeeder;
 use Database\Seeders\SampleMatchesSeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -144,8 +145,12 @@ class ParlayTest extends TestCase
 
     public function test_parlay_regenerate_endpoint(): void
     {
+        // Midi à Douala : la date ne peut pas basculer pendant la requête, et
+        // l'assertion utilise le même fuseau que le contrôleur.
+        $this->travelTo(Carbon::now('Africa/Douala')->startOfDay()->addHours(12));
+
         $response = $this->withoutMiddleware()->post('/parlays/generate');
-        $response->assertRedirect('/parlays?date=' . now()->toDateString());
+        $response->assertRedirect('/parlays?date=' . Carbon::now('Africa/Douala')->toDateString());
         $response->assertSessionHas('success');
 
         $parlay = Parlay::first();
@@ -154,6 +159,8 @@ class ParlayTest extends TestCase
         $this->assertNotNull($parlay->combined_prob);
         $this->assertNotNull($parlay->risk_score);
         $this->assertIsArray($parlay->selections_json);
+
+        $this->travelBack();
     }
 
     public function test_dashboard_shows_at_least_ten_increasing_reliability_picks_across_leagues(): void

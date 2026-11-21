@@ -29,6 +29,10 @@ class ParlayGeminiEligibilityTest extends TestCase
         config()->set('services.hybrid_prediction.allow_gemini_alternative_in_parlays', false);
 
         $target = Carbon::parse('2026-11-20 12:00:00', 'Africa/Douala');
+        // Fige l'horloge avant les rencontres : sans cela, elles sont vues
+        // comme passées et le service ne produit aucun combiné.
+        $this->travelTo($target->copy()->startOfDay());
+
         $validated = $this->matchWithPick($target, 'VALIDATED A', PredictionRevisionService::STATUS_VALIDATED);
         $legacy = $this->matchWithPick($target, 'LEGACY B', null);
         $blocked = [

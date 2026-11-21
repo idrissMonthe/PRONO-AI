@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use RuntimeException;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
@@ -74,6 +75,23 @@ class Prediction extends Model
         'missing_data_json' => 'array',
         'execution_time_ms' => 'integer',
     ];
+
+    /**
+     * Une prédiction déjà inscrite au registre ne peut pas être supprimée :
+     * cela laisserait un trou dans la chaîne et invaliderait tous les blocs
+     * suivants. Les opérations de maintenance doivent passer par une
+     * reconstruction explicite du registre.
+     */
+    protected static function booted(): void
+    {
+        static::deleting(function (Prediction $prediction): void {
+            if ($prediction->hashChain()->exists()) {
+                throw new RuntimeException(
+                    'Cette prédiction est chaînée au registre d’intégrité et ne peut pas être supprimée.'
+                );
+            }
+        });
+    }
 
     public function match(): BelongsTo
     {
