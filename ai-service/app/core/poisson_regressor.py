@@ -61,9 +61,19 @@ class DixonColesModel:
         self.fit_message: str = "Not fitted"
         self.training_matches: List[MatchData] = []
 
-    def fit(self, matches: List[MatchData]) -> "DixonColesModel":
+    def fit(
+        self,
+        matches: List[MatchData],
+        blended_targets: Optional[np.ndarray] = None,
+    ) -> "DixonColesModel":
         """
         Fits Poisson / Dixon-Coles parameters by minimizing regularized negative log likelihood.
+
+        ``blended_targets`` optionally replaces the integer goals in the Poisson
+        likelihood with continuous pseudo-counts of shape (len(matches), 2), for
+        example 0.5 * goals + 0.5 * xG as in the source repository. The
+        Dixon-Coles tau correction stays keyed on the real scoreline, the only
+        place where it is defined.
         """
         if len(matches) < 5:
             raise ValueError("At least 5 matches required to fit Dixon-Coles model.")
@@ -100,15 +110,28 @@ class DixonColesModel:
         )
         has_home = np.array([m.home_team in candidate_team_indices for m in matches], dtype=bool)
         has_away = np.array([m.away_team in candidate_team_indices for m in matches], dtype=bool)
-        goals_home = np.array([int(m.home_goals) for m in matches], dtype=float)
-        goals_away = np.array([int(m.away_goals) for m in matches], dtype=float)
+        real_home = np.array([int(m.home_goals) for m in matches], dtype=float)
+        real_away = np.array([int(m.away_goals) for m in matches], dtype=float)
+        if blended_targets is None:
+            goals_home = real_home
+            goals_away = real_away
+        else:
+            targets = np.asarray(blended_targets, dtype=float)
+            if targets.shape != (len(matches), 2):
+                raise ValueError("blended_targets must have shape (len(matches), 2).")
+            if not np.all(np.isfinite(targets)):
+                raise ValueError("blended_targets must be finite.")
+            goals_home = targets[:, 0]
+            goals_away = targets[:, 1]
         not_neutral = np.array([0.0 if m.is_neutral else 1.0 for m in matches], dtype=float)
 
         # Les quatre seules cases corrigées par tau (0-0, 0-1, 1-0, 1-1).
-        cell_00 = (goals_home == 0) & (goals_away == 0)
-        cell_01 = (goals_home == 0) & (goals_away == 1)
-        cell_10 = (goals_home == 1) & (goals_away == 0)
-        cell_11 = (goals_home == 1) & (goals_away == 1)
+        # Le score réel reste la référence, même quand la vraisemblance porte
+        # sur des pseudo-buts fractionnaires.
+        cell_00 = (real_home == 0) & (real_away == 0)
+        cell_01 = (real_home == 0) & (real_away == 1)
+        cell_10 = (real_home == 1) & (real_away == 0)
+        cell_11 = (real_home == 1) & (real_away == 1)
 
         def tau_penalty(tau: np.ndarray) -> np.ndarray:
             # Même convention que tau_correction : une masse négative est
