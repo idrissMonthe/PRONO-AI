@@ -51,6 +51,36 @@ Une cote n'est écrite que si les trois issues (ou les deux côtés) sont prése
 
 **Aucune cote de corners, de cartons ou de tirs n'existe dans cette source.** Le ROI de ces familles reste donc incalculable.
 
+### 3.1 Matchs à venir (`fixtures.csv`)
+
+`https://www.football-data.co.uk/fixtures.csv` publie les rencontres à venir avec
+les mêmes colonnes de cotes 1N2 / Plus-Moins 2,5. Le fichier est réécrit le
+**vendredi après-midi** et le **mardi midi** (heure de Londres).
+
+- Lu par `FootballDataUkConnector::fetchUpcomingFixtures()`.
+- Écrit avec `is_closing = false` : c'est ce que `OddsService::latestComplete1N2Set`
+  retient pour envoyer `market_probabilities` au moteur Python (blend marché à 25 %,
+  60 % si l'historique d'équipe est trop mince).
+- `snapshot_time_utc` prend la date de dernière modification du fichier
+  (en-tête HTTP `Last-Modified`), **jamais** l'heure d'exécution : une cote
+  collectée le vendredi reste datée du vendredi, et la fraîcheur affichée ne
+  ment pas.
+- Les lignes déjà passées sont ignorées : une rencontre terminée n'est jamais
+  réimportée sans score. Même identifiant externe que le fichier de saison, donc
+  la rencontre à venir et son résultat futur restent une seule ligne.
+- Cache court (`fixtures_cache_ttl`, 15 min par défaut) : le fichier change à
+  chaque publication, il ne doit pas être figé comme un fichier de saison.
+
+Commande et planification :
+
+```bash
+php artisan oracle:sync-football-data-uk-fixtures            # toutes les divisions configurées
+php artisan oracle:sync-football-data-uk-fixtures --division=E0 --dry-run
+```
+
+Planifiée à `13:30` et `18:30` Europe/London (`routes/console.php`), sans clé ni
+quota : elle remplace The Odds API pour le 1N2 des championnats couverts.
+
 ## 4. Déduplication et provenance
 
 Le rapprochement réutilise `MultiSourceImporter::findExisting` : correspondance d'abord par `provider_entity_maps`, puis par championnat + équipes + fenêtre horaire (±6 h si l'heure est connue, journée entière sinon).

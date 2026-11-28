@@ -107,6 +107,17 @@ return [
         'user_agent' => env('FOOTBALL_DATA_UK_USER_AGENT', 'Mozilla/5.0 (compatible; PRONO-IA/1.0)'),
         'cache_path' => env('FOOTBALL_DATA_UK_CACHE_PATH', storage_path('app/football-data-uk')),
 
+        /*
+        | Matchs à venir avec cotes 1N2 / Plus-Moins 2,5 (fichier `fixtures.csv`).
+        | Le fichier est réécrit le vendredi après-midi et le mardi midi : il n'est
+        | mis en cache que quelques minutes, et les cotes sont écrites en
+        | non-closing pour alimenter le blend marché sans quota API.
+        */
+        'fixtures_url' => env('FOOTBALL_DATA_UK_FIXTURES_URL', 'https://www.football-data.co.uk/fixtures.csv'),
+        'fixtures_cache_ttl' => (int) env('FOOTBALL_DATA_UK_FIXTURES_CACHE_TTL', 900),
+        // Divisions retenues pour les matchs à venir (vide = toutes celles ci-dessous).
+        'fixtures_divisions' => array_values(array_filter(array_map('trim', explode(',', (string) env('FOOTBALL_DATA_UK_FIXTURES_DIVISIONS', ''))))),
+
         'seasons' => ['2627', '2526'],
 
         // Codes de division tels que publiés => compétition interne.

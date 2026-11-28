@@ -5,6 +5,7 @@ use App\Console\Commands\SyncMatchesCommand;
 use App\Console\Commands\TrainPredictionModelCommand;
 use App\Console\Commands\GeneratePredictionsCommand;
 use App\Console\Commands\SyncOddsCommand;
+use App\Console\Commands\SyncFootballDataUkFixturesCommand;
 use App\Console\Commands\SyncLiveScoresCommand;
 use App\Console\Commands\SyncApiFootballCommand;
 use App\Console\Commands\SettlePredictionsCommand;
@@ -51,11 +52,27 @@ $task(Schedule::command(SyncMatchesCommand::class)
     ->withoutOverlapping())
     ->appendOutputTo(storage_path('logs/oracle-sync.log'));
 
+// The Odds API : 3 passages par jour (08:00, 14:00, 20:00). Un run coûte
+// 18 crédits (6 compétitions × 3 marchés × 1 région), soit 54 crédits/jour
+// ≈ 1 620/mois : compatible avec le plan 20K, mais l'offre gratuite (500)
+// n'en couvre que ~27 runs, soit moins d'un par jour (la cadence de 30 min
+// en brûlait ~26 000).
+// La tâche ne s'exécute que si THE_ODDS_API_ENABLED=true.
 $task(Schedule::command(SyncOddsCommand::class)
-    ->everyThirtyMinutes()
+    ->cron('0 8,14,20 * * *')
     ->timezone('Africa/Douala')
+    ->when(fn (): bool => (bool) config('services.the_odds_api.enabled', false))
     ->withoutOverlapping())
     ->appendOutputTo(storage_path('logs/oracle-odds.log'));
+
+// Cotes 1N2 des matchs à venir, sans clé ni quota : `fixtures.csv` est publié
+// le vendredi après-midi et le mardi midi (heure de Londres). Deux passages
+// quotidiens couvrent les deux publications et gardent les prix frais.
+$task(Schedule::command(SyncFootballDataUkFixturesCommand::class)
+    ->cron('30 13,18 * * *')
+    ->timezone('Europe/London')
+    ->withoutOverlapping())
+    ->appendOutputTo(storage_path('logs/oracle-odds-fixtures.log'));
 
 $task(Schedule::command(UpdateOddsMovementCommand::class)
     ->everyTenMinutes()

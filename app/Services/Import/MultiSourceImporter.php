@@ -13,6 +13,7 @@ use App\Models\Season;
 use App\Models\Team;
 use App\Models\TeamMatchStat;
 use App\Services\FootballData\FootballDataService;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -107,6 +108,17 @@ class MultiSourceImporter
                 // est connue : une source sans heure ne doit pas la déplacer.
                 if ($existing) {
                     $record['date'] = $existing->match_date_utc->toIso8601String();
+                }
+
+                // Une source qui ne fournit pas de score (matchs à venir) ne
+                // doit jamais effacer un résultat déjà enregistré : le statut et
+                // les scores existants sont conservés tels quels.
+                if ($existing && ! $match->hasScore()) {
+                    $record['status'] = $existing->status;
+                    $record['home_score'] = $existing->home_score;
+                    $record['away_score'] = $existing->away_score;
+                    $record['ht_home_score'] = $existing->ht_home_score;
+                    $record['ht_away_score'] = $existing->ht_away_score;
                 }
 
                 $persisted = $this->footballData->ingestMatchRecord($record, $match->source);
@@ -313,7 +325,8 @@ class MultiSourceImporter
     private function persistOdds(FootballMatch $stored, NormalizedMatch $incoming, array $odds): int
     {
         $written = 0;
-        $snapshotAt = $incoming->kickoffUtc->utc();
+        // Cotes de clôture : horodatées au coup d'envoi, comme publié.
+        $closingAt = $incoming->kickoffUtc->utc();
 
         $bookmakerIds = [];
         $bookmaker = function (string $code) use (&$bookmakerIds): int {
@@ -337,7 +350,7 @@ class MultiSourceImporter
             return Market::firstOrCreate(['code' => $code], ['name' => $name, 'category' => 'main'])->id;
         };
 
-        $write = function (int $bookmakerId, int $marketId, string $selection, ?float $line, float $decimalOdds) use ($stored, $incoming, $snapshotAt, &$written): void {
+        $write = function (int $bookmakerId, int $marketId, string $selection, ?float $line, float $decimalOdds, CarbonImmutable $snapshotAt, bool $isClosing) use ($stored, $incoming, &$written): void {
             $attributes = [
                 'match_id' => $stored->id,
                 'bookmaker_id' => $bookmakerId,
@@ -346,16 +359,31 @@ class MultiSourceImporter
                 'line' => $line,
                 'snapshot_time_utc' => $snapshotAt,
                 'source' => $incoming->source,
+                'is_closing' => $isClosing,
             ];
 
             $snapshot = OddsSnapshot::firstOrNew($attributes);
             $snapshot->decimal_odds = $decimalOdds;
-            // Les fichiers publiés sont des cotes de clôture pré-match.
-            $snapshot->is_closing = true;
+            $snapshot->is_closing = $isClosing;
             $snapshot->is_opening = false;
-            $snapshot->raw_hash = hash('sha256', implode('|', [$stored->id, $bookmakerId, $marketId, $selection, (string) $line, (string) $decimalOdds]));
+            $snapshot->raw_hash = hash('sha256', implode('|', [$stored->id, $bookmakerId, $marketId, $selection, (string) $line, (string) $decimalOdds, $isClosing ? 'closing' : 'upcoming']));
             $snapshot->save();
             $written++;
+        };
+
+        // Date de relevé fournie par la source, jamais remplacée par l'heure
+        // d'exécution : une cote de vendredi reste datée du vendredi.
+        $capturedAt = function (array $entry): CarbonImmutable {
+            $value = $entry['captured_at'] ?? null;
+            if (is_string($value) && $value !== '') {
+                try {
+                    return CarbonImmutable::parse($value)->utc();
+                } catch (Throwable) {
+                    // Valeur illisible : on retombe sur l'heure d'import.
+                }
+            }
+
+            return CarbonImmutable::now('UTC');
         };
 
         foreach ((array) ($odds['1x2_closing'] ?? []) as $entry) {
@@ -367,7 +395,7 @@ class MultiSourceImporter
             $marketId = $market('1N2', 'Résultat du Match (1N2)');
             foreach (['HOME' => 'home', 'DRAW' => 'draw', 'AWAY' => 'away'] as $selection => $key) {
                 if (isset($entry[$key])) {
-                    $write($bookmakerId, $marketId, $selection, null, (float) $entry[$key]);
+                    $write($bookmakerId, $marketId, $selection, null, (float) $entry[$key], $closingAt, true);
                 }
             }
         }
@@ -380,10 +408,44 @@ class MultiSourceImporter
             $bookmakerId = $bookmaker((string) $entry['bookmaker']);
             $marketId = $market('totals', 'Total de Buts (Plus / Moins)');
             if (isset($entry['over'])) {
-                $write($bookmakerId, $marketId, 'OVER', 2.5, (float) $entry['over']);
+                $write($bookmakerId, $marketId, 'OVER', 2.5, (float) $entry['over'], $closingAt, true);
             }
             if (isset($entry['under'])) {
-                $write($bookmakerId, $marketId, 'UNDER', 2.5, (float) $entry['under']);
+                $write($bookmakerId, $marketId, 'UNDER', 2.5, (float) $entry['under'], $closingAt, true);
+            }
+        }
+
+        // Cotes des matchs à venir : prix du marché au moment du relevé, donc
+        // non-closing. Ce sont elles que `latestComplete1N2Set` retient pour le
+        // blend marché des pronostics.
+        foreach ((array) ($odds['1x2_upcoming'] ?? []) as $entry) {
+            if (! is_array($entry) || ! isset($entry['bookmaker'])) {
+                continue;
+            }
+
+            $bookmakerId = $bookmaker((string) $entry['bookmaker']);
+            $marketId = $market('1N2', 'Résultat du Match (1N2)');
+            $snapshotAt = $capturedAt($entry);
+            foreach (['HOME' => 'home', 'DRAW' => 'draw', 'AWAY' => 'away'] as $selection => $key) {
+                if (isset($entry[$key])) {
+                    $write($bookmakerId, $marketId, $selection, null, (float) $entry[$key], $snapshotAt, false);
+                }
+            }
+        }
+
+        foreach ((array) ($odds['totals_2_5_upcoming'] ?? []) as $entry) {
+            if (! is_array($entry) || ! isset($entry['bookmaker'])) {
+                continue;
+            }
+
+            $bookmakerId = $bookmaker((string) $entry['bookmaker']);
+            $marketId = $market('totals', 'Total de Buts (Plus / Moins)');
+            $snapshotAt = $capturedAt($entry);
+            if (isset($entry['over'])) {
+                $write($bookmakerId, $marketId, 'OVER', 2.5, (float) $entry['over'], $snapshotAt, false);
+            }
+            if (isset($entry['under'])) {
+                $write($bookmakerId, $marketId, 'UNDER', 2.5, (float) $entry['under'], $snapshotAt, false);
             }
         }
 

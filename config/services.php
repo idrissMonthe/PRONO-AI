@@ -89,7 +89,11 @@ return [
         ))),
         'competitions' => array_values(array_filter(array_map(
             'trim',
-            explode(',', env('FOOTBALL_DATA_COMPETITIONS', 'PL,PD,BL1,SA,FL1,CL'))
+            // EL = UEFA Europa League, classée TIER_TWO par le fournisseur :
+            // sur un abonnement inférieur, `/matches` la filtre et répond 200
+            // avec zéro rencontre — la synchronisation le signale alors
+            // explicitement au lieu de la faire passer pour une compétition vide.
+            explode(',', env('FOOTBALL_DATA_COMPETITIONS', 'PL,PD,BL1,SA,FL1,CL,EL'))
         ))),
     ],
 
@@ -147,6 +151,11 @@ return [
     ],
 
     'the_odds_api' => [
+        // Flux désactivé par défaut : aucune cote bookmaker n'alimente les
+        // sélections publiées (pas de cote enregistrée, aucun paper bet, pas
+        // de CLV affiché), et la cadence du plan gratuit épuise le quota en
+        // quelques heures. À remettre à true quand le flux sera consommé.
+        'enabled' => (bool) env('THE_ODDS_API_ENABLED', false),
         'api_key' => env('THE_ODDS_API_KEY'),
         'base_url' => env('THE_ODDS_API_BASE_URL', 'https://api.the-odds-api.com/v4'),
         'regions' => env('THE_ODDS_API_REGIONS', 'eu'),

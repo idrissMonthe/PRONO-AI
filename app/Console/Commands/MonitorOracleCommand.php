@@ -29,13 +29,21 @@ class MonitorOracleCommand extends Command
             'Aucun match football-data.org n’a été synchronisé depuis plus de 3 heures.',
             'football-data.org'
         );
-        $this->checkFreshness(
-            'provider.the-odds-api.stale',
-            $lastOddsSnapshot,
-            180,
-            'Aucune cote récente n’a été reçue depuis plus de 3 heures.',
-            'the-odds-api'
-        );
+        if ((bool) config('services.the_odds_api.enabled', false)) {
+            $this->checkFreshness(
+                'provider.the-odds-api.stale',
+                $lastOddsSnapshot,
+                180,
+                'Aucune cote récente n’a été reçue depuis plus de 3 heures.',
+                'the-odds-api'
+            );
+        } else {
+            // Flux de cotes désactivé : sans cette branche, la surveillance
+            // relancerait les deux alertes à chaque tick, y compris après la
+            // remise à zéro mensuelle du quota.
+            SystemAlert::resolve('provider.the-odds-api.stale');
+            SystemAlert::resolve('provider.the-odds-api.unavailable');
+        }
 
         if (! ($readiness['model_loaded'] ?? false)) {
             SystemAlert::raise('model.not_ready', 'Le modèle IA n’est pas chargé ou entraîné.', 'critical', 'ai-service');

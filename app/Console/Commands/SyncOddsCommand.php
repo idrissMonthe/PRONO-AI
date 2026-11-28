@@ -14,6 +14,11 @@ class SyncOddsCommand extends Command
 
     public function handle(TheOddsApiService $service): int
     {
+        if (! (bool) config('services.the_odds_api.enabled', false)) {
+            $this->warn('Cotes désactivées (THE_ODDS_API_ENABLED=false) : aucun appel à The Odds API.');
+            return self::SUCCESS;
+        }
+
         try {
             $result = $service->sync($this->option('date-from'), $this->option('date-to'));
             if (($result['failed'] ?? 0) === 0) {
@@ -44,8 +49,12 @@ class SyncOddsCommand extends Command
                 ? self::SUCCESS
                 : self::FAILURE;
         } catch (Throwable $exception) {
-            SystemAlert::raise('provider.the-odds-api.unavailable', 'The Odds API est indisponible : '.$exception->getMessage(), 'critical', 'the-odds-api');
-            $this->error($exception->getMessage());
+            // cURL recopie l'URL demandée (donc `apiKey`) dans son message :
+            // on le masque avant de l'écrire dans l'alerte et dans la console
+            // (dont la sortie est redirigée vers storage/logs/oracle-odds.log).
+            $message = TheOddsApiService::redactSecrets($exception->getMessage());
+            SystemAlert::raise('provider.the-odds-api.unavailable', 'The Odds API est indisponible : '.$message, 'critical', 'the-odds-api');
+            $this->error($message);
             return self::FAILURE;
         }
     }

@@ -91,31 +91,28 @@ class CheckProvidersCommand extends Command
      */
     private function probe(array $probe): array
     {
+        $result = [
+            'provider' => $probe['provider'],
+            'domain' => $probe['domain'],
+            'network' => 'joignable',
+            'status' => null,
+            'configured' => $probe['configured'],
+        ];
+
         try {
-            $request = Http::timeout(8)
-                ->connectTimeout(5)
-                ->withHeaders($probe['headers']);
-
-            $response = $request->get($probe['url'], $probe['query'] ?? []);
-
             // Un 401/403 prouve que le domaine est joignable : le pare-feu ne
             // bloque pas la connexion, seul l'identifiant manque ou est refusé.
-            return [
-                'provider' => $probe['provider'],
-                'domain' => $probe['domain'],
-                'network' => 'joignable',
-                'status' => $response->status(),
-                'configured' => $probe['configured'],
-            ];
-        } catch (ConnectionException $exception) {
-            return [
-                'provider' => $probe['provider'],
-                'domain' => $probe['domain'],
-                'network' => 'bloqué',
-                'status' => null,
-                'configured' => $probe['configured'],
-                'error' => mb_substr($exception->getMessage(), 0, 120),
-            ];
+            $result['status'] = Http::timeout(8)
+                ->connectTimeout(5)
+                ->withHeaders($probe['headers'])
+                ->get($probe['url'], $probe['query'] ?? [])
+                ->status();
+        } catch (ConnectionException) {
+            // Le message cURL recopie l'URL demandée, `apiKey` ou `key` compris :
+            // il n'est ni affiché ni journalisé, seul le domaine est conservé.
+            $result['network'] = 'bloqué';
         }
+
+        return $result;
     }
 }

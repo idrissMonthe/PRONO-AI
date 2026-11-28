@@ -48,6 +48,17 @@ class FootballDataService
             array_column($internationalCatalog, 'code')
         )));
 
+        // `/matches` ignore silencieusement une compétition absente de
+        // l'abonnement (HTTP 200, zéro match) : sans ce contrôle explicite,
+        // une compétition payante configurée passerait pour une compétition
+        // sans rencontre.
+        $unavailableCompetitions = $this->competitionsOutsidePlan($competitions);
+        if (! empty($unavailableCompetitions)) {
+            Log::warning('football-data.org competitions outside the subscription.', [
+                'competitions' => $unavailableCompetitions,
+            ]);
+        }
+
         // Par défaut : J-3 à J+7 par rapport à la date courante en Africa/Douala
         $now       = Carbon::now('Africa/Douala');
         $dateFrom  = $dateFrom ?? $now->copy()->subDays(3)->toDateString();
@@ -130,6 +141,7 @@ class FootballDataService
             'date_from'    => $dateFrom,
             'date_to'      => $dateTo,
             'competitions' => $competitions,
+            'unavailable_competitions' => $unavailableCompetitions,
             'international_competitions' => $internationalCatalog,
             'international_friendlies_available' => collect($internationalCatalog)
                 ->contains(fn (array $competition): bool => str_contains(strtolower($competition['name'] ?? ''), 'friendly')),
@@ -160,40 +172,75 @@ class FootballDataService
             Cache::forget($cacheKey);
         }
 
-        return Cache::remember(
+        // Un catalogue vide (panne réseau, quota, réponse rejetée) ne doit pas
+        // être mémorisé : figé pour la durée du cache, il ferait croire
+        // qu'aucune compétition n'est disponible et masquerait la détection
+        // des compétitions hors abonnement.
+        $cachedCatalog = Cache::get($cacheKey);
+        if (is_array($cachedCatalog) && ! empty($cachedCatalog)) {
+            return $cachedCatalog;
+        }
+
+        try {
+            $response = Http::baseUrl(rtrim(config('services.football_data.base_url'), '/'))
+                ->timeout(20)
+                ->withHeaders(['X-Auth-Token' => $apiKey])
+                ->get('/competitions');
+        } catch (ConnectionException $exception) {
+            Log::warning('football-data.org competition catalogue unavailable.', ['error' => $exception->getMessage()]);
+            return [];
+        }
+
+        if (! $response->successful()) {
+            Log::warning('football-data.org competition catalogue rejected.', ['status' => $response->status()]);
+            return [];
+        }
+
+        $catalog = collect($response->json('competitions', []))
+            ->filter(fn ($competition): bool => is_array($competition) && ! empty($competition['code']))
+            ->map(fn (array $competition): array => [
+                'code' => (string) $competition['code'],
+                'name' => (string) ($competition['name'] ?? $competition['code']),
+                'type' => (string) ($competition['type'] ?? 'UNKNOWN'),
+                'area' => (string) data_get($competition, 'area.name', ''),
+                'area_code' => (string) data_get($competition, 'area.code', ''),
+                'plan' => (string) ($competition['plan'] ?? ''),
+            ])
+            ->unique('code')
+            ->values()
+            ->all();
+
+        if (empty($catalog)) {
+            return [];
+        }
+
+        Cache::put(
             $cacheKey,
-            now()->addMinutes((int) config('services.football_data.catalog_cache_minutes', 1440)),
-            function () use ($apiKey): array {
-                try {
-                    $response = Http::baseUrl(rtrim(config('services.football_data.base_url'), '/'))
-                        ->timeout(20)
-                        ->withHeaders(['X-Auth-Token' => $apiKey])
-                        ->get('/competitions');
-                } catch (ConnectionException $exception) {
-                    Log::warning('football-data.org competition catalogue unavailable.', ['error' => $exception->getMessage()]);
-                    return [];
-                }
-
-                if (! $response->successful()) {
-                    Log::warning('football-data.org competition catalogue rejected.', ['status' => $response->status()]);
-                    return [];
-                }
-
-                return collect($response->json('competitions', []))
-                    ->filter(fn ($competition): bool => is_array($competition) && ! empty($competition['code']))
-                    ->map(fn (array $competition): array => [
-                        'code' => (string) $competition['code'],
-                        'name' => (string) ($competition['name'] ?? $competition['code']),
-                        'type' => (string) ($competition['type'] ?? 'UNKNOWN'),
-                        'area' => (string) data_get($competition, 'area.name', ''),
-                        'area_code' => (string) data_get($competition, 'area.code', ''),
-                        'plan' => (string) ($competition['plan'] ?? ''),
-                    ])
-                    ->unique('code')
-                    ->values()
-                    ->all();
-            }
+            $catalog,
+            now()->addMinutes((int) config('services.football_data.catalog_cache_minutes', 1440))
         );
+
+        return $catalog;
+    }
+
+    /**
+     * Compétitions configurées absentes du catalogue du compte. Le fournisseur
+     * filtre ce catalogue selon l'abonnement et `/matches` répond alors 200
+     * avec zéro rencontre, sans erreur : les nommer évite de confondre une
+     * compétition non incluse dans le plan avec une compétition sans match.
+     *
+     * @param  array<int, string>  $codes
+     * @return array<int, string>
+     */
+    public function competitionsOutsidePlan(array $codes): array
+    {
+        // Un catalogue vide signifie que l'appel a échoué : ne rien accuser.
+        $available = array_column($this->competitionCatalog(), 'code');
+        if (empty($available)) {
+            return [];
+        }
+
+        return array_values(array_diff($codes, $available));
     }
 
     /**
@@ -503,7 +550,8 @@ class FootballDataService
 
         if ($match->external_id && in_array($match->data_source, ['football-data.org', 'api-football'], true)) {
             $score += 10;
-        } elseif (in_array($match->data_source, ['football-data.org', 'the-odds-api'], true)) {
+        } elseif (in_array($match->data_source, ['football-data.org', 'the-odds-api', 'football-data-uk'], true)) {
+            // Source vérifiée mais secondaire : fichier CSV déterministe, sans clé.
             $score += 6;
         } else {
             $missing[] = 'source_unverified';
@@ -594,7 +642,9 @@ class FootballDataService
             'teams' => $match->home_team_id && $match->away_team_id ? 12 : 0,
             'date' => $match->match_date_utc ? 8 : 0,
             'competition' => $match->league_id ? 5 : 0,
-            'source' => $match->external_id && in_array($match->data_source, ['football-data.org', 'api-football'], true) ? 10 : 0,
+            'source' => $match->external_id
+                ? (in_array($match->data_source, ['football-data.org', 'api-football'], true) ? 10 : (in_array($match->data_source, ['the-odds-api', 'football-data-uk'], true) ? 6 : 0))
+                : 0,
             'status' => in_array($match->status, ['SCHEDULED', 'TIMED', 'LIVE', 'IN_PLAY', 'PAUSED', 'FINISHED', 'AWARDED'], true) ? 3 : 0,
             'fixture_freshness' => $match->last_synced_at ? ($syncAgeHours <= 2 ? 10 : ($syncAgeHours <= 12 ? 7 : ($syncAgeHours <= 48 ? 3 : 0))) : 0,
             'odds_completeness' => $oddsPoints,
