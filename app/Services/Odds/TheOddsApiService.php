@@ -90,11 +90,11 @@ class TheOddsApiService
             } catch (\Throwable $exception) {
                 AuditEvent::log('ODDS_API_FAILURE', [
                     'sport' => $sport,
-                    'error' => $this->redactSecrets($exception->getMessage()),
+                    'error' => self::redactSecrets($exception->getMessage()),
                     'occurred_at_utc' => now()->utc()->toIso8601String(),
                 ]);
                 $stats['failed']++;
-                $stats['errors'][$sport] = $this->redactSecrets($exception->getMessage());
+                $stats['errors'][$sport] = self::redactSecrets($exception->getMessage());
                 Log::warning('The Odds API indisponible pour une compétition; poursuite de la synchronisation.', ['sport' => $sport]);
                 continue;
             }
@@ -203,7 +203,7 @@ class TheOddsApiService
             Log::notice('The Odds API : marchés par événement indisponibles.', [
                 'sport' => $sport,
                 'event' => $eventId,
-                'error' => $this->redactSecrets($exception->getMessage()),
+                'error' => self::redactSecrets($exception->getMessage()),
             ]);
 
             return;
@@ -391,9 +391,13 @@ class TheOddsApiService
         )));
     }
 
-    private function redactSecrets(string $message): string
+    /**
+     * Masque la clé avant journalisation : cURL recopie l'URL demandée dans
+     * son message d'erreur, `apiKey` compris.
+     */
+    public static function redactSecrets(string $message): string
     {
-        return (string) preg_replace('/([?&]apiKey=)[^&\s]+/i', '$1[REDACTED]', $message);
+        return (string) preg_replace('/(apiKey=)[^&\s]+/i', '$1[REDACTED]', $message);
     }
 
     private function findMatch(string $home, string $away, Carbon $commence, string $leagueCode): ?FootballMatch

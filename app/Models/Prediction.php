@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use RuntimeException;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Prediction extends Model
@@ -111,6 +112,15 @@ class Prediction extends Model
     public function hashChain(): HasOne
     {
         return $this->hasOne(PredictionHashChain::class);
+    }
+
+    /**
+     * Règlements enregistrés par marché (clé `published` pour la sélection
+     * publiée). Source unique du verdict affiché dans l'historique.
+     */
+    public function evaluations(): HasMany
+    {
+        return $this->hasMany(PredictionEvaluation::class);
     }
 
     public function supersedes(): BelongsTo

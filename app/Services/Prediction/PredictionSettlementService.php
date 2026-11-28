@@ -13,7 +13,7 @@ class PredictionSettlementService
     {
         $count = 0;
 
-        FootballMatch::with(['homeTeam', 'awayTeam', 'officialPrediction'])
+        FootballMatch::with(['homeTeam', 'awayTeam', 'officialPrediction', 'stats'])
             ->where('status', 'FINISHED')
             ->whereNotNull('home_score')
             ->whereNotNull('away_score')
@@ -45,9 +45,12 @@ class PredictionSettlementService
 
         $actualResult = $homeGoals === $awayGoals ? 'draw' : ($homeGoals > $awayGoals ? 'home' : 'away');
         $resultLabels = ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away];
+        // Mi-temps et corners : nécessaires aux marchés qui ne se déduisent pas
+        // du score final. Absents de la base = marché non réglable.
+        $context = $this->matchContext($match);
         $published = null;
         if ($prediction->published_market && $prediction->published_selection && $prediction->published_probability !== null) {
-            $published = $this->publishedOutcome($prediction, $homeGoals, $awayGoals, $actualResult, $home, $away);
+            $published = $this->publishedOutcome($prediction, $homeGoals, $awayGoals, $actualResult, $home, $away, $context);
         if (! empty($published['push'])) {
             $this->addEvaluation($rows, $prediction, $match, 'FINAL', 'published', (float) $prediction->published_probability, $published['label'], $published['actual_label'], 'PUSH');
         } elseif ($published) {
@@ -64,7 +67,7 @@ class PredictionSettlementService
             $alternativeProbability = ($alternative['origin'] ?? null) === 'PYTHON'
                 ? ($alternative['probability'] ?? null)
                 : ($alternative['ai_probability'] ?? null);
-            $alternativeOutcome = $this->selectionOutcome($alternative['market'], $alternative['selection'], $homeGoals, $awayGoals, $actualResult, $home, $away);
+            $alternativeOutcome = $this->selectionOutcome($alternative['market'], $alternative['selection'], $homeGoals, $awayGoals, $actualResult, $home, $away, $context);
             if ($alternativeOutcome && is_numeric($alternativeProbability)) {
                 $group = ($alternative['origin'] ?? null) === 'AI_ESTIMATE' ? 'GEMINI_ALT_IA' : 'GEMINI_ALT';
                 if (! empty($alternativeOutcome['push'])) {
@@ -234,26 +237,64 @@ class PredictionSettlementService
         return count($rows);
     }
 
-    private function publishedOutcome(Prediction $prediction, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away): ?array
+    private function publishedOutcome(Prediction $prediction, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away, array $context = []): ?array
     {
-        return $this->selectionOutcome((string) $prediction->published_market, (string) $prediction->published_selection, $homeGoals, $awayGoals, $actualResult, $home, $away);
+        return $this->selectionOutcome((string) $prediction->published_market, (string) $prediction->published_selection, $homeGoals, $awayGoals, $actualResult, $home, $away, $context);
+    }
+
+    /**
+     * Données qui ne se déduisent pas du score final : score à la mi-temps et
+     * corners de chaque camp. Une donnée absente n'est pas inventée : la clé
+     * n'est simplement pas posée et le marché concerné reste sans verdict.
+     */
+    public function matchContext(FootballMatch $match): array
+    {
+        $context = [];
+
+        if ($match->ht_home_score !== null && $match->ht_away_score !== null) {
+            $context['ht_home'] = (int) $match->ht_home_score;
+            $context['ht_away'] = (int) $match->ht_away_score;
+        }
+
+        $stats = $match->relationLoaded('stats') ? $match->stats : $match->stats()->get();
+        $corners = $stats->whereNotNull('corners')->keyBy(fn ($stat) => (int) $stat->is_home === 1 ? 'home' : 'away');
+        if ($corners->has('home') && $corners->has('away')) {
+            $context['corners_home'] = (int) $corners['home']->corners;
+            $context['corners_away'] = (int) $corners['away']->corners;
+        }
+
+        return $context;
     }
 
     /**
      * Règle une sélection sur un résultat réel. Public : l'historisation des
      * pronostics réutilise exactement les mêmes règles de règlement.
      */
-    public function selectionOutcome(string $market, string $selection, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away): ?array
+    public function selectionOutcome(string $market, string $selection, int $homeGoals, int $awayGoals, string $actualResult, string $home, string $away, array $context = []): ?array
     {
         $hit = false;
         $label = $market.' '.$selection;
         $actualLabel = $actualResult;
+
+        // `total_goals` est le code publié du marché `totals` : même seuil.
+        if ($market === 'total_goals') {
+            $market = 'totals';
+        }
+
         if ($market === '1N2') {
             $hit = $selection === $actualResult;
             $label = ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$selection] ?? $label;
             $actualLabel = ['home' => 'Victoire '.$home, 'draw' => 'Match nul', 'away' => 'Victoire '.$away][$actualResult] ?? $actualResult;
         } elseif ($market === 'double_chance') {
-            $hit = $selection === '1X' ? in_array($actualResult, ['home', 'draw'], true) : ($selection === 'X2' ? in_array($actualResult, ['draw', 'away'], true) : $actualResult !== 'draw');
+            $hit = match ($selection) {
+                '1X' => in_array($actualResult, ['home', 'draw'], true),
+                'X2' => in_array($actualResult, ['draw', 'away'], true),
+                '12' => $actualResult !== 'draw',
+                default => null,
+            };
+            if ($hit === null) {
+                return null;
+            }
             $label = $selection;
             $actualLabel = $actualResult;
         } elseif ($market === 'dnb') {
@@ -266,7 +307,14 @@ class PredictionSettlementService
             $actualLabel = 'Victoire '.($winner === 'home' ? $home : $away);
         } elseif ($market === 'btts') {
             $btts = $homeGoals > 0 && $awayGoals > 0;
-            $hit = $selection === 'yes' ? $btts : ! $btts;
+            $hit = match ($selection) {
+                'yes' => $btts,
+                'no' => ! $btts,
+                default => null,
+            };
+            if ($hit === null) {
+                return null;
+            }
             $label = $selection === 'yes' ? 'Les deux équipes marquent' : 'Au moins une équipe ne marque pas';
             $actualLabel = $btts ? 'BTTS oui' : 'BTTS non';
         } elseif ($market === 'totals' && preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)) {
@@ -306,6 +354,83 @@ class PredictionSettlementService
             $hit = $selection === $actualScore;
             $label = 'Score exact '.$selection;
             $actualLabel = 'Score exact '.$actualScore;
+        } elseif ($market === 'ht_double_chance') {
+            if (! isset($context['ht_home'], $context['ht_away'])) {
+                return null;
+            }
+            $htHome = (int) $context['ht_home'];
+            $htAway = (int) $context['ht_away'];
+            $htResult = $htHome === $htAway ? 'draw' : ($htHome > $htAway ? 'home' : 'away');
+            $hit = match ($selection) {
+                '1X' => in_array($htResult, ['home', 'draw'], true),
+                'X2' => in_array($htResult, ['draw', 'away'], true),
+                '12' => $htResult !== 'draw',
+                default => null,
+            };
+            if ($hit === null) {
+                return null;
+            }
+            $label = 'Mi-temps : double chance '.$selection;
+            $actualLabel = 'Mi-temps '.$htHome.'-'.$htAway;
+        } elseif ($market === 'btts_first_half') {
+            if (! isset($context['ht_home'], $context['ht_away'])) {
+                return null;
+            }
+            $htHome = (int) $context['ht_home'];
+            $htAway = (int) $context['ht_away'];
+            $htBtts = $htHome > 0 && $htAway > 0;
+            $hit = match ($selection) {
+                'yes' => $htBtts,
+                'no' => ! $htBtts,
+                default => null,
+            };
+            if ($hit === null) {
+                return null;
+            }
+            $label = $selection === 'yes'
+                ? 'Les deux équipes marquent en 1re mi-temps'
+                : 'Au moins une équipe ne marque pas en 1re mi-temps';
+            $actualLabel = 'Mi-temps '.$htHome.'-'.$htAway;
+        } elseif (in_array($market, ['ht_total_goals', 'sh_total_goals'], true)
+            && preg_match('/^(over|under)_(\d+)_(\d+)$/', $selection, $parts)) {
+            if (! isset($context['ht_home'], $context['ht_away'])) {
+                return null;
+            }
+            $firstHalf = (int) $context['ht_home'] + (int) $context['ht_away'];
+            $periodGoals = $market === 'ht_total_goals' ? $firstHalf : ($homeGoals + $awayGoals) - $firstHalf;
+            $threshold = (float) ($parts[2].'.'.$parts[3]);
+            $hit = $parts[1] === 'over' ? $periodGoals > $threshold : $periodGoals < $threshold;
+            $periodName = $market === 'ht_total_goals' ? '1re mi-temps' : '2e mi-temps';
+            $label = ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').str_replace('.', ',', (string) $threshold).' buts en '.$periodName;
+            $actualLabel = $periodGoals.' but(s) en '.$periodName;
+        } elseif ($market === 'european_handicap' && preg_match('/^(m?\d+(?:_\d+)?):(home|draw|away)$/', $selection, $parts)) {
+            // La ligne s'applique à la différence domicile : `m2` = −2.
+            $line = (float) str_replace(['m', '_'], ['-', '.'], $parts[1]);
+            $adjusted = ($homeGoals - $awayGoals) + $line;
+            $side = $parts[2];
+            $hit = $side === 'home' ? $adjusted > 0 : ($side === 'draw' ? abs($adjusted) < 0.001 : $adjusted < 0);
+            $label = match ($side) {
+                'home' => $home.' '.($line >= 0 ? '+' : '').$line,
+                'away' => $away.' '.(-$line >= 0 ? '+' : '').(-$line),
+                default => 'Handicap nul '.($line >= 0 ? '+' : '').$line,
+            };
+            $actualLabel = 'Écart '.$homeGoals.'-'.$awayGoals.' ('.$adjusted.' après handicap)';
+        } elseif ($market === 'corners_handicap'
+            && preg_match('/^(home|away):(-?\d+(?:\.\d+)?)$/', $selection, $parts)
+            && isset($context['corners_home'], $context['corners_away'])) {
+            $line = (float) $parts[2];
+            $side = $parts[1];
+            $difference = $side === 'home'
+                ? $context['corners_home'] - $context['corners_away']
+                : $context['corners_away'] - $context['corners_home'];
+            $margin = $difference + $line;
+            $teamName = $side === 'home' ? $home : $away;
+            $label = 'Corners '.$teamName.' '.($line >= 0 ? '+' : '').$line;
+            $actualLabel = 'Corners '.$context['corners_home'].'-'.$context['corners_away'];
+            if (abs($margin) < 0.001) {
+                return ['hit' => false, 'label' => $label, 'actual_label' => $actualLabel.' (remboursé)', 'push' => true];
+            }
+            $hit = $margin > 0;
         } else {
             return null;
         }

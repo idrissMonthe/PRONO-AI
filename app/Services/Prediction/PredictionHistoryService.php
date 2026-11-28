@@ -373,7 +373,9 @@ class PredictionHistoryService
             return $this->settleAsianHandicap($selection, (float) $snapshot->line, $homeGoals - $awayGoals);
         }
 
-        $resolved = $this->settlements->selectionOutcome($market, $selection, $homeGoals, $awayGoals, $actualResult, $home, $away);
+        // Mêmes règles de règlement que la page résultats, y compris les
+        // marchés qui dépendent de la mi-temps et des corners.
+        $resolved = $this->settlements->selectionOutcome($market, $selection, $homeGoals, $awayGoals, $actualResult, $home, $away, $this->settlements->matchContext($match));
 
         if ($resolved === null) {
             return null;

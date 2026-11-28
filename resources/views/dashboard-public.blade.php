@@ -46,7 +46,7 @@
     </div>
 
     <!-- Notification intelligente de trêve ou de faible volume aujourd'hui -->
-    @if($upcomingCount > 0 && ($upcomingMatches->isNotEmpty() && $upcomingMatches->first()->match_date_utc->timezone('Africa/Douala')->isAfter(now('Africa/Douala')->endOfDay())))
+    @if($upcomingCount > 0 && ! $todayHasMatches && ($upcomingMatches->isNotEmpty() && $upcomingMatches->first()->match_date_utc->timezone('Africa/Douala')->isAfter(now('Africa/Douala')->endOfDay())))
         <div class="p-3.5 rounded bg-[#181F1B] border border-[#C3A16A]/40 text-xs text-[#A2ACA3] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
             <div class="flex items-center gap-2.5">
                 <span class="w-2.5 h-2.5 rounded-full bg-[#C3A16A] shrink-0 animate-pulse"></span>
@@ -240,22 +240,24 @@
                                         </div>
                                     </div>
 
-                                    <!-- Bloc Verdict et Alternative Gemini -->
-                                    @php
-                                        $badge = $pick['gemini'] ?? ['state' => 'not_evaluated', 'label' => 'Non évalué par Gemini'];
-                                        $badgeClass = match ($badge['state']) {
-                                            'validated' => 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40',
-                                            'validated_local' => 'bg-[#C3A16A]/15 text-[#C3A16A] border border-[#C3A16A]/40',
-                                            'not_validated' => 'bg-[#D68D86]/20 text-[#D68D86] border border-[#D68D86]/40',
-                                            default => 'bg-[#A2ACA3]/15 text-[#A2ACA3] border border-[#A2ACA3]/30',
-                                        };
-                                        $badgeText = match ($badge['state']) {
-                                            'validated' => 'VALIDÉ',
-                                            'validated_local' => 'VALIDÉ LOCAL',
-                                            'not_validated' => 'NON VALIDÉ',
-                                            default => 'NON ÉVALUÉ',
-                                        };
-                                    @endphp
+                                    <!-- Bloc Verdict et Alternative Gemini : rendu uniquement
+                                         lorsqu'une revue porte sur la sélection affichée. -->
+                                    @if(($pick['gemini']['state'] ?? '') !== 'not_applicable')
+                                        @php
+                                            $badge = $pick['gemini'] ?? ['state' => 'not_evaluated', 'label' => 'Non évalué par Gemini'];
+                                            $badgeClass = match ($badge['state']) {
+                                                'validated' => 'bg-[#88B69A]/20 text-[#88B69A] border border-[#88B69A]/40',
+                                                'validated_local' => 'bg-[#C3A16A]/15 text-[#C3A16A] border border-[#C3A16A]/40',
+                                                'not_validated' => 'bg-[#D68D86]/20 text-[#D68D86] border border-[#D68D86]/40',
+                                                default => 'bg-[#A2ACA3]/15 text-[#A2ACA3] border border-[#A2ACA3]/30',
+                                            };
+                                            $badgeText = match ($badge['state']) {
+                                                'validated' => 'VALIDÉ',
+                                                'validated_local' => 'VALIDÉ LOCAL',
+                                                'not_validated' => 'NON VALIDÉ',
+                                                default => 'NON ÉVALUÉ',
+                                            };
+                                        @endphp
                                     <div class="pt-2 border-t border-[#303A32]/40 space-y-1.5 text-xs">
                                         <div class="flex items-center justify-between gap-1.5">
                                             <span class="text-[10px] uppercase font-semibold text-[#A2ACA3] mono">Verdict Gemini :</span>
@@ -263,6 +265,12 @@
                                                 {{ $badgeText }}
                                             </span>
                                         </div>
+
+                                        @if(!empty($badge['explanation']))
+                                            <p class="text-[10px] text-[#A2ACA3] italic leading-tight">
+                                                {{ $badge['explanation'] }}
+                                            </p>
+                                        @endif
 
                                         @if(!empty($pick['gemini_alternative']))
                                             <div class="p-2 rounded bg-[#101513] border border-[#C3A16A]/30 space-y-1">
@@ -281,12 +289,9 @@
                                                     </p>
                                                 @endif
                                             </div>
-                                        @elseif(!empty($pick['gemini_reason']) && $badge['state'] === 'not_validated')
-                                            <p class="text-[10px] text-[#A2ACA3] italic leading-tight">
-                                                Justification : {{ $pick['gemini_reason'] }}
-                                            </p>
                                         @endif
                                     </div>
+                                    @endif
                                     <div class="pick-footer"><span class="reliability">{{ $pick['source'] }} · {{ $pick['market'] }}</span><span class="score-pill">{{ $group['title'] }}</span></div>
                                 </a>
                             @endforeach

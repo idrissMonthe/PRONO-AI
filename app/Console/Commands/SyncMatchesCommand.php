@@ -84,8 +84,18 @@ class SyncMatchesCommand extends Command
                     ['À',                 $result['date_to']],
                     ['Durée',             "{$elapsed} ms"],
                     ['Évaluations',       $settled],
+                    ['Hors abonnement',   implode(', ', $result['unavailable_competitions'] ?? []) ?: '—'],
                 ]
             );
+
+            $unavailableCompetitions = $result['unavailable_competitions'] ?? [];
+            if (! empty($unavailableCompetitions)) {
+                // Pas de SystemAlert ici : l'alerte resterait « open » tant que
+                // l'abonnement ne change pas et s'afficherait à tous les
+                // visiteurs du tableau de bord. Le log et cette sortie de
+                // commande suffisent à informer l'exploitant.
+                $this->warn('⚠️  Compétition(s) absente(s) de l\'abonnement, aucun match importé : '.implode(', ', $unavailableCompetitions));
+            }
 
             Log::info('oracle:sync-matches completed', $result);
             SystemAlert::resolve('provider.football-data.org.unavailable');

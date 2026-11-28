@@ -31,7 +31,7 @@ class DashboardController extends Controller
             'date' => ['nullable', 'date_format:Y-m-d'],
         ]);
 
-        $query = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction'])
+        $query = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'officialPrediction.evaluations'])
             ->where('status', 'FINISHED')
             ->whereNotNull('home_score')
             ->whereNotNull('away_score')
@@ -74,6 +74,15 @@ class DashboardController extends Controller
         $upcomingCount = FootballMatch::whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
             ->count();
+
+        // Le bandeau « pause » ne doit s'afficher que si la journée est
+        // réellement vide. Des rencontres terminées ou en cours comptent comme
+        // une journée active, même quand le prochain coup d'envoi est après
+        // minuit : sinon tout match déjà commencé faisait croire à une trêve.
+        $todayHasMatches = FootballMatch::whereBetween('match_date_utc', [
+            $todayDouala->copy()->utc(),
+            $todayDouala->copy()->endOfDay()->utc(),
+        ])->exists();
 
         // 2. Combinés du jour automatiques (évalués pour aujourd'hui en Africa/Douala)
         $dailyParlays = $parlayService->getOrGenerateDailyParlays($todayDouala);
@@ -197,7 +206,18 @@ class DashboardController extends Controller
         ];
 
         $integrity = $hashChainService->verifyLedgerIntegrity();
-        $systemAlerts = SystemAlert::where('status', 'open')->orderByDesc('severity')->orderByDesc('last_seen_at_utc')->take(3)->get();
+        // Les alertes du fournisseur de cotes sont des alertes d'exploitation :
+        // aucune sélection publiée n'utilise de cote bookmaker, et un quota
+        // épuisé n'est pas du ressort du visiteur. Elles restent ouvertes en
+        // base pour l'exploitant, mais ne s'affichent pas sur la page publique.
+        // Filtre sur `key` (non nullable) : un filtre `whereNotIn('source')`
+        // écarterait aussi les alertes dont la source est NULL.
+        $systemAlerts = SystemAlert::where('status', 'open')
+            ->where('key', 'not like', 'provider.the-odds-api.%')
+            ->orderByDesc('severity')
+            ->orderByDesc('last_seen_at_utc')
+            ->take(3)
+            ->get();
 
         // Dernière synchronisation
         $lastSync = FootballMatch::whereNotNull('last_synced_at')->max('last_synced_at');
@@ -208,6 +228,7 @@ class DashboardController extends Controller
             'predictedMatches',
             'championModel',
             'upcomingCount',
+            'todayHasMatches',
             'upcomingMatches',
             'dailyPicks',
             'liveFlashPicks',
@@ -436,11 +457,14 @@ class DashboardController extends Controller
                 ->take(4)
                 ->map(function (array $pick): array {
                     $prediction = $pick['match']->officialPrediction ?? null;
-                    $pick['gemini'] = $prediction ? $this->geminiBadge($prediction) : [
-                        'state' => 'not_evaluated',
-                        'label' => 'Non évalué',
-                    ];
-                    $pick['gemini_alternative'] = $prediction ? $this->geminiAlternative($prediction) : null;
+                    // La revue Gemini porte sur la sélection publiée. L'attacher
+                    // à une autre sélection du même match faisait citer dans la
+                    // justification un marché que la carte n'affichait pas.
+                    // Hors sélection publiée, la vue n'affiche rien : pas de badge
+                    // à construire, donc aucun libellé à porter ici.
+                    $reviewed = $prediction && ! empty($pick['published']);
+                    $pick['gemini'] = $reviewed ? $this->geminiBadge($prediction) : ['state' => 'not_applicable'];
+                    $pick['gemini_alternative'] = $reviewed ? $this->geminiAlternative($prediction) : null;
 
                     return $pick;
                 })
@@ -455,11 +479,11 @@ class DashboardController extends Controller
      * Les trois états de validation Gemini, sans jamais confondre une
      * indisponibilité technique avec un rejet statistique.
      *
-     * @return array{state: string, label: string}
+     * @return array{state: string, label: string, explanation: string}
      */
     private function geminiBadge(Prediction $prediction): array
     {
-        return match ((string) ($prediction->review_decision ?? '')) {
+        $badge = match ((string) ($prediction->review_decision ?? '')) {
             PredictionRevisionService::STATUS_VALIDATED => [
                 'state' => 'validated',
                 'label' => 'Validé par Gemini',
@@ -482,6 +506,13 @@ class DashboardController extends Controller
                 'label' => 'Non évalué par Gemini',
             ],
         };
+
+        // Explication de la revue sur la sélection publiée : c'est le seul
+        // texte qui décrit le marché de la carte, l'alternative étant
+        // présentée séparément.
+        $badge['explanation'] = (string) data_get($prediction->market_metrics_json, 'gemini_review.explanation', '');
+
+        return $badge;
     }
 
     /**
@@ -589,9 +620,6 @@ class DashboardController extends Controller
         if (in_array($market, ['totals', 'total_goals'], true) && in_array($selection, ['over_0_5', 'under_0_5', 'over_5_5', 'under_5_5', 'under_4_5'], true)) {
             return null;
         }
-        if ($probability > 0.82) {
-            return null;
-        }
         $home = $this->displayTeamName($match->homeTeam->name ?? $match->homeTeam->short_name);
         $away = $this->displayTeamName($match->awayTeam->name ?? $match->awayTeam->short_name);
         $label = match ($market) {
@@ -617,9 +645,24 @@ class DashboardController extends Controller
             'totals', 'total_goals' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' buts' : null,
             'half_time_result', 'ht_1x2' => ['home' => 'Mi-temps : '.$home.' mène', 'draw' => 'Mi-temps : égalité', 'away' => 'Mi-temps : '.$away.' mène'][$selection] ?? null,
-            'half_time_totals', 'ht_total_goals' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?(?:_ht)?$/', $selection, $parts)
-                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' buts (MT)'
-                : 'MT : '.str_replace('_', ' ', $selection),
+            'half_time_totals', 'ht_total_goals' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' buts en 1re mi-temps'
+                : null,
+            'sh_total_goals' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
+                ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' buts en 2e mi-temps'
+                : null,
+            'btts_first_half' => [
+                'yes' => 'Les deux équipes marquent en 1re mi-temps',
+                'no' => 'Au moins une équipe ne marque pas en 1re mi-temps',
+            ][$selection] ?? null,
+            'ht_double_chance' => [
+                '1X' => 'Mi-temps : '.$home.' ou nul',
+                'X2' => 'Mi-temps : '.$away.' ou nul',
+                '12' => 'Mi-temps : pas de match nul',
+            ][$selection] ?? null,
+            'corners_handicap' => preg_match('/^(home|away):(-?\d+(?:\.\d+)?)$/', $selection, $parts)
+                ? ($parts[1] === 'home' ? $home : $away).' '.($parts[2] >= 0 ? '+' : '').str_replace('.', ',', $parts[2]).' corners'
+                : null,
             'corners', 'total_corners', 'corners_total' => preg_match('/^(over|under)_(\d+)(?:_(\d+))?$/', $selection, $parts)
                 ? ($parts[1] === 'over' ? 'Plus de ' : 'Moins de ').$parts[2].(isset($parts[3]) ? ','.$parts[3] : '').' corners'
                 : 'Corners : '.str_replace('_', ' ', $selection),
@@ -658,11 +701,19 @@ class DashboardController extends Controller
             $odds = $this->lookupOddFromSnapshot($match, $market, $selection, (float) ($prediction->published_line ?? 0));
         }
 
-        if ($odds && $odds < 1.25) {
+        // Plancher de rentabilité : il ne s'applique qu'à une cote réellement
+        // observée (bookmaker ou snapshot). Les marchés de seconde zone
+        // (corners, mi-temps…) n'ont aucun prix de marché : sans cote, la
+        // sélection publiée par Python reste affichable avec sa probabilité,
+        // au lieu d'être jugée sur un prix supposé.
+        if ($odds !== null && $odds < 1.25) {
             return null;
         }
 
         return [
+            // Marqueur utilisé par les cartes : seule cette sélection est
+            // celle que la revue Gemini a réellement examinée.
+            'published' => true,
             'key' => $selection,
             'label' => $label,
             'prob' => $probability,
@@ -678,7 +729,11 @@ class DashboardController extends Controller
                 'team_totals', 'team_total_goals' => 'Total par équipe',
                 'exact_score'        => 'Score exact',
                 'half_time_result', 'ht_1x2' => 'Mi-temps 1X2',
-                'half_time_totals', 'ht_total_goals' => 'Total buts MT',
+                'half_time_totals', 'ht_total_goals' => 'Total buts 1re MT',
+                'sh_total_goals'     => 'Total buts 2e MT',
+                'btts_first_half'    => 'BTTS 1re mi-temps',
+                'ht_double_chance'   => 'Double chance MT',
+                'corners_handicap'   => 'Handicap corners',
                 'corners', 'total_corners', 'corners_total' => 'Corners',
                 'cards', 'total_cards', 'cards_total' => 'Cartons',
                 'shots', 'total_shots', 'shots_total' => 'Tirs',

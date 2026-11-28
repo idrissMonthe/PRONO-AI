@@ -35,7 +35,10 @@ class GeneratePredictionsCommand extends Command
         // découverte via API-Football doit être prédite comme les autres.
         $matches = FootballMatch::with(['homeTeam', 'awayTeam', 'league', 'oddsSnapshots.market', 'playerAvailabilities', 'officialPrediction.featureSnapshot'])
             ->whereNotNull('external_id')
-            ->whereIn('data_source', ['football-data.org', 'api-football'])
+            // Football-Data.co.uk fournit aussi les rencontres à venir et leurs
+            // cotes 1N2 non-closing : elles doivent être prédites comme les
+            // autres, sans dépendre d'un autre fournisseur de calendrier.
+            ->whereIn('data_source', ['football-data.org', 'api-football', 'football-data-uk'])
             ->whereIn('status', ['SCHEDULED', 'TIMED'])
             ->where('match_date_utc', '>=', now()->utc())
             ->orderBy('match_date_utc')
@@ -584,29 +587,51 @@ class GeneratePredictionsCommand extends Command
     }
 
     /**
+     * Ancienneté maximale d'une apparition pour décrire la forme actuelle.
+     * Sans cette borne, un joueur parti ou retraité depuis des années reste
+     * proposé indéfiniment : c'est ainsi que Rooney (dernière ligne le
+     * 17 mai 2016) apparaissait encore sur un match de novembre 2026.
+     */
+    private const PLAYER_HISTORY_DAYS = 365;
+
+    /**
+     * Dernière apparition exigée pour considérer le joueur encore actif :
+     * au-delà, il a quitté le club ou n'est plus sélectionnable. La valeur
+     * couvre une trêve estivale longue (Coupe du monde comprise) sans
+     * écarter tout l'effectif au premier match de la saison suivante.
+     */
+    private const PLAYER_ACTIVE_DAYS = 120;
+
+    /**
      * Historique individuel réel (compositions, titularisations, minutes,
-     * buts, tirs, cartons) sur les 20 dernières rencontres de chaque équipe.
+     * buts, tirs, cartons) sur les 20 dernières rencontres de chaque équipe,
+     * limité aux apparitions des 365 derniers jours.
      *
      * Un joueur n'est transmis qu'à partir de 5 matchs avec un temps de jeu
      * connu ; les taux sont calculés par 90 minutes réellement jouées. La
      * titularisation n'est marquée confirmée que si une composition officielle
-     * existe pour cette rencontre.
+     * existe pour cette rencontre. Un joueur sans apparition récente n'est
+     * pas transmis : le moteur ne publie jamais de marché sur un historique
+     * qui ne décrit plus l'effectif actuel.
      *
      * @return array<int, array<string, mixed>>
      */
     private function playerContext(FootballMatch $match): array
     {
+        $historyStart = $match->match_date_utc->copy()->subDays(self::PLAYER_HISTORY_DAYS);
+        $activeStart = $match->match_date_utc->copy()->subDays(self::PLAYER_ACTIVE_DAYS);
+
         $rows = DB::table('player_match_stats as p')
             ->join('matches as m', 'm.id', '=', 'p.match_id')
             ->whereIn('p.team_id', [$match->home_team_id, $match->away_team_id])
             ->where('m.status', 'FINISHED')
             ->where('m.match_date_utc', '<', $match->match_date_utc)
+            ->where('m.match_date_utc', '>=', $historyStart)
             ->orderByDesc('m.match_date_utc')
-            ->limit(800)
             ->get([
                 'p.team_id', 'p.external_player_id', 'p.player_name', 'p.is_starter',
                 'p.minutes_played', 'p.goals', 'p.shots', 'p.shots_on_target',
-                'p.xg', 'p.yellow_cards', 'p.red_cards',
+                'p.xg', 'p.yellow_cards', 'p.red_cards', 'm.match_date_utc',
             ]);
 
         if ($rows->isEmpty()) {
@@ -624,6 +649,13 @@ class GeneratePredictionsCommand extends Command
             $byPlayer = $rows->where('team_id', $teamId)->groupBy('external_player_id');
 
             foreach ($byPlayer as $playerRows) {
+                // La collection est triée par date décroissante : la première
+                // ligne est la dernière apparition réelle du joueur.
+                $lastSeen = Carbon::parse($playerRows->first()->match_date_utc);
+                if ($lastSeen->lt($activeStart)) {
+                    continue;
+                }
+
                 $recent = $playerRows->take(20);
                 $played = $recent->filter(fn ($row) => $row->minutes_played !== null && (int) $row->minutes_played > 0);
                 $sample = $played->count();

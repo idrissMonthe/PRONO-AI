@@ -14,7 +14,16 @@
                 $pred = $match->officialPrediction;
                 $probabilities = $pred ? ['home' => (float) $pred->prob_home, 'draw' => (float) $pred->prob_draw, 'away' => (float) $pred->prob_away] : [];
                 $actual = $match->home_score === $match->away_score ? 'draw' : ($match->home_score > $match->away_score ? 'home' : 'away');
-                $correct = $pred && $probabilities ? array_keys($probabilities, max($probabilities), true)[0] === $actual : null;
+                // Le verdict vient du règlement du marché réellement publié.
+                // Juger toutes les rencontres avec l'argmax 1N2 affichait
+                // « correct » sur des sélections cartons/corners perdues.
+                $settled = $pred?->evaluations->firstWhere('market_key', 'published');
+                $correct = null;
+                if ($settled && in_array($settled->status, ['WON', 'LOST'], true)) {
+                    $correct = $settled->status === 'WON';
+                } elseif ($pred && in_array((string) $pred->published_market, ['1N2', '1x2'], true) && $probabilities) {
+                    $correct = collect($probabilities)->sortDesc()->keys()->first() === $actual;
+                }
             @endphp
             <a href="{{ route('matches.show', $match->id) }}" class="result-row result-row-card">
                 <span>{{ $match->match_date_utc->timezone('Africa/Douala')->format('d M Y · H:i') }}<small>{{ $match->league->name ?? 'Football' }}</small></span>
